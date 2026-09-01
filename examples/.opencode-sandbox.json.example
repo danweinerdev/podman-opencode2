@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "image": "opencode2:latest",
+  "build": {
+    "containerfile": "Containerfile",
+    "context": ".",
+    "args": {
+      "OPENCODE_VERSION": "1.18.25"
+    }
+  },
+  "workspace": ".",
+  "mounts": [],
+  "env": {
+    "pass": ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL"],
+    "set": {
+      "TZ": "UTC"
+    }
+  },
+  "model_router": {
+    "schema_version": 1,
+    "profiles": {
+      "reasoning": { "model": "anthropic/claude-opus-4-1", "variant": "high" }
+    },
+    "agents": {
+      "reasoner": "reasoning",
+      "code-implementer": "implementation"
+    }
+  },
+  "network": "slirp4netns",
+  "capabilities": ["SYS_PTRACE"],
+  "runtime_args": [
+    "--add-host=host.containers.internal:host-gateway",
+    "--pids-limit=2048",
+    "--ulimit=nofile=65536:65536"
+  ],
+  "command": ["opencode"]
+}
