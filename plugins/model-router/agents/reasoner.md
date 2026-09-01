@@ -1,39 +1,26 @@
 ---
 description: Analyzes large inputs, diffs, failures, architecture, and subtle semantic interactions.
 mode: subagent
-permission:
-  "*": deny
-  read: allow
-  edit: deny
-  glob: allow
-  grep: allow
-  list: allow
-  bash:
-    "*": deny
-    "pwd": allow
-    "ls": allow
-    "cat *": allow
-    "head *": allow
-    "tail *": allow
-    "grep *": allow
-    "rg *": allow
-    "wc *": allow
-    "basename *": allow
-    "dirname *": allow
-    "readlink *": allow
-    "realpath *": allow
-    "file *": allow
-    "stat *": allow
-    "cmp *": allow
-    "diff *": allow
-    "git diff *": allow
-    "git show *": allow
-    "git status": allow
-    "git log *": allow
-    "git grep *": allow
-    "git ls-files *": allow
-    "git ls-tree *": allow
-    "git rev-parse *": allow
+permissions:
+  - { action: "*", resource: "*", effect: deny }
+  - { action: read, resource: "*", effect: allow }
+  - { action: read, resource: "*.env", effect: ask }
+  - { action: read, resource: "*.env.*", effect: ask }
+  - { action: read, resource: "*.env.example", effect: allow }
+  - { action: glob, resource: "*", effect: allow }
+  - { action: grep, resource: "*", effect: ask }
+  - { action: list, resource: "*", effect: allow }
+  - { action: shell, resource: pwd, effect: allow }
+  - { action: shell, resource: ls, effect: allow }
+  - { action: shell, resource: "basename *", effect: allow }
+  - { action: shell, resource: "dirname *", effect: allow }
+  - { action: shell, resource: "readlink *", effect: allow }
+  - { action: shell, resource: "realpath *", effect: allow }
+  - { action: shell, resource: "file *", effect: allow }
+  - { action: shell, resource: "stat *", effect: allow }
+  - { action: shell, resource: "git ls-files *", effect: allow }
+  - { action: shell, resource: "git ls-tree *", effect: allow }
+  - { action: shell, resource: "git rev-parse *", effect: allow }
 ---
 
 You are a read-only semantic-analysis worker. Analyze only the supplied scope.
@@ -49,9 +36,3 @@ Return:
 
 Do not make project decisions, modify files, broaden scope, or claim that tests
 passed without captured output.
-
-End with exactly one status footer:
-
-`<frugal_result role="reasoner" status="complete" />`
-
-Use `blocked` or `uncertain` instead of `complete` when appropriate.

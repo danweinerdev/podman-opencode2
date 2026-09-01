@@ -35,11 +35,10 @@ function makeDraft(agents) {
         defaults.push(id)
       },
       update: (id, fn) => {
-        const item = map.get(id)
-        if (item) {
-          fn(item)
-          map.set(id, item)
-        }
+        const item = map.get(id) ?? agentInfo(id)
+        fn(item)
+        item.id = id
+        map.set(id, item)
       },
       remove: (id) => {
         map.delete(id)
@@ -95,6 +94,83 @@ test("default export is the v2/promise { id, setup } shape", () => {
   assert.equal("tui" in defaultExport, false)
 })
 
+test("container config registers the router through the native v2 loader", async () => {
+  const config = JSON.parse(await readFile(resolve(ROOT, "..", "..", "container-config.json"), "utf8"))
+  assert.equal(config.$schema, "./container-config.schema.json")
+  assert.equal("plugin" in config, false, "singular plugin selects the legacy v1 loader")
+  assert.equal("small_model" in config, false)
+  assert.equal("subagent_depth" in config, false)
+  assert.equal(Array.isArray(config.skills), true)
+  assert.equal(config.skills.includes("/opt/opencode/plugins/model-router/skills"), true)
+  assert.equal(config.mcp.servers["code-graph"].disabled, false)
+  assert.equal(config.mcp.servers.debug.disabled, false)
+  assert.equal(Array.isArray(config.permissions), true)
+  assert.equal(Array.isArray(config.plugins), true)
+  const entry = config.plugins.find(
+    (item) => item?.package === "file:///opt/opencode/plugins/model-router/index.js",
+  )
+  assert.ok(entry, "native v2 model-router entry is present")
+  assert.equal(typeof entry.options, "object")
+  assert.equal(entry.options.schema_version, 1)
+  assert.deepEqual(Object.keys(entry.options.agents).sort(), [...BAKED_AGENTS].sort())
+})
+
+test("container keeps policy assets root-owned and installs only native agents", async () => {
+  const source = await readFile(resolve(ROOT, "..", "..", "Containerfile"), "utf8")
+  assert.doesNotMatch(source, /opencode-agents|chown -R[^\n]*\/opt\/opencode\/config/)
+  assert.doesNotMatch(source, /chmod 1777 \/opt\/opencode\/config\/opencode/)
+  assert.match(source, /chmod 0755 \/opt\/opencode\/config\/opencode/)
+  assert.doesNotMatch(source, /service\.json/)
+  assert.match(source, /COPY plugins\/model-router\/agents\/\*\.md \/opt\/opencode\/config\/opencode\/agent\//)
+  assert.match(source, /CMD \["opencode2", "--standalone"\]/)
+})
+
+test("baked workers use native v2 permissions and subagent terminology", async () => {
+  for (const agent of BAKED_AGENTS) {
+    const source = await readFile(resolve(ROOT, "agents", `${agent}.md`), "utf8")
+    assert.match(source, /^permissions:/m, `${agent} must use the v2 permissions field`)
+    assert.doesNotMatch(source, /^permission:/m, `${agent} must not use the v1 permission field`)
+    assert.doesNotMatch(source, /<frugal_result\b/, `${agent} must not require an unused result footer`)
+    if (agent !== "orchestrator") {
+      const broadRead = source.indexOf('- { action: read, resource: "*", effect: allow }')
+      const envAsk = source.indexOf('- { action: read, resource: "*.env", effect: ask }')
+      const envVariantAsk = source.indexOf('- { action: read, resource: "*.env.*", effect: ask }')
+      const envExampleAllow = source.indexOf('- { action: read, resource: "*.env.example", effect: allow }')
+      assert.ok(broadRead >= 0, `${agent} has a broad read rule`)
+      assert.ok(envAsk > broadRead, `${agent} restores the .env prompt after broad read`)
+      assert.ok(envVariantAsk > envAsk, `${agent} protects .env variants`)
+      assert.ok(envExampleAllow > envVariantAsk, `${agent} allows example files last`)
+      assert.match(
+        source,
+        /action: grep, resource: "\*", effect: ask/,
+        `${agent} requires approval for grep because it can return protected file contents`,
+      )
+      assert.doesNotMatch(
+        source,
+        /action: grep, resource: "\*", effect: allow/,
+        `${agent} must not bypass protected reads through the grep tool`,
+      )
+      assert.doesNotMatch(
+        source,
+        /action: shell, resource: "(?:cat|head|tail|grep|rg|wc|cmp|diff|git diff|git show|git log|git grep) \*", effect: allow/,
+        `${agent} must not bypass protected reads through shell commands`,
+      )
+      assert.doesNotMatch(
+        source,
+        /action: shell, resource: "git status", effect: allow/,
+        `${agent} must not run repository-configured hooks without approval`,
+      )
+    }
+  }
+
+  const orchestrator = await readFile(resolve(ROOT, "agents", "orchestrator.md"), "utf8")
+  assert.match(orchestrator, /`subagent` tool with an `agent`/)
+  assert.doesNotMatch(orchestrator, /`task` tool|`subagent_type`/)
+  assert.match(orchestrator, /\| `implement_task`\s+\| `implementer`/)
+  assert.match(orchestrator, /\| `review_quality`\s+\| `review-quality`/)
+  assert.doesNotMatch(orchestrator, /code-implementer|quality-scanner|drift-detector/)
+})
+
 test("source does not contain legacy v1 hook or dispatch markers", async () => {
   const source = await readFile(resolve(ROOT, "index.js"), "utf8")
   const forbidden = [
@@ -139,8 +215,6 @@ test("assigns models across multiple providers (OpenAI + DeepSeek)", () => {
       "bulk-researcher": "extraction",
       "bounded-editor": "reasoning",
       "review-blind-spots": "review",
-      "code-implementer": "implementation",
-      "blind-spot-finder": "review",
     },
     default_agent: "orchestrator",
   }
@@ -153,8 +227,6 @@ test("assigns models across multiple providers (OpenAI + DeepSeek)", () => {
       "bulk-researcher",
       "bounded-editor",
       "review-blind-spots",
-      "code-implementer",
-      "blind-spot-finder",
     ].map((id) => agentInfo(id)),
   )
 
@@ -167,8 +239,6 @@ test("assigns models across multiple providers (OpenAI + DeepSeek)", () => {
   assert.deepEqual(agent("bulk-researcher").model, { providerID: "openai", id: "gpt-5.6-luna" })
   assert.deepEqual(agent("bounded-editor").model, { providerID: "deepseek", id: "deepseek-v4-pro" })
   assert.deepEqual(agent("review-blind-spots").model, { providerID: "deepseek", id: "deepseek-v4-flash" })
-  assert.deepEqual(agent("code-implementer").model, { providerID: "deepseek", id: "deepseek-v4-pro" })
-  assert.deepEqual(agent("blind-spot-finder").model, { providerID: "deepseek", id: "deepseek-v4-flash" })
 })
 
 test("assigns variant and merges request headers/body, leaving unconfigured request empty", () => {
@@ -233,6 +303,23 @@ test("merges request fields into a pre-populated agent request without clobberin
   })
 })
 
+test("initializes a missing agent request object before applying request fields", () => {
+  const { draft, agent } = makeDraft([agentInfo("orchestrator", { request: undefined })])
+  applyAgentConfig(draft, {
+    schema_version: 1,
+    profiles: {
+      orchestration: {
+        model: "openai/gpt-5.6-sol",
+        request: { headers: { "x-routing": "primary" } },
+      },
+    },
+    agents: { orchestrator: "orchestration" },
+  })
+  assert.deepEqual(agent("orchestrator").request, {
+    headers: { "x-routing": "primary" },
+  })
+})
+
 test("sets the default agent via draft.default", () => {
   const { draft, defaults } = makeDraft([...BAKED_AGENTS].map((id) => agentInfo(id)))
   applyAgentConfig(draft, fullConfig())
@@ -241,9 +328,7 @@ test("sets the default agent via draft.default", () => {
 
 test("leaves unmapped agents untouched", () => {
   const { draft, agent } = makeDraft([
-    agentInfo("orchestrator"),
-    agentInfo("reasoner"),
-    agentInfo("extractor"),
+    ...BAKED_AGENTS.map((id) => agentInfo(id)),
     agentInfo("some-unmapped-agent"),
     agentInfo("another-unmapped-agent"),
   ])
@@ -251,6 +336,21 @@ test("leaves unmapped agents untouched", () => {
   // No mapping in DEFAULT_CONFIG -> these agents keep no model.
   assert.equal(agent("some-unmapped-agent").model, undefined)
   assert.equal(agent("another-unmapped-agent").model, undefined)
+})
+
+test("rejects missing agent definitions before mutating the draft", () => {
+  const { draft, agent, defaults } = makeDraft([agentInfo("reasoner")])
+  const config = {
+    schema_version: 1,
+    profiles: { reasoning: { model: "deepseek/deepseek-v4-pro", variant: "high" } },
+    agents: { reasoner: "reasoning", ghost: "reasoning" },
+    default_agent: "ghost",
+  }
+
+  assert.throws(() => applyAgentConfig(draft, config), /agent definition\(s\) not found: ghost/)
+  assert.equal(agent("reasoner").model, undefined)
+  assert.equal(agent("ghost"), undefined)
+  assert.deepEqual(defaults, [])
 })
 
 test("routes arbitrary valid agent ids, not a closed role list", () => {
@@ -267,12 +367,12 @@ test("routes arbitrary valid agent ids, not a closed role list", () => {
     },
     default_agent: "orchestrator",
   }
-  const { draft, agent } = makeDraft(
-    ["orchestrator", "my-custom-agent", "another.agent_x"].map((id) => agentInfo(id)),
-  )
-
+  const { draft, agent } = makeDraft([
+    agentInfo("orchestrator"),
+    agentInfo("my-custom-agent"),
+    agentInfo("another.agent_x"),
+  ])
   applyAgentConfig(draft, config)
-
   assert.deepEqual(agent("my-custom-agent").model, { providerID: "deepseek", id: "deepseek-v4-pro" })
   assert.deepEqual(agent("another.agent_x").model, { providerID: "deepseek", id: "deepseek-v4-pro" })
 })
@@ -289,9 +389,9 @@ test("accepts a config with no default_agent (optional) and skips draft.default"
 
 test("rejects a default_agent with no agent mapping", () => {
   const config = fullConfig()
-  config.default_agent = "quality-scanner"
-  delete config.agents["quality-scanner"]
-  assert.throws(() => validateConfig(config), /default_agent "quality-scanner" has no agent mapping/)
+  config.default_agent = "reasoner"
+  delete config.agents.reasoner
+  assert.throws(() => validateConfig(config), /default_agent "reasoner" has no agent mapping/)
 })
 
 test("rejects a default_agent whose agent references a missing profile", () => {
@@ -365,7 +465,7 @@ test("DEFAULT_CONFIG is self-consistent and covers every baked agent", () => {
   assert.ok(providers.has("deepseek"))
 
   // Every baked agent resolves to a defined profile.
-  assert.equal(BAKED_AGENTS.length, 18)
+  assert.equal(BAKED_AGENTS.length, 10)
   for (const id of BAKED_AGENTS) {
     const profileName = DEFAULT_CONFIG.agents[id]
     assert.equal(typeof profileName, "string", `${id} has a profile mapping`)
@@ -382,7 +482,6 @@ test("mergeConfig shallow-merges partial profiles and agents over defaults", () 
     },
     agents: {
       reasoner: "reasoning",
-      "my-agent": "custom",
     },
     default_agent: "reasoner",
   }
@@ -395,7 +494,6 @@ test("mergeConfig shallow-merges partial profiles and agents over defaults", () 
   assert.deepEqual(merged.profiles.orchestration, { model: "openai/gpt-5.6-sol" })
   // Agents merged by id; base entries survive.
   assert.equal(merged.agents.reasoner, "reasoning")
-  assert.equal(merged.agents["my-agent"], "custom")
   assert.equal(merged.agents.orchestrator, "orchestration")
   // default_agent overridden.
   assert.equal(merged.default_agent, "reasoner")
@@ -433,7 +531,7 @@ test("validateOverride rejects malformed model_router blocks", () => {
 })
 
 test("a merged override referencing a missing profile is rejected", () => {
-  const merged = mergeConfig(DEFAULT_CONFIG, { agents: { "my-agent": "does-not-exist" } })
+  const merged = mergeConfig(DEFAULT_CONFIG, { agents: { reasoner: "does-not-exist" } })
   assert.throws(() => validateConfig(merged), /references missing profile "does-not-exist"/)
 })
 
@@ -469,12 +567,17 @@ test("readModelRouterOverride throws on a non-object document", async (t) => {
 test("setup registers DEFAULT_CONFIG when there are no options and no env override", async () => {
   await withEnv("OPENCODE_MODEL_ROUTER_CONFIG", undefined, async () => {
     let transform = null
+    let reloads = 0
     const ctx = {
       options: undefined,
-      agent: { transform: async (fn) => (transform = fn) },
+      agent: {
+        transform: async (fn) => (transform = fn),
+        reload: async () => reloads++,
+      },
     }
     await defaultExport.setup(ctx)
     assert.equal(typeof transform, "function")
+    assert.equal(reloads, 1)
 
     const { draft, agent } = makeDraft([...BAKED_AGENTS].map((id) => agentInfo(id)))
     await transform(draft)
@@ -492,7 +595,6 @@ test("setup merges a project override from OPENCODE_MODEL_ROUTER_CONFIG over the
       },
       agents: {
         reasoner: "reasoning",
-        "project-agent": "reasoning",
       },
       default_agent: "reasoner",
     },
@@ -500,22 +602,23 @@ test("setup merges a project override from OPENCODE_MODEL_ROUTER_CONFIG over the
 
   await withEnv("OPENCODE_MODEL_ROUTER_CONFIG", path, async () => {
     let transform = null
+    let reloads = 0
     const ctx = {
       options: undefined,
-      agent: { transform: async (fn) => (transform = fn) },
+      agent: {
+        transform: async (fn) => (transform = fn),
+        reload: async () => reloads++,
+      },
     }
     await defaultExport.setup(ctx)
     assert.equal(typeof transform, "function")
+    assert.equal(reloads, 1)
 
-    const { draft, agent, defaults } = makeDraft(
-      [...BAKED_AGENTS, "project-agent"].map((id) => agentInfo(id)),
-    )
+    const { draft, agent, defaults } = makeDraft(BAKED_AGENTS.map((id) => agentInfo(id)))
     await transform(draft)
 
     // Overridden profile wins.
     assert.deepEqual(agent("reasoner").model, { providerID: "anthropic", id: "claude-opus-4-1", variant: "high" })
-    // Arbitrary project agent routed to the overridden profile.
-    assert.deepEqual(agent("project-agent").model, { providerID: "anthropic", id: "claude-opus-4-1", variant: "high" })
     // Untouched defaults survive.
     assert.deepEqual(agent("orchestrator").model, { providerID: "openai", id: "gpt-5.6-sol" })
     // Overridden default_agent applied.
@@ -528,7 +631,7 @@ test("setup propagates a malformed override as a thrown error", async (t) => {
     model_router: { schema_version: 2 },
   })
   await withEnv("OPENCODE_MODEL_ROUTER_CONFIG", path, async () => {
-    const ctx = { options: undefined, agent: { transform: async () => {} } }
+    const ctx = { options: undefined, agent: { transform: async () => {}, reload: async () => {} } }
     await assert.rejects(defaultExport.setup(ctx), /unsupported schema_version/)
   })
 })

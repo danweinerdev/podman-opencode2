@@ -1,4 +1,4 @@
-# Containerfile — OpenCode2 container: a Fedora 44 runtime for the OpenCode CLI
+# Containerfile — OpenCode2 container: a Fedora 44 runtime for the OpenCode2 CLI
 # with the code-graph / debug MCP servers, the SDD planning CLI, and a native
 # v2 model-router plugin baked in.
 #
@@ -10,9 +10,11 @@
 #   /opt/mcp/bin/<code-graph-mcp|debug-mcp|sdd>   MCP + SDD binaries (on PATH)
 #   /opt/opencode/plugins/<code-graph|debug|sdd>  OpenCode skills/plugin assets
 #   /opt/opencode/plugins/model-router            native v2 model-router plugin
+#   /opt/opencode/sandbox/                         launcher + config templates
 #   /opt/opencode/config/opencode/agent/*.md      baked agent definitions
 #   /opt/opencode/config/opencode/command/*.md    baked slash commands
 #   /etc/opencode/container-config.json           baked OPENCODE_CONFIG
+#   /etc/opencode/container-config.schema.json    pinned preview schema
 #
 # Writable OpenCode data/state/cache land under the image user's home
 # (~/.local/share|state, ~/.cache); no host state is assumed.
@@ -26,10 +28,8 @@ ENV GOFLAGS=-buildvcs=false
 
 # Clone the pinned sdd-planner, build the single `sdd` binary, and stage the
 # portable .opencode-plugin tree (plugin.json + skills/ + shared/) alongside it.
-# The eight source agents (agents/*.md) are also staged twice: the original
-# copies are retained under the baked plugin tree, and sanitized OpenCode
-# copies (legacy shorthand `model:` lines removed, `mode: subagent` added) are
-# staged for the global agent directory.
+# Its collaboration prompts are rendered by the skills into the restricted
+# native workers, so the separate Claude-oriented agent catalog is not copied.
 ARG SDD_PLANNER_REF=9c1fbdaba6e650df3fa937dfd2e57f8bb76675ef
 RUN set -eux; \
     git clone --filter=blob:none --no-tags \
@@ -39,16 +39,8 @@ RUN set -eux; \
     git checkout FETCH_HEAD; \
     mkdir -p /opt/build/bin; \
     go build -o /opt/build/bin/sdd ./cmd/sdd; \
-    mkdir -p /opt/build/sdd-plugin /opt/build/opencode-agents; \
-    cp -a .opencode-plugin /opt/build/sdd-plugin/; \
-    cp -a agents /opt/build/sdd-plugin/.opencode-plugin/agents; \
-    for f in agents/*.md; do \
-        name="$(basename "$f")"; \
-        sed -e '/^model:[[:space:]]*\(opus\|sonnet\|haiku\)[[:space:]]*$/d' \
-            -e '/^tools:[[:space:]]*$/,/^---[[:space:]]*$/{ /^---[[:space:]]*$/!d; }' \
-            -e '/^name:[[:space:]]/a mode: subagent' \
-            "$f" > "/opt/build/opencode-agents/${name}"; \
-    done
+    mkdir -p /opt/build/sdd-plugin; \
+    cp -a .opencode-plugin /opt/build/sdd-plugin/
 
 # ---------------------------------------------------------------------------
 # Stage 2: builder-only Rust toolchains for the two MCP servers
@@ -116,9 +108,9 @@ FROM docker.io/library/fedora:44
 ARG USER_UID=1000
 ARG USER_GID=1000
 ARG USERNAME=dev
-ARG OPENCODE_VERSION=1.18.25
+ARG OPENCODE2_VERSION=0.0.0-beta-17823
 
-# Runtime + debug utilities. Node 24 powers the OpenCode npm package and the
+# Runtime + debug utilities. Node 24 powers the OpenCode2 CLI npm package and the
 # model-router plugin; lldb ships the lldb-dap provider the debug MCP server
 # spawns. No Go/Rust/Cargo toolchain is installed here.
 RUN dnf install -y --setopt=install_weak_deps=False \
@@ -132,9 +124,16 @@ RUN dnf install -y --setopt=install_weak_deps=False \
         openssl-libs zlib \
     && dnf clean all
 
-# OpenCode CLI, pinned via the npm package (which also bundles the
-# @opencode-ai/plugin module the model-router plugin imports).
-RUN npm install -g opencode-ai@"${OPENCODE_VERSION}"
+# OpenCode2 CLI, pinned via the @opencode-ai/cli npm package. Its postinstall
+# script materializes the platform binary from the platform-specific optional
+# dependency, so install with scripts disabled and run postinstall.mjs
+# explicitly — then verify the binary reports the pinned version and that no
+# legacy `opencode` executable exists.
+RUN set -eux; \
+    npm install -g @opencode-ai/cli@"${OPENCODE2_VERSION}" --ignore-scripts; \
+    node "$(npm root -g)/@opencode-ai/cli/postinstall.mjs"; \
+    [ "$(opencode2 --version)" = "opencode2 v${OPENCODE2_VERSION}" ]; \
+    ! command -v opencode >/dev/null 2>&1
 
 # Create an unprivileged user whose UID/GID match the host caller so
 # bind-mounted workspace files keep correct ownership under --userns=keep-id.
@@ -165,24 +164,36 @@ COPY plugins/model-router /opt/opencode/plugins/model-router
 RUN cd /opt/opencode/plugins/model-router \
     && npm install --omit=dev --ignore-scripts --no-audit --no-fund
 
+# Host-side sandbox templates are readable by the baked setup skill. They are
+# copied into a mounted workspace for the user to run after leaving the image.
+RUN mkdir -p /opt/opencode/sandbox
+COPY examples/opencode-container.sh /opt/opencode/sandbox/opencode-container.sh
+COPY examples/.opencode-sandbox.json.example /opt/opencode/sandbox/.opencode-sandbox.json.example
+RUN chmod 0755 /opt/opencode/sandbox/opencode-container.sh \
+    && chmod 0644 /opt/opencode/sandbox/.opencode-sandbox.json.example
+
 # --- Baked agents + commands under XDG_CONFIG_HOME ---------------------------
 # Agent markdown definitions carry their own prompts and permissions; the
-# model-router plugin assigns each a model. 18 definitions total: the 10 native
-# v2 workers (orchestrator, reasoner, extractor, bulk-researcher,
-# bounded-editor, implementer, four review lanes) plus the 8 sdd-planner agents
-# (researcher, plan-reviewer, code-implementer, quality-scanner, spec-reviewer,
-# spec-compliance, drift-detector, blind-spot-finder), sanitized in the
-# sdd-builder stage.
+# model-router plugin assigns each a model. The SDD skills render their bundled
+# collaboration prompts into these native workers instead of installing a
+# second, less-restricted agent catalog.
 RUN mkdir -p /opt/opencode/config/opencode/agent /opt/opencode/config/opencode/command
 COPY plugins/model-router/agents/*.md /opt/opencode/config/opencode/agent/
-COPY --from=sdd-builder /opt/build/opencode-agents/*.md /opt/opencode/config/opencode/agent/
 
 # code-graph slash commands become OpenCode commands.
 COPY --from=mcp-builder /opt/build/code-graph-plugin/opencode-plugin/commands/*.md /opt/opencode/config/opencode/command/
 
 # --- Baked OPENCODE_CONFIG ---------------------------------------------------
 COPY container-config.json /etc/opencode/container-config.json
-RUN chmod 0644 /etc/opencode/container-config.json
+COPY container-config.schema.json /etc/opencode/container-config.schema.json
+RUN chmod 0644 /etc/opencode/container-config.json /etc/opencode/container-config.schema.json
+
+# Standalone mode keeps its private server on stdio and writes no service
+# metadata beside the global policy assets, so the complete XDG config tree can
+# remain root-owned and non-writable at runtime.
+RUN chmod 0755 /opt/opencode/config/opencode \
+        /opt/opencode/config/opencode/agent \
+        /opt/opencode/config/opencode/command
 
 # Encapsulation: the baked config is authoritative; project config and external
 # (host) skill scans are disabled so the container never reaches for host
@@ -197,4 +208,4 @@ ENV OPENCODE_CONFIG=/etc/opencode/container-config.json \
 
 USER ${USERNAME}
 WORKDIR /home/${USERNAME}
-CMD ["opencode"]
+CMD ["opencode2", "--standalone"]

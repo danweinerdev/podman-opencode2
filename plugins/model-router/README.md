@@ -3,7 +3,7 @@
 Native v2 model-routing plugin for **OpenCode2**. It is built exclusively on the
 `@opencode-ai/plugin/v2/promise` API and uses the `ctx.agent.transform` hook to
 assign each agent its own native `AgentV2Info.model` (`ModelRef`) and optional
-request headers/body, plus the default agent. The native v2 `task` tool then
+request headers/body, plus the default agent. The native v2 `subagent` tool then
 runs each agent on its assigned model directly.
 
 There is **no** v1 hook function, no `tool.execute.before/after` interception,
@@ -18,7 +18,10 @@ export default { id, setup }   // @opencode-ai/plugin/v2/promise `define(...)`
 
 The plugin's config is assembled in two steps:
 
-1. **Defaults** come from the plugin tuple `options` (see `container-config.json`).
+1. **Defaults** come from the native v2 plugin entry's `options` (see
+   `container-config.json`). The entry uses the v2 `plugins` array with
+   `{ "package": "...", "options": { ... } }`; the singular `plugin` key is
+   the legacy v1 loader and must not be used for this module.
    When no options are supplied, `DEFAULT_CONFIG` is the fallback.
 2. **Project overrides** come from the sandbox JSON mounted by the launcher at
    `/run/opencode/sandbox.json`. The plugin reads the path from the
@@ -48,9 +51,8 @@ A **full** config (the plugin defaults, or the merged result):
 - `schema_version` must be `1`.
 - `profiles` is a non-empty map of profile name → model selection. `model` is
   `provider/model-id`; `variant` and `request` are optional.
-- `agents` maps agent ids to profiles. Routing is by **arbitrary valid agent
-  id** — there is no closed role list. Any id that is a valid identifier and
-  resolves to a defined profile is accepted.
+- `agents` maps arbitrary valid agent ids to profiles, allowing derived images
+  to route additional agent definitions.
 - `default_agent` is **optional**; when present it must name an agent that maps
   to a defined profile.
 
@@ -69,10 +71,10 @@ corresponding provider environment variables (`OPENAI_API_KEY`,
 
 ```sh
 npm install   # generate the lockfile if needed
-npm test      # node:test — 27 cases, including a mock AgentDraft
+npm test      # node:test, including a mock AgentDraft
 ```
 
 The tests prove multi-provider assignment, variant/request merge and defaults,
-arbitrary agent-id routing, shallow-merge project overrides, malformed
-override/path handling, setup registering a merged config, bad-config
+definition-existence validation, constrained shallow-merge project overrides,
+malformed override/path handling, setup registering a merged config, bad-config
 rejection, and that the source contains no legacy v1 hook/dispatch markers.

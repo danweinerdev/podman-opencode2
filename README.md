@@ -1,7 +1,7 @@
 # OpenCode2 Container
 
-A Fedora 44 container that runs the **OpenCode 1.18.25** CLI with a native
-**v2 model router**, the **code-graph** and **debug** MCP servers, and the
+A Fedora 44 container that runs the **OpenCode2 0.0.0-beta-17823** preview CLI
+with a native **v2 model router**, the **code-graph** and **debug** MCP servers, and the
 **SDD planner** CLI baked in. Every Go/Rust/Cargo toolchain lives in throwaway
 builder stages, so the runtime image ships no dev toolchain.
 
@@ -12,14 +12,20 @@ builder stages, so the runtime image ships no dev toolchain.
 | `/opt/mcp/bin/` | `code-graph-mcp`, `debug-mcp`, `sdd` (all on `PATH`) |
 | `/opt/opencode/plugins/code-graph/` | code-graph OpenCode plugin (skills + commands) |
 | `/opt/opencode/plugins/debug/` | debug-mcp OpenCode skills |
-| `/opt/opencode/plugins/sdd/` | SDD planner OpenCode skills + shared resources + original agents |
+| `/opt/opencode/plugins/sdd/` | SDD planner OpenCode skills + shared resources |
 | `/opt/opencode/plugins/model-router/` | native v2 model-router plugin |
-| `/opt/opencode/config/opencode/agent/*.md` | 18 baked agent definitions |
+| `/opt/opencode/sandbox/` | host launcher and sandbox-config templates |
+| `/opt/opencode/config/opencode/agent/*.md` | 10 baked native v2 agent definitions |
 | `/opt/opencode/config/opencode/command/*.md` | baked code-graph slash commands |
 | `/etc/opencode/container-config.json` | baked `OPENCODE_CONFIG` |
+| `/etc/opencode/container-config.schema.json` | schema matching the pinned preview config shape |
 
 OpenCode data/state/cache (`~/.local/share`, `~/.local/state`, `~/.cache`)
-are writable under the image user's home. Nothing depends on host state.
+are writable under the image user's home. The XDG `opencode/` policy directory,
+its baked agent/command subdirectories, and the authoritative config under
+`/etc` remain root-owned. The default standalone process uses a private stdio
+server and creates no background-service metadata there. Nothing depends on
+host state.
 
 ## Build
 
@@ -27,20 +33,22 @@ The `Containerfile` is a multi-stage Fedora 44 build:
 
 1. **`sdd-builder`** — `golang:1.26.5-bookworm`; clones
    `danweinerdev/claude-sdd-planner` at `9c1fbdaba6e650df3fa937dfd2e57f8bb76675ef`,
-   builds `sdd`, stages `.opencode-plugin`, and sanitizes the eight source
-   `agents/*.md` into OpenCode agent definitions (legacy shorthand `model:`
-   lines removed, `mode: subagent` added), retaining the originals under the
-   plugin tree.
+   builds `sdd`, and stages its generated portable `.opencode-plugin` skills
+   and shared resources. SDD's generated collaboration prompts are dispatched
+   through this image's restricted native workers; no parallel agent catalog is
+   installed.
 2. **`mcp-builder`** — `fedora:44` with `rustup` (`stable` + `1.97.1`); clones
    `danweinerdev/code-graph-mcp` at `45d53cdd8ec17776ae7a6156e5be5cdb82c4ad4f`
    and `danweinerdev/lldb-debug-mcp` at `a032c18f2f52c9f2b5a3c43f22917cef9e6264dc`,
    builds both servers, and stages their OpenCode skill/plugin assets.
-3. **final** — `fedora:44`; installs OpenCode `1.18.25` (npm), Node 24,
-   `lldb` (the `lldb-dap` provider), and runtime/debug utilities; copies the
-   binaries, plugin assets, agent/command definitions, and baked config.
+3. **final** — `fedora:44`; installs `@opencode-ai/cli` at
+   `0.0.0-beta-17823`, explicitly materializes its platform `opencode2` binary,
+   verifies that no legacy `opencode` executable exists, and adds Node 24,
+   `lldb` (the `lldb-dap` provider), runtime/debug utilities, binaries, plugin
+   assets, agent/command definitions, and baked config.
 
 The base build accepts `USER_UID`, `USER_GID`, `USERNAME` (and
-`OPENCODE_VERSION`) build args so the in-image user matches the host caller
+`OPENCODE2_VERSION`) build args so the in-image user matches the host caller
 under `--userns=keep-id`. The launcher passes the host values automatically:
 
 ```sh
@@ -70,15 +78,16 @@ the base image and survive `FROM`.
 
 The baked `/etc/opencode/container-config.json` is loaded via
 `OPENCODE_CONFIG`. It registers the `code-graph` and `debug` MCP servers, the
-code-graph/debug/sdd skill paths, and the local model-router plugin, and sets
-`share: "disabled"`, `autoupdate: false`, and `subagent_depth: 2`. Agents and
+code-graph/debug/sdd/model-router skill paths, and the local model-router plugin,
+and sets `share: "disabled"` and `autoupdate: false`. Agents and
 commands are baked under `XDG_CONFIG_HOME=/opt/opencode/config/opencode`.
 
 The image sets `OPENCODE_DISABLE_PROJECT_CONFIG=1` and
 `OPENCODE_DISABLE_EXTERNAL_SKILLS=1` /
 `OPENCODE_DISABLE_CLAUDE_CODE_SKILLS=1`, so a project `opencode.json` and the
 host `~/.claude` / `~/.agents` skill scans are never consulted. The default
-`CMD` is `opencode`.
+`CMD` is `opencode2 --standalone`, which keeps the private server scoped to the
+foreground CLI instead of creating persistent background-service metadata.
 
 ## Model-router plugin (native v2)
 
@@ -86,12 +95,13 @@ host `~/.claude` / `~/.agents` skill scans are never consulted. The default
 `@opencode-ai/plugin/v2/promise` (pinned `1.18.25`). It default-exports
 `{ id, setup }` and uses `ctx.agent.transform` to assign each agent a native
 `AgentV2Info.model` (`ModelRef`) and optional request `headers`/`body` per
-agent id, plus `draft.default(...)`. Routing is by arbitrary valid agent id,
-not a closed role list.
+agent id, plus `draft.default(...)`. Routing accepts arbitrary valid agent ids
+when a matching definition is already present, so derived images can add and
+route their own agent definitions without mappings synthesizing new agents.
 
 Config is assembled from two sources:
 
-1. **Defaults** — the plugin tuple options baked into
+1. **Defaults** — the native v2 plugin-entry options baked into
    `container-config.json` (`{ schema_version, profiles, agents,
    default_agent }`); baked profiles demonstrate OpenAI + DeepSeek routing and
    need only `OPENAI_API_KEY` / `DEEPSEEK_API_KEY`.
@@ -107,7 +117,7 @@ Config is assembled from two sources:
 - No v1 hook function, no `tool.execute.before/after` interception, and no
   `tool.definition`/description rewriting.
 - No SDK child-session dispatch and no placeholder/return-ok relay.
-- The native v2 `task` tool runs each subagent on its **selected agent's
+- The native v2 `subagent` tool runs each worker on its **selected agent's
   model** directly; the router only assigns models, it does not mediate the
   call.
 - Consequently there are no v1 runtime guards (webfetch circuit breaker,
@@ -117,31 +127,36 @@ Config is assembled from two sources:
 
 ## Agent definitions
 
-Baked under `/opt/opencode/config/opencode/agent/` (18 total):
+Baked under `/opt/opencode/config/opencode/agent/` (10 total):
 
 - **Native v2 workers** — `orchestrator` (primary), `reasoner`, `extractor`,
   `bulk-researcher`, `bounded-editor`, `implementer`, and the four review lanes
   `review-plan-drift`, `review-quality`, `review-spec-compliance`,
   `review-blind-spots`.
-- **SDD planner agents** — `researcher`, `plan-reviewer`, `code-implementer`,
-  `quality-scanner`, `spec-reviewer`, `spec-compliance`, `drift-detector`,
-  `blind-spot-finder`. These are sourced from the pinned
-  `claude-sdd-planner` `agents/*.md` and sanitized for OpenCode (legacy
-  shorthand `model:` lines removed, `mode: subagent` added) in the
-  `sdd-builder` stage; the original copies are also retained under
-  `/opt/opencode/plugins/sdd/agents/`.
 
 Each carries its own prompt and role-appropriate permissions; the model-router
-assigns each a model. The orchestrator prompt explains native v2 routing and
-maps the SDD stable dispatch descriptions (`implement_task`, `review_*`) to the
-correct `subagent_type`.
+assigns each a model. The native workers use V2 `permissions` rules and the V2
+`shell` / `subagent` action names. The orchestrator prompt explains native v2
+routing and maps the SDD stable dispatch descriptions (`implement_task`,
+`review_*`) to these restricted native workers. SDD skills render their bundled
+collaboration prompts into the dispatch instead of installing a parallel agent
+catalog with different permissions.
+
+## Sandbox setup skill
+
+The baked `opencode2-sandbox` skill configures this repository's host-side
+Podman launcher and `.opencode-sandbox.json`. Its source templates live under
+`/opt/opencode/sandbox/`; the baked config permits read-only access to that
+directory. The skill edits the mounted workspace, validates JSON and shell
+syntax, and tells the user to run the launcher from the host after leaving the
+container.
 
 ## Launcher (`examples/opencode-container.sh`)
 
 `PATH`-safe; requires `jq` and `podman`; always reads `$PWD/.opencode-sandbox.json`.
 
 ```sh
-./examples/opencode-container.sh                 # build if needed, run opencode
+./examples/opencode-container.sh                 # build if needed, run opencode2 --standalone
 ./examples/opencode-container.sh --rebuild       # force rebuild, then run
 ./examples/opencode-container.sh shell           # bash instead
 ./examples/opencode-container.sh -- <cmd...>     # arbitrary command
@@ -162,9 +177,13 @@ Behavior:
   `USERNAME` build args.
 - Auto-forwards only provider env vars that are **set** (the common provider
   list plus `AZURE_OPENAI_API_KEY`); rejects `HOME`/`PATH`/`XDG_*`/`OPENCODE_*`
-  as explicit env; never mounts host `opencode`/`.agents`/`.claude`/`.mcp`
-  state and rejects mount targets that shadow baked config/plugin paths.
-- Treats the config as trusted repository code, but never logs secret values.
+  as explicit env; never mounts host `opencode` state from the effective XDG
+  directories, or host `.agents`/`.claude`/`.mcp` state (including through an
+  ancestor mount), and rejects mount targets that overlap baked config/plugin
+  paths.
+- Forwarded host values use Podman's name-only `--env NAME` form so secrets are
+  not embedded in the launcher's process arguments. Treats the config as
+  trusted repository code, but never logs secret values.
 
 ### Sandbox config schema (schema_version 1)
 
@@ -175,7 +194,7 @@ Behavior:
   "build": {                                 // optional; enables local build
     "containerfile": "Containerfile",       // default "Containerfile"
     "context": ".",                          // default dirname(containerfile)
-    "args": { "OPENCODE_VERSION": "1.18.25" } // optional build args
+    "args": { "OPENCODE2_VERSION": "0.0.0-beta-17823" } // optional build args
   },
   "workspace": ".",                          // optional; default $PWD; mounted at /src
   "workdir": "app/",                         // optional; default "/src"; relative -> /src/app/
@@ -201,7 +220,7 @@ Behavior:
     "--pids-limit=2048",
     "--ulimit=nofile=65536:65536"
   ],
-  "command": ["opencode"]                    // optional; default ["opencode"]
+  "command": ["opencode2", "--standalone"]   // optional; this is also the launcher default
 }
 ```
 
@@ -211,9 +230,10 @@ accepts only `--add-host=`, `--pids-limit=`, and `--ulimit=` entries.
 
 The `model_router` block is a **partial** override: it shallow-merges its
 `profiles` and `agents` maps over the baked defaults (an entry replaces the
-same-named default; a new profile/agent may be introduced), and `default_agent`
-falls back to the baked value when omitted. It is applied by the model-router
-plugin via `OPENCODE_MODEL_ROUTER_CONFIG`.
+same-named default; new profiles and agent mappings may be introduced), and
+`default_agent` falls back to the baked value when omitted. A new mapping must
+correspond to an agent definition supplied by a derived image. The override is
+applied by the model-router plugin via `OPENCODE_MODEL_ROUTER_CONFIG`.
 
 ## Credentials and OAuth
 
@@ -230,17 +250,20 @@ set automatically.
 # model-router plugin
 cd plugins/model-router
 npm install        # generates the lockfile if needed
-npm test           # node:test — 27 cases incl. a mock AgentDraft
+npm test           # node:test, including a mock AgentDraft
 
 # shell + config syntax
 bash -n examples/opencode-container.sh
 shellcheck examples/opencode-container.sh   # if shellcheck is installed
+tests/launcher-env.test.sh
 jq empty container-config.json
+jq empty container-config.schema.json
 jq empty examples/.opencode-sandbox.json.example
+npx --yes ajv-cli@5 validate -s container-config.schema.json \
+  -d container-config.json --spec=draft2020
 ```
 
 The plugin tests cover multi-provider assignment, variant/request merge and
-defaults, arbitrary agent-id routing, shallow-merge project overrides,
-malformed override/path handling, setup registering a merged config,
-bad-config rejection, and an assertion that the source contains no legacy v1
-hook/dispatch markers.
+defaults, arbitrary agent routing, project overrides, malformed override/path
+handling, setup registering a merged config, bad-config rejection, and an
+assertion that the source contains no legacy v1 hook/dispatch markers.

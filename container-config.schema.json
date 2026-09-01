@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Pinned OpenCode2 container configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["model", "default_agent", "agents", "skills", "mcp", "permissions", "plugins"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "share": { "enum": ["manual", "auto", "disabled"] },
+    "autoupdate": { "type": "boolean" },
+    "model": { "$ref": "#/$defs/model" },
+    "default_agent": { "type": "string", "minLength": 1 },
+    "agents": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/agent" }
+    },
+    "skills": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
+    "mcp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["servers"],
+      "properties": {
+        "servers": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/mcpServer" }
+        }
+      }
+    },
+    "permissions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/permission" }
+    },
+    "plugins": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/plugin" }
+    }
+  },
+  "$defs": {
+    "model": {
+      "type": "string",
+      "pattern": "^[^/]+/[^/]+$"
+    },
+    "agent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "model": { "$ref": "#/$defs/model" }
+      }
+    },
+    "mcpServer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "command"],
+      "properties": {
+        "type": { "const": "local" },
+        "command": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string" }
+        },
+        "disabled": { "type": "boolean" }
+      }
+    },
+    "permission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "resource", "effect"],
+      "properties": {
+        "action": { "type": "string", "minLength": 1 },
+        "resource": { "type": "string" },
+        "effect": { "enum": ["allow", "deny", "ask"] }
+      }
+    },
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model"],
+      "properties": {
+        "model": { "$ref": "#/$defs/model" },
+        "variant": { "type": "string", "minLength": 1 },
+        "request": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "headers": { "type": "object" },
+            "body": { "type": "object" }
+          }
+        }
+      }
+    },
+    "routerConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "profiles", "agents"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "profiles": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": { "$ref": "#/$defs/profile" }
+        },
+        "agents": {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "default_agent": { "type": "string", "minLength": 1 }
+      }
+    },
+    "plugin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["package"],
+      "properties": {
+        "package": { "type": "string", "minLength": 1 },
+        "options": { "$ref": "#/$defs/routerConfig" }
+      }
+    }
+  }
+}

@@ -5,7 +5,7 @@
  * `@opencode-ai/plugin/v2/promise` API (`default export { id, setup }`) and the
  * agent-transform hook to assign a native `AgentV2Info.model` `ModelRef` (and
  * optional request headers/body) to each agent, keyed by agent id. The native
- * v2 `task` tool then uses the selected agent's model directly, so this module
+ * v2 `subagent` tool then uses the selected agent's model directly, so this module
  * performs no tool-execution interception (no execute-before/after hooks), no
  * SDK child-session relay, and no decoy/return-ok flow.
  *
@@ -13,8 +13,8 @@
  * config. When `OPENCODE_MODEL_ROUTER_CONFIG` names a launcher-mounted sandbox
  * JSON, the plugin reads its top-level `model_router` block and shallow-merges
  * that block's `profiles`/`agents`/`default_agent` over the defaults, then
- * validates the merged result. Routing is by arbitrary valid agent id — there
- * is no closed role list.
+ * validates the merged result. Routing accepts arbitrary valid agent ids so a
+ * sandbox can route additional agent definitions supplied by a derived image.
  *
  * Exported for tests:
  *   - `validateConfig(value)`        full merged-config validation (throws)
@@ -34,9 +34,7 @@ export const SCHEMA_VERSION = 1
 
 /**
  * Agent ids the container bakes as OpenCode agent definitions. The
- * model-router plugin assigns each a model via the `agents` map. Routing is by
- * arbitrary valid agent id, so this list is documentation/test coverage only,
- * never a validation gate.
+ * model-router plugin assigns each a model via the `agents` map.
  */
 export const BAKED_AGENTS = Object.freeze([
   // native v2 orchestration / implementation / review workers
@@ -50,15 +48,6 @@ export const BAKED_AGENTS = Object.freeze([
   "review-quality",
   "review-spec-compliance",
   "review-blind-spots",
-  // sdd-planner agents
-  "researcher",
-  "plan-reviewer",
-  "code-implementer",
-  "quality-scanner",
-  "spec-reviewer",
-  "spec-compliance",
-  "drift-detector",
-  "blind-spot-finder",
 ])
 
 /**
@@ -87,14 +76,6 @@ export const DEFAULT_CONFIG = Object.freeze({
     "review-quality": "review",
     "review-spec-compliance": "review",
     "review-blind-spots": "review",
-    researcher: "extraction",
-    "plan-reviewer": "review",
-    "code-implementer": "implementation",
-    "quality-scanner": "review",
-    "spec-reviewer": "review",
-    "spec-compliance": "review",
-    "drift-detector": "review",
-    "blind-spot-finder": "review",
   },
   default_agent: "orchestrator",
 })
@@ -175,9 +156,7 @@ function validateProfile(profile, context) {
  *   }
  *
  * - `profiles` is required and non-empty; every profile must be valid.
- * - `agents` maps arbitrary valid agent ids to defined profiles. There is no
- *   closed role list: any id matching a valid identifier and resolving to a
- *   defined profile is accepted.
+ * - `agents` maps valid agent ids to defined profiles.
  * - `default_agent` is optional; when present it must name an agent that maps
  *   to a defined profile.
  */
@@ -273,9 +252,10 @@ export function validateOverride(value) {
 /**
  * Shallow-merge a partial override over a full base config: profile and agent
  * maps merge at the top-level key (an override entry replaces the base entry
- * for that name; profile objects are not deep-merged), and
- * `default_agent`/`schema_version` fall back to the base when absent. The
- * override is shape-validated first; the caller validates the merged result.
+ * for that name; profile objects are not deep-merged). Overrides may add
+ * profiles and agent mappings; `default_agent`/`schema_version` fall back to
+ * the base when absent. The override is shape-validated first; the caller
+ * validates the merged result.
  */
 export function mergeConfig(base, override) {
   validateOverride(override)
@@ -316,9 +296,9 @@ export async function readModelRouterOverride(path) {
 
 /**
  * Apply a validated config to an `AgentDraft`:
- *   - for every listed agent whose id has an agent mapping, set
- *     `agent.model` to the profile's `ModelRef` and merge any optional
- *     request headers/body into `agent.request`;
+ *   - for every configured agent mapping, set `agent.model` to the profile's
+ *     `ModelRef` and merge any optional request headers/body into
+ *     `agent.request`;
  *   - call `draft.default(config.default_agent)` when a default is set.
  *
  * Pure: operates only on the supplied draft; does not touch the filesystem,
@@ -326,14 +306,22 @@ export async function readModelRouterOverride(path) {
  */
 export function applyAgentConfig(draft, config) {
   const resolved = validateConfig(config)
-  for (const agent of draft.list()) {
-    const profileName = resolved.agents[agent.id]
-    if (typeof profileName !== "string" || profileName.length === 0) continue
+  const missing = Object.keys(resolved.agents).filter((agentID) => draft.get(agentID) === undefined)
+  if (missing.length > 0) {
+    throw new Error(`model-router agent definition(s) not found: ${missing.join(", ")}`)
+  }
+
+  // Preflight every mapping before mutation so a typo cannot synthesize an
+  // unrestricted primary agent through AgentDraft.update's create-on-miss
+  // behavior. Derived images remain supported when their definitions are
+  // already present in the draft.
+  for (const [agentID, profileName] of Object.entries(resolved.agents)) {
     const profile = resolved.profiles[profileName]
     if (!profile) continue
-    draft.update(agent.id, (item) => {
+    draft.update(agentID, (item) => {
       item.model = modelRefFor(profile)
       if (isObject(profile.request)) {
+        if (!isObject(item.request)) item.request = {}
         if (isObject(profile.request.headers)) {
           item.request.headers = { ...(item.request.headers ?? {}), ...profile.request.headers }
         }
@@ -367,6 +355,10 @@ export const plugin = define({
     await ctx.agent.transform((draft) => {
       applyAgentConfig(draft, config)
     })
+    // External plugins load after the location's built-in agent transforms may
+    // already have rendered once. Force a fresh render so this newly registered
+    // transform is visible immediately to agent selection and debug APIs.
+    await ctx.agent.reload()
   },
 })
 

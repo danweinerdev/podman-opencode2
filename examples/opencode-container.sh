@@ -47,19 +47,24 @@ PROVIDER_ENV_VARS=(
   AZURE_OPENAI_API_KEY
 )
 
-# Baked config/plugin paths the container owns; mounts may not shadow these.
-Baked_roots=(/etc/opencode /opt/opencode /opt/mcp)
+# Baked config/plugin paths and launcher control mounts; additional mounts may
+# not shadow these, including through lexical `..` path segments.
+Baked_roots=(/etc/opencode /opt/opencode /opt/mcp /run/opencode)
 
 # Host agent state the container must never reach (by mount). The launcher
 # deliberately does not forward OpenCode, .agents, .claude, or .mcp state.
 Host_state_roots=(
-  "${HOME}/.config/opencode"
-  "${HOME}/.local/share/opencode"
-  "${HOME}/.local/state/opencode"
+  "${XDG_CONFIG_HOME:-${HOME}/.config}/opencode"
+  "${XDG_DATA_HOME:-${HOME}/.local/share}/opencode"
+  "${XDG_STATE_HOME:-${HOME}/.local/state}/opencode"
+  "${XDG_CACHE_HOME:-${HOME}/.cache}/opencode"
   "${HOME}/.agents"
   "${HOME}/.claude"
   "${HOME}/.mcp"
 )
+for index in "${!Host_state_roots[@]}"; do
+  Host_state_roots[index]="$(realpath -m -- "${Host_state_roots[index]}")"
+done
 
 is_reserved_env_name() {
   local name="$1"
@@ -73,13 +78,18 @@ is_valid_env_name() {
   [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]
 }
 
-path_is_under() {
-  # path_is_under <path> <root...>  ->  0 if <path> equals or is under any root
+paths_overlap() {
+  # paths_overlap <path> <root...> -> 0 if either side equals or contains the other
   local path="$1"
   shift
   local root
   for root in "$@"; do
-    [[ "${path}" == "${root}" || "${path}" == "${root}"/* ]] && return 0
+    # Appending /* to / produces //*, which does not match ordinary absolute
+    # paths. Root necessarily overlaps every absolute protected path.
+    [[ "${path}" == "/" || "${root}" == "/" ]] && return 0
+    if [[ "${path}" == "${root}" || "${path}" == "${root}"/* || "${root}" == "${path}"/* ]]; then
+      return 0
+    fi
   done
   return 1
 }
@@ -117,6 +127,9 @@ case "${WORKSPACE}" in
   *) WORKSPACE="${PWD}/${WORKSPACE}" ;;
 esac
 WORKSPACE="$(realpath -- "${WORKSPACE}")" || die "workspace does not exist: ${WORKSPACE}"
+if paths_overlap "${WORKSPACE}" "${Host_state_roots[@]}"; then
+  die "workspace ${WORKSPACE} overlaps host OpenCode/.agents/.claude/.mcp state"
+fi
 
 WORKDIR="$(jq -r '.workdir // empty' "${CONFIG_PATH}")"
 if [[ -z "${WORKDIR}" ]]; then
@@ -173,15 +186,21 @@ while IFS= read -r entry; do
   target="$(jq -r '.target // empty' <<<"${entry}")"
   read_only="$(jq -r '.read_only // false' <<<"${entry}")"
 
-  abs_source="$(realpath -- "${source}")" || die "mount source does not exist: ${source}"
-  if path_is_under "${abs_source}" "${Host_state_roots[@]}"; then
-    die "mount source ${abs_source} is host OpenCode/.agents/.claude/.mcp state"
+  case "${source}" in
+    /*) source_path="${source}" ;;
+    *) source_path="${WORKSPACE}/${source}" ;;
+  esac
+  abs_source="$(realpath -- "${source_path}")" || die "mount source does not exist: ${source}"
+  if paths_overlap "${abs_source}" "${Host_state_roots[@]}"; then
+    die "mount source ${abs_source} overlaps host OpenCode/.agents/.claude/.mcp state"
   fi
 
   if [[ -z "${target}" ]]; then
     target="${abs_source}"
   fi
-  if path_is_under "${target}" "${Baked_roots[@]}"; then
+  [[ "${target}" == /* ]] || die "mount target must be absolute: ${target}"
+  target="$(realpath -m -- "${target}")" || die "invalid mount target: ${target}"
+  if paths_overlap "${target}" "${Baked_roots[@]}"; then
     die "mount target ${target} shadows a baked config/plugin path"
   fi
 
@@ -195,30 +214,33 @@ done < <(jq -c '.mounts[]? // empty' "${CONFIG_PATH}")
 # Environment: only provider vars that are actually set are forwarded, plus any
 # explicitly passed/set vars. Reserved names are rejected.
 declare -A ENV_MAP=()
+declare -A ENV_MODE=()
 declare -a ENV_ORDER=()
 
 add_env() {
   local name="$1"
   local value="$2"
+  local mode="$3"
   is_valid_env_name "${name}" || die "invalid environment variable name: ${name}"
   is_reserved_env_name "${name}" && die "reserved environment variable: ${name}"
   if [[ -z "${ENV_MAP[${name}]+x}" ]]; then
     ENV_ORDER+=("${name}")
   fi
   ENV_MAP["${name}"]="${value}"
+  ENV_MODE["${name}"]="${mode}"
 }
 
 for name in "${PROVIDER_ENV_VARS[@]}"; do
-  if [[ -n "${!name:-}" ]]; then
-    add_env "${name}" "${!name}"
+  if [[ -v "${name}" ]]; then
+    add_env "${name}" "" pass
   fi
 done
 
 while IFS= read -r name; do
   [[ -n "${name}" ]] || continue
   is_reserved_env_name "${name}" && die "reserved environment variable in env.pass: ${name}"
-  if [[ -n "${!name:-}" ]]; then
-    add_env "${name}" "${!name}"
+  if [[ -v "${name}" ]]; then
+    add_env "${name}" "" pass
   fi
 done < <(jq -r '.env.pass[]? // empty' "${CONFIG_PATH}")
 
@@ -227,11 +249,17 @@ while IFS= read -r kv; do
   name="${kv%%=*}"
   value="${kv#*=}"
   [[ -n "${name}" ]] || die "env.set entry missing a name"
-  add_env "${name}" "${value}"
+  add_env "${name}" "${value}" set
 done < <(jq -r '.env.set // {} | to_entries[] | "\(.key)=\(.value)"' "${CONFIG_PATH}")
 
 for name in "${ENV_ORDER[@]}"; do
-  RUN_FLAGS+=(-e "${name}=${ENV_MAP[${name}]}")
+  if [[ "${ENV_MODE[${name}]}" == "pass" ]]; then
+    # Let Podman inherit the value from this process without embedding a secret
+    # in the visible command-line arguments.
+    RUN_FLAGS+=(-e "${name}")
+  else
+    RUN_FLAGS+=(-e "${name}=${ENV_MAP[${name}]}")
+  fi
 done
 
 # Shared git common dir: a linked worktree keeps objects/refs in a sibling
@@ -243,6 +271,12 @@ if GIT_COMMON_DIR="$(git -C "${WORKSPACE}" rev-parse --git-common-dir 2>/dev/nul
   esac
   GIT_COMMON_DIR="$(cd "${GIT_COMMON_DIR}" 2>/dev/null && pwd)" || GIT_COMMON_DIR=""
   if [[ -n "${GIT_COMMON_DIR}" && "${GIT_COMMON_DIR}/" != "${WORKSPACE}/"* ]]; then
+    if paths_overlap "${GIT_COMMON_DIR}" "${Host_state_roots[@]}"; then
+      die "git common directory ${GIT_COMMON_DIR} overlaps host OpenCode/.agents/.claude/.mcp state"
+    fi
+    if paths_overlap "${GIT_COMMON_DIR}" "${Baked_roots[@]}"; then
+      die "git common directory ${GIT_COMMON_DIR} shadows a baked config/plugin path"
+    fi
     RUN_FLAGS+=(-v "${GIT_COMMON_DIR}:${GIT_COMMON_DIR}")
   fi
 fi
@@ -291,7 +325,7 @@ mapfile -t DEFAULT_CMD < <(jq -r '.command[]? // empty' "${CONFIG_PATH}")
 if [[ ${#DEFAULT_CMD[@]} -gt 0 ]]; then
   CMD=("${DEFAULT_CMD[@]}")
 else
-  CMD=(opencode)
+  CMD=(opencode2 --standalone)
 fi
 
 if [[ $# -gt 0 ]]; then
