@@ -1,0 +1,21 @@
+{
+  "name": "opencode-model-router",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Native v2 model routing plugin for OpenCode2: assigns per-agent ModelRefs and provider request options via the @opencode-ai/plugin/v2/promise API. No v1 hook interception, no SDK child sessions.",
+  "license": "MIT",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "1.18.25"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
