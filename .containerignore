@@ -1,0 +1,16 @@
+# VCS metadata is never a build input
+.git
+.gitignore
+.gitmodules
+
+# Local cache / index state (not needed by the image build)
+.code-graph
+.cache
+
+# Dependencies are regenerated in-container (npm install)
+node_modules
+**/node_modules
+
+# Tests and lockfiles are not runtime inputs
+plugins/model-router/test
+**/package-lock.json
