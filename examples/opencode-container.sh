@@ -2,10 +2,11 @@
 #
 # opencode-container.sh — run the OpenCode2 container for this workspace.
 #
-# Reads $PWD/.opencode-sandbox.json (schema_version 1) and builds (only when
-# needed) and runs the configured image under podman. The config is trusted
-# repository input: it controls local image builds and container run settings,
-# so review it like executable project tooling. Secret values are never echoed.
+# Uses $PWD/.opencode-sandbox.json (schema_version 1) when present, otherwise
+# warns and runs the baked image defaults against the current workspace. A
+# sandbox config is trusted repository input: it controls local image builds and
+# container run settings, so review it like executable project tooling. Secret
+# values are never echoed.
 #
 # Usage:
 #   ./opencode-container.sh                # build if needed, then run the default command
@@ -19,13 +20,29 @@ set -euo pipefail
 
 # --- Guardrails --------------------------------------------------------------
 die() { printf 'opencode-container: %s\n' "$*" >&2; exit 1; }
+warn() { printf 'opencode-container: warning: %s\n' "$*" >&2; }
 
 command -v jq >/dev/null 2>&1 || die "jq is required (install it and retry)"
 command -v podman >/dev/null 2>&1 || die "podman is required (install it and retry)"
 command -v git >/dev/null 2>&1 || die "git is required (used to detect a shared git common dir)"
 
 CONFIG_PATH="${PWD}/.opencode-sandbox.json"
-[[ -f "${CONFIG_PATH}" ]] || die "missing sandbox config: ${CONFIG_PATH} (run from the workspace root)"
+CONFIG_PRESENT=0
+if [[ -e "${CONFIG_PATH}" && ! -f "${CONFIG_PATH}" ]]; then
+  die "sandbox config is not a regular file: ${CONFIG_PATH}"
+elif [[ -f "${CONFIG_PATH}" ]]; then
+  CONFIG_PRESENT=1
+else
+  warn "no .opencode-sandbox.json found; using image opencode2:latest, workspace ${PWD}, and baked routing defaults"
+fi
+
+config_jq() {
+  if [[ "${CONFIG_PRESENT}" -eq 1 ]]; then
+    jq "$@" "${CONFIG_PATH}"
+  else
+    jq "$@" <<< '{}'
+  fi
+}
 
 # Provider API keys auto-forwarded when set in the host environment. This is
 # the common multi-provider list plus AZURE_OPENAI_API_KEY. Unset variables are
@@ -95,15 +112,14 @@ paths_overlap() {
 }
 
 # --- Config loading + validation --------------------------------------------
-SCHEMA_VERSION="$(jq -r '.schema_version // 1' "${CONFIG_PATH}")"
+SCHEMA_VERSION="$(config_jq -r '.schema_version // 1')"
 [[ "${SCHEMA_VERSION}" == "1" ]] || die "unsupported schema_version: ${SCHEMA_VERSION}"
 
-IMAGE="$(jq -r '.image // empty' "${CONFIG_PATH}")"
-[[ -n "${IMAGE}" ]] || die "config must define \"image\""
+IMAGE="$(config_jq -r '.image // "opencode2:latest"')"
 
 # Optional build block.
-CONTAINERFILE="$(jq -r '.build.containerfile // "Containerfile"' "${CONFIG_PATH}")"
-CONTEXT="$(jq -r '.build.context // empty' "${CONFIG_PATH}")"
+CONTAINERFILE="$(config_jq -r '.build.containerfile // "Containerfile"')"
+CONTEXT="$(config_jq -r '.build.context // empty')"
 if [[ -z "${CONTEXT}" ]]; then
   CONTEXT="$(dirname "${CONTAINERFILE}")"
 fi
@@ -118,7 +134,7 @@ case "${CONTEXT}" in
 esac
 
 # Workspace (always mounted at /src) and container workdir (default /src).
-WORKSPACE="$(jq -r '.workspace // empty' "${CONFIG_PATH}")"
+WORKSPACE="$(config_jq -r '.workspace // empty')"
 if [[ -z "${WORKSPACE}" ]]; then
   WORKSPACE="${PWD}"
 fi
@@ -131,7 +147,7 @@ if paths_overlap "${WORKSPACE}" "${Host_state_roots[@]}"; then
   die "workspace ${WORKSPACE} overlaps host OpenCode/.agents/.claude/.mcp state"
 fi
 
-WORKDIR="$(jq -r '.workdir // empty' "${CONFIG_PATH}")"
+WORKDIR="$(config_jq -r '.workdir // empty')"
 if [[ -z "${WORKDIR}" ]]; then
   WORKDIR="/src"
 else
@@ -149,16 +165,17 @@ if [[ -t 0 && -t 1 ]]; then
   RUN_FLAGS+=(-it)
 fi
 
-# Workspace is mounted at /src; the sandbox config is mounted read-only at
-# /run/opencode/sandbox.json, whose path the model-router plugin reads from
-# OPENCODE_MODEL_ROUTER_CONFIG.
+# Workspace is always mounted at /src. When present, the sandbox config is also
+# mounted read-only for optional model-router overrides.
 RUN_FLAGS+=(-v "${WORKSPACE}:/src")
-RUN_FLAGS+=(-v "${CONFIG_PATH}:/run/opencode/sandbox.json:ro")
 RUN_FLAGS+=(-w "${WORKDIR}")
-RUN_FLAGS+=(-e OPENCODE_MODEL_ROUTER_CONFIG=/run/opencode/sandbox.json)
+if [[ "${CONFIG_PRESENT}" -eq 1 ]]; then
+  RUN_FLAGS+=(-v "${CONFIG_PATH}:/run/opencode/sandbox.json:ro")
+  RUN_FLAGS+=(-e OPENCODE_MODEL_ROUTER_CONFIG=/run/opencode/sandbox.json)
+fi
 
 # Network mode.
-NETWORK="$(jq -r '.network // empty' "${CONFIG_PATH}")"
+NETWORK="$(config_jq -r '.network // empty')"
 if [[ -n "${NETWORK}" ]]; then
   RUN_FLAGS+=(--network "${NETWORK}")
 fi
@@ -166,7 +183,7 @@ fi
 # Capabilities.
 while IFS= read -r cap; do
   [[ -n "${cap}" ]] && RUN_FLAGS+=(--cap-add "${cap}")
-done < <(jq -r '.capabilities[]? // empty' "${CONFIG_PATH}")
+done < <(config_jq -r '.capabilities[]? // empty')
 
 # Restricted runtime arguments: only a small allow-list of passthrough flags.
 while IFS= read -r arg; do
@@ -175,9 +192,9 @@ while IFS= read -r arg; do
     --add-host=*|--pids-limit=*|--ulimit=*) RUN_FLAGS+=("${arg}") ;;
     *) die "runtime_args entry is not allowed: ${arg}" ;;
   esac
-done < <(jq -r '.runtime_args[]? // empty' "${CONFIG_PATH}")
+done < <(config_jq -r '.runtime_args[]? // empty')
 
-# Additional mounts. Relative host sources resolve against CWD; an omitted
+# Additional mounts. Relative host sources resolve against the workspace; an omitted
 # target mirrors the resolved absolute source path.
 while IFS= read -r entry; do
   [[ -n "${entry}" ]] || continue
@@ -209,7 +226,7 @@ while IFS= read -r entry; do
     flag="${flag}:ro"
   fi
   RUN_FLAGS+=(-v "${flag}")
-done < <(jq -c '.mounts[]? // empty' "${CONFIG_PATH}")
+done < <(config_jq -c '.mounts[]? // empty')
 
 # Environment: only provider vars that are actually set are forwarded, plus any
 # explicitly passed/set vars. Reserved names are rejected.
@@ -242,7 +259,7 @@ while IFS= read -r name; do
   if [[ -v "${name}" ]]; then
     add_env "${name}" "" pass
   fi
-done < <(jq -r '.env.pass[]? // empty' "${CONFIG_PATH}")
+done < <(config_jq -r '.env.pass[]? // empty')
 
 while IFS= read -r kv; do
   [[ -n "${kv}" ]] || continue
@@ -250,7 +267,7 @@ while IFS= read -r kv; do
   value="${kv#*=}"
   [[ -n "${name}" ]] || die "env.set entry missing a name"
   add_env "${name}" "${value}" set
-done < <(jq -r '.env.set // {} | to_entries[] | "\(.key)=\(.value)"' "${CONFIG_PATH}")
+done < <(config_jq -r '.env.set // {} | to_entries[] | "\(.key)=\(.value)"')
 
 for name in "${ENV_ORDER[@]}"; do
   if [[ "${ENV_MODE[${name}]}" == "pass" ]]; then
@@ -291,7 +308,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 HAS_BUILD_CONFIG=0
-[[ -n "$(jq -r '.build // empty' "${CONFIG_PATH}")" ]] && HAS_BUILD_CONFIG=1
+[[ -n "$(config_jq -r '.build // empty')" ]] && HAS_BUILD_CONFIG=1
 
 IMAGE_EXISTS=0
 podman image exists "${IMAGE}" >/dev/null 2>&1 && IMAGE_EXISTS=1
@@ -307,7 +324,7 @@ if [[ "${REBUILD}" -eq 1 || "${IMAGE_EXISTS}" -eq 0 ]]; then
   )
   while IFS= read -r arg; do
     [[ -n "${arg}" ]] && BUILD_ARG_FLAGS+=(--build-arg "${arg}")
-  done < <(jq -r '.build.args // {} | to_entries[] | "\(.key)=\(.value)"' "${CONFIG_PATH}")
+  done < <(config_jq -r '.build.args // {} | to_entries[] | "\(.key)=\(.value)"')
 
   printf 'opencode-container: building %s (containerfile %s, context %s)\n' \
     "${IMAGE}" "${CONTAINERFILE}" "${CONTEXT}"
@@ -320,7 +337,7 @@ fi
 
 # --- Command selection -------------------------------------------------------
 DEFAULT_CMD=()
-mapfile -t DEFAULT_CMD < <(jq -r '.command[]? // empty' "${CONFIG_PATH}")
+mapfile -t DEFAULT_CMD < <(config_jq -r '.command[]? // empty')
 
 if [[ ${#DEFAULT_CMD[@]} -gt 0 ]]; then
   CMD=("${DEFAULT_CMD[@]}")

@@ -18,9 +18,12 @@ the launcher from the host workspace root.
 
 1. Confirm the workspace root and read any existing `.opencode-sandbox.json`
    and launcher before editing. Never overwrite an existing file blindly.
-2. If either file is absent, copy its baked template into the workspace using
-   file tools. Name the config `.opencode-sandbox.json`; a convenient launcher
-   name is `opencode-container.sh`.
+2. The launcher can run without a sandbox config: it warns and uses its baked
+   image, workspace, routing, and command defaults. Create
+   `.opencode-sandbox.json` from the baked template only when the user needs
+   build settings, mounts, environment forwarding, or routing overrides. If the
+   launcher itself is absent, copy it into the workspace with file tools; a
+   convenient name is `opencode-container.sh`.
 3. Customize only fields the user needs. Keep `schema_version: 1`, use the
    `opencode2 --standalone` command, and retain the exact pinned
    `OPENCODE2_VERSION` unless the image source has been deliberately upgraded.
@@ -29,7 +32,7 @@ the launcher from the host workspace root.
 
 ## Sandbox fields
 
-- `image` is required.
+- `image` is optional and defaults to `opencode2:latest`.
 - `build` is optional. `containerfile` and `context` resolve from the host
   workspace; `args` are passed as Podman build arguments.
 - `workspace` defaults to the host workspace root and is mounted at `/src`.

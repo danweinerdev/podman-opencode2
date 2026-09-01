@@ -153,7 +153,11 @@ container.
 
 ## Launcher (`examples/opencode-container.sh`)
 
-`PATH`-safe; requires `jq` and `podman`; always reads `$PWD/.opencode-sandbox.json`.
+`PATH`-safe; requires `jq` and `podman`. It detects
+`$PWD/.opencode-sandbox.json`: when present it applies and mounts that file;
+when absent it warns and uses `opencode2:latest`, the current directory as the
+workspace, `/src` as the workdir, baked model routing, and
+`opencode2 --standalone`.
 
 ```sh
 ./examples/opencode-container.sh                 # build if needed, run opencode2 --standalone
@@ -169,12 +173,15 @@ Behavior:
   at `/src` (default workdir `/src`; a relative `workdir` resolves under
   `/src`); an external git common dir (linked worktree) is detected and
   mounted at the same path so git still works in-container.
-- Mounts the sandbox config read-only at `/run/opencode/sandbox.json` and sets
-  `OPENCODE_MODEL_ROUTER_CONFIG=/run/opencode/sandbox.json` so the
-  model-router plugin can apply project overrides.
+- When a sandbox config exists, mounts it read-only at
+  `/run/opencode/sandbox.json` and sets
+  `OPENCODE_MODEL_ROUTER_CONFIG=/run/opencode/sandbox.json` so the model-router
+  plugin can apply project overrides. No config means no control-file mount or
+  override environment variable.
 - Builds only when the image is absent or `--rebuild` is passed, and only from
   a configured local `build` block; always passes host `USER_UID`/`USER_GID`/
-  `USERNAME` build args.
+  `USERNAME` build args. Therefore config-free operation expects the default
+  `opencode2:latest` image to exist locally.
 - Auto-forwards only provider env vars that are **set** (the common provider
   list plus `AZURE_OPENAI_API_KEY`); rejects `HOME`/`PATH`/`XDG_*`/`OPENCODE_*`
   as explicit env; never mounts host `opencode` state from the effective XDG
@@ -190,7 +197,7 @@ Behavior:
 ```json
 {
   "schema_version": 1,
-  "image": "opencode2:latest",              // required
+  "image": "opencode2:latest",              // optional; this is the default
   "build": {                                 // optional; enables local build
     "containerfile": "Containerfile",       // default "Containerfile"
     "context": ".",                          // default dirname(containerfile)

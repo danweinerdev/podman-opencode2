@@ -62,6 +62,8 @@ export ARGV_LOG ENV_LOG
 grep -Fx -- "OPENAI_API_KEY" "${ARGV_LOG}" >/dev/null
 grep -Fx -- "EMPTY_FORWARD" "${ARGV_LOG}" >/dev/null
 grep -Fx -- "TZ=UTC" "${ARGV_LOG}" >/dev/null
+grep -Fx -- "${TMP}/workspace/.opencode-sandbox.json:/run/opencode/sandbox.json:ro" "${ARGV_LOG}" >/dev/null
+grep -Fx -- "OPENCODE_MODEL_ROUTER_CONFIG=/run/opencode/sandbox.json" "${ARGV_LOG}" >/dev/null
 [[ "$(grep -Fxc -- "OPENAI_API_KEY" "${ARGV_LOG}")" -eq 1 ]]
 if grep -Fq -- "launch-secret-sentinel" "${ARGV_LOG}"; then
   printf 'provider secret leaked into podman argv\n' >&2
@@ -195,3 +197,36 @@ mv "${TMP}/workspace/.opencode-sandbox.json.new" "${TMP}/workspace/.opencode-san
   HOME="${TMP}/relative-home" PATH="${TMP}/bin:${PATH}" "${ROOT}/examples/opencode-container.sh"
 )
 grep -Fx -- "${TMP}/relative-workspace/data:/mnt/data" "${ARGV_LOG}" >/dev/null
+
+# With no sandbox config, warn and use only the launcher's baked defaults. The
+# absent control file must not be mounted or advertised to the router.
+mkdir -p "${TMP}/default-home" "${TMP}/default-workspace"
+(
+  cd "${TMP}/default-workspace"
+  HOME="${TMP}/default-home" PATH="${TMP}/bin:${PATH}" "${ROOT}/examples/opencode-container.sh"
+) 2>"${TMP}/default-warning.log"
+grep -F -- "warning: no .opencode-sandbox.json found" "${TMP}/default-warning.log" >/dev/null
+grep -Fx -- "${TMP}/default-workspace:/src" "${ARGV_LOG}" >/dev/null
+grep -Fx -- "/src" "${ARGV_LOG}" >/dev/null
+grep -Fx -- "opencode2:latest" "${ARGV_LOG}" >/dev/null
+grep -Fx -- "opencode2" "${ARGV_LOG}" >/dev/null
+grep -Fx -- "--standalone" "${ARGV_LOG}" >/dev/null
+if grep -Fq -- "/run/opencode/sandbox.json" "${ARGV_LOG}"; then
+  printf 'config-free launcher mounted or advertised an absent sandbox config\n' >&2
+  exit 1
+fi
+
+# A present partial config inherits the same defaults and is mounted so its
+# optional router block can be consumed.
+printf '{}\n' > "${TMP}/default-workspace/.opencode-sandbox.json"
+(
+  cd "${TMP}/default-workspace"
+  HOME="${TMP}/default-home" PATH="${TMP}/bin:${PATH}" "${ROOT}/examples/opencode-container.sh"
+) 2>"${TMP}/partial-config.log"
+if grep -Fq -- "no .opencode-sandbox.json found" "${TMP}/partial-config.log"; then
+  printf 'launcher warned despite a present sandbox config\n' >&2
+  exit 1
+fi
+grep -Fx -- "opencode2:latest" "${ARGV_LOG}" >/dev/null
+grep -Fx -- "${TMP}/default-workspace/.opencode-sandbox.json:/run/opencode/sandbox.json:ro" "${ARGV_LOG}" >/dev/null
+grep -Fx -- "OPENCODE_MODEL_ROUTER_CONFIG=/run/opencode/sandbox.json" "${ARGV_LOG}" >/dev/null
