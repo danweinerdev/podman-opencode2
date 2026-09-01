@@ -16,6 +16,10 @@
       "TZ": "UTC"
     }
   },
+  "provider_secrets": ["openai-api-key", "deepseek-api-key"],
+  "persistence": {
+    "data_volume": "my-project-opencode2-data"
+  },
   "model_router": {
     "schema_version": 1,
     "profiles": {

@@ -153,11 +153,13 @@ container.
 
 ## Launcher (`examples/opencode-container.sh`)
 
-`PATH`-safe; requires `jq` and `podman`. It detects
+`PATH`-safe; requires Bash, `jq`, `podman`, `git`, and `sha256sum`. It detects
 `$PWD/.opencode-sandbox.json`: when present it applies and mounts that file;
 when absent it warns and uses `opencode2:latest`, the current directory as the
-workspace, `/src` as the workdir, baked model routing, and
-`opencode2 --standalone`.
+workspace, a stable CWD-derived workdir, baked model routing, and
+`opencode2 --standalone`. The launcher itself can therefore live anywhere on
+`PATH`; project discovery and session persistence are based on the invocation
+directory, not the script's installation directory.
 
 ```sh
 ./examples/opencode-container.sh                 # build if needed, run opencode2 --standalone
@@ -169,10 +171,12 @@ workspace, `/src` as the workdir, baked model routing, and
 Behavior:
 
 - `--pull=never --rm --init --userns=keep-id --security-opt label=disable`.
-- TTY (`-it`) only when interactive; the selected workspace is always mounted
-  at `/src` (default workdir `/src`; a relative `workdir` resolves under
-  `/src`); an external git common dir (linked worktree) is detected and
-  mounted at the same path so git still works in-container.
+- TTY (`-it`) only when interactive. The selected workspace is mounted at
+  `/src` for command compatibility and at `/workspace/<cwd-hash>` for a stable,
+  project-specific OpenCode2 identity. The latter is the default workdir;
+  relative workdirs and `/src`-based workdirs are remapped beneath it. An
+  external git common dir (linked worktree) is detected and mounted at the same
+  absolute path so git still works in-container.
 - When a sandbox config exists, mounts it read-only at
   `/run/opencode/sandbox.json` and sets
   `OPENCODE_MODEL_ROUTER_CONFIG=/run/opencode/sandbox.json` so the model-router
@@ -191,6 +195,19 @@ Behavior:
 - Forwarded host values use Podman's name-only `--env NAME` form so secrets are
   not embedded in the launcher's process arguments. Treats the config as
   trusted repository code, but never logs secret values.
+- Injects only the known Podman provider secrets explicitly selected by the
+  project's `provider_secrets` list, using
+  `--secret ...,type=env,target=...`. Merely creating a user-global secret does
+  not expose it to every project. A selected secret takes precedence over a
+  same-named host environment variable or `env.set` value.
+- Persists OpenCode2's complete data store in a CWD-derived per-project named
+  volume (`opencode2-data-<cwd-hash>`). The pinned preview stores provider
+  logins and sessions in the same SQLite database, so keeping each project's
+  database intact is safer than copying credential rows into project
+  directories or exposing every project's state through one shared volume.
+  Stable CWD-derived workdirs and volumes allow resume from any PATH-installed
+  launcher. Configure an explicit common volume only when cross-project state
+  sharing is intentional.
 
 ### Sandbox config schema (schema_version 1)
 
@@ -204,11 +221,18 @@ Behavior:
     "args": { "OPENCODE2_VERSION": "0.0.0-beta-17823" } // optional build args
   },
   "workspace": ".",                          // optional; default $PWD; mounted at /src
-  "workdir": "app/",                         // optional; default "/src"; relative -> /src/app/
+  "workdir": "app/",                         // optional; relative -> stable project path/app/
   "mounts": [],                              // optional additional mounts
   "env": {                                   // optional
     "pass": ["GIT_AUTHOR_NAME"],             // forwarded only if set in host
     "set": { "TZ": "UTC" }                   // literal values
+  },
+  "provider_secrets": [                      // optional explicit opt-in
+    "openai-api-key",
+    "deepseek-api-key"
+  ],
+  "persistence": {                           // optional override
+    "data_volume": "my-project-opencode2-data" // omitted -> opencode2-data-<cwd-hash>
   },
   "model_router": {                          // optional; shallow-merged over the baked defaults
     "schema_version": 1,
@@ -234,6 +258,11 @@ Behavior:
 Mount `source` may be relative (resolved against the workspace) or absolute;
 an omitted `target` mirrors the resolved absolute source path. `runtime_args`
 accepts only `--add-host=`, `--pids-limit=`, and `--ulimit=` entries.
+Set `persistence.data_volume` to `""` for fully ephemeral OpenCode2 data. A
+fixed explicit volume name shares both login and session state across every
+project configured with that name. Moving a project changes the default CWD
+hash; set an explicit project-specific volume name first if persistence must
+survive that move.
 
 The `model_router` block is a **partial** override: it shallow-merges its
 `profiles` and `agents` maps over the baked defaults (an entry replaces the
@@ -244,12 +273,28 @@ applied by the model-router plugin via `OPENCODE_MODEL_ROUTER_CONFIG`.
 
 ## Credentials and OAuth
 
-Only provider **API keys** are ever forwarded (and only when set). No OAuth
-tokens or account credentials are copied in, and OpenCode OAuth is **not**
-persisted: any interactive auth happens inside the throwaway container and is
-lost with it. Pass keys per-run from the host environment (e.g.
-`OPENAI_API_KEY`, `DEEPSEEK_API_KEY`); the launcher forwards the ones that are
-set automatically.
+Provider API keys can come from Podman secrets or host environment variables.
+Podman secrets are preferred and do not place the value in the container's
+saved environment configuration; host variables remain the convenient
+fallback. Interactive provider logins performed inside OpenCode2 persist in the
+project's named data volume alongside the session tables used by this OpenCode2
+build, rather than reading or mounting host OpenCode1 state.
+
+Known `provider_secrets` names are `openai-api-key` (`openapi-api-key` is accepted as a
+compatibility alias), `anthropic-api-key`, `deepseek-api-key`, `groq-api-key`,
+`google-api-key`, `gemini-api-key`, `google-generative-ai-api-key`,
+`mistral-api-key`, `xai-api-key`, `openrouter-api-key`, `perplexity-api-key`,
+`cohere-api-key`, `together-api-key`, and `azure-openai-api-key`. Create one
+with, for example:
+
+```sh
+printf '%s' "$OPENAI_API_KEY" | podman secret create openai-api-key -
+```
+
+The secret is exposed to OpenCode2 as the corresponding uppercase provider
+variable only when the current sandbox config lists its name. Any process
+running as the container user can still use credentials made available to that
+container, so use scoped and revocable credentials.
 
 ## Verification
 

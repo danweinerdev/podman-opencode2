@@ -19,7 +19,9 @@ the launcher from the host workspace root.
 1. Confirm the workspace root and read any existing `.opencode-sandbox.json`
    and launcher before editing. Never overwrite an existing file blindly.
 2. The launcher can run without a sandbox config: it warns and uses its baked
-   image, workspace, routing, and command defaults. Create
+   image, workspace, routing, persistence, and command defaults. It is safe to
+   install once on `PATH`; all project behavior is derived from the invocation
+   directory. Create
    `.opencode-sandbox.json` from the baked template only when the user needs
    build settings, mounts, environment forwarding, or routing overrides. If the
    launcher itself is absent, copy it into the workspace with file tools; a
@@ -36,15 +38,25 @@ the launcher from the host workspace root.
 - `build` is optional. `containerfile` and `context` resolve from the host
   workspace; `args` are passed as Podman build arguments.
 - `workspace` defaults to the host workspace root and is mounted at `/src`.
-- Relative `workdir` values resolve below `/src`.
+- Relative and `/src`-based `workdir` values resolve below the stable
+  `/workspace/<cwd-hash>` project path.
 - `mounts` entries contain `source`, optional `target`, and optional
   `read_only`. Relative sources resolve from the configured workspace. Do not
   mount host OpenCode state from effective XDG directories, `.agents`,
   `.claude`, or `.mcp` state, and do not target `/etc/opencode`,
-  `/opt/opencode`, or `/opt/mcp`.
+  `/opt/opencode`, `/opt/mcp`, `/run/opencode`, `/src`, or `/workspace`.
 - `env.pass` forwards a named host variable only when set. `env.set` provides a
   literal value. Never place provider secrets in `env.set`; supported provider
-  API keys are forwarded automatically when present on the host.
+  API keys use a configured `provider_secrets` entry when selected, then fall
+  back to set host variables. Never opt a project into secrets it does not
+  require.
+- `persistence.data_volume` defaults to a CWD-derived per-project named volume,
+  `opencode2-data-<cwd-hash>`. The pinned preview stores provider logins and
+  sessions in one SQLite database, so the launcher persists each project's
+  database intact and isolated by default. A fixed explicit name intentionally
+  shares both kinds of state across projects; an empty string disables
+  persistence. The CWD-derived container workdir and volume remain stable even
+  when the launcher itself lives elsewhere on `PATH`.
 - `model_router` shallow-merges partial `profiles`, `agents`, and an optional
   `default_agent` over the baked routing defaults.
 - `network`, `capabilities`, and the restricted `runtime_args` list control the

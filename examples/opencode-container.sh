@@ -14,7 +14,7 @@
 #   ./opencode-container.sh shell          # drop into bash instead
 #   ./opencode-container.sh -- <cmd...>    # run an arbitrary command
 #
-# Requirements: bash, jq, podman.
+# Requirements: bash, jq, podman, git, sha256sum.
 
 set -euo pipefail
 
@@ -25,15 +25,17 @@ warn() { printf 'opencode-container: warning: %s\n' "$*" >&2; }
 command -v jq >/dev/null 2>&1 || die "jq is required (install it and retry)"
 command -v podman >/dev/null 2>&1 || die "podman is required (install it and retry)"
 command -v git >/dev/null 2>&1 || die "git is required (used to detect a shared git common dir)"
+command -v sha256sum >/dev/null 2>&1 || die "sha256sum is required (used for stable project paths)"
 
-CONFIG_PATH="${PWD}/.opencode-sandbox.json"
+INVOCATION_ROOT="$(realpath -- "${PWD}")"
+CONFIG_PATH="${INVOCATION_ROOT}/.opencode-sandbox.json"
 CONFIG_PRESENT=0
 if [[ -e "${CONFIG_PATH}" && ! -f "${CONFIG_PATH}" ]]; then
   die "sandbox config is not a regular file: ${CONFIG_PATH}"
 elif [[ -f "${CONFIG_PATH}" ]]; then
   CONFIG_PRESENT=1
 else
-  warn "no .opencode-sandbox.json found; using image opencode2:latest, workspace ${PWD}, and baked routing defaults"
+  warn "no .opencode-sandbox.json found; using image opencode2:latest, workspace ${INVOCATION_ROOT}, and baked routing defaults"
 fi
 
 config_jq() {
@@ -64,9 +66,29 @@ PROVIDER_ENV_VARS=(
   AZURE_OPENAI_API_KEY
 )
 
+# Podman secret names mapped to the provider environment variables OpenCode2
+# expects. Projects explicitly select names; openapi-api-key is retained as a
+# compatibility alias for the canonical openai-api-key spelling.
+PROVIDER_SECRET_SPECS=(
+  "OPENAI_API_KEY:openai-api-key:openapi-api-key"
+  "ANTHROPIC_API_KEY:anthropic-api-key"
+  "DEEPSEEK_API_KEY:deepseek-api-key"
+  "GROQ_API_KEY:groq-api-key"
+  "GOOGLE_API_KEY:google-api-key"
+  "GEMINI_API_KEY:gemini-api-key"
+  "GOOGLE_GENERATIVE_AI_API_KEY:google-generative-ai-api-key"
+  "MISTRAL_API_KEY:mistral-api-key"
+  "XAI_API_KEY:xai-api-key"
+  "OPENROUTER_API_KEY:openrouter-api-key"
+  "PERPLEXITY_API_KEY:perplexity-api-key"
+  "COHERE_API_KEY:cohere-api-key"
+  "TOGETHER_API_KEY:together-api-key"
+  "AZURE_OPENAI_API_KEY:azure-openai-api-key"
+)
+
 # Baked config/plugin paths and launcher control mounts; additional mounts may
 # not shadow these, including through lexical `..` path segments.
-Baked_roots=(/etc/opencode /opt/opencode /opt/mcp /run/opencode)
+Baked_roots=(/etc/opencode /opt/opencode /opt/mcp /run/opencode /src /workspace)
 
 # Host agent state the container must never reach (by mount). The launcher
 # deliberately does not forward OpenCode, .agents, .claude, or .mcp state.
@@ -126,48 +148,69 @@ fi
 # Resolve build paths against the workspace (CWD).
 case "${CONTAINERFILE}" in
   /*) : ;;
-  *) CONTAINERFILE="${PWD}/${CONTAINERFILE}" ;;
+  *) CONTAINERFILE="${INVOCATION_ROOT}/${CONTAINERFILE}" ;;
 esac
 case "${CONTEXT}" in
   /*) : ;;
-  *) CONTEXT="${PWD}/${CONTEXT}" ;;
+  *) CONTEXT="${INVOCATION_ROOT}/${CONTEXT}" ;;
 esac
 
-# Workspace (always mounted at /src) and container workdir (default /src).
+# Workspace is mounted at /src for compatibility and at a stable, CWD-derived
+# path for OpenCode2's project/session identity. This keeps one central data
+# volume usable across projects without every project appearing as /src.
 WORKSPACE="$(config_jq -r '.workspace // empty')"
 if [[ -z "${WORKSPACE}" ]]; then
-  WORKSPACE="${PWD}"
+  WORKSPACE="${INVOCATION_ROOT}"
 fi
 case "${WORKSPACE}" in
   /*) : ;;
-  *) WORKSPACE="${PWD}/${WORKSPACE}" ;;
+  *) WORKSPACE="${INVOCATION_ROOT}/${WORKSPACE}" ;;
 esac
 WORKSPACE="$(realpath -- "${WORKSPACE}")" || die "workspace does not exist: ${WORKSPACE}"
 if paths_overlap "${WORKSPACE}" "${Host_state_roots[@]}"; then
   die "workspace ${WORKSPACE} overlaps host OpenCode/.agents/.claude/.mcp state"
 fi
 
+PROJECT_DIGEST="$(printf '%s' "${INVOCATION_ROOT}" | sha256sum)"
+PROJECT_KEY="${PROJECT_DIGEST%% *}"
+PROJECT_KEY="${PROJECT_KEY:0:16}"
+CONTAINER_WORKSPACE="/workspace/${PROJECT_KEY}"
+
 WORKDIR="$(config_jq -r '.workdir // empty')"
 if [[ -z "${WORKDIR}" ]]; then
-  WORKDIR="/src"
+  WORKDIR="${CONTAINER_WORKSPACE}"
 else
   case "${WORKDIR}" in
-    /*) : ;;               # absolute workdir is used as-is
-    *) WORKDIR="/src/${WORKDIR}" ;;  # relative workdir resolves under /src
+    /src) WORKDIR="${CONTAINER_WORKSPACE}" ;;
+    /src/*) WORKDIR="${CONTAINER_WORKSPACE}/${WORKDIR#/src/}" ;;
+    /*) : ;; # other absolute workdirs are used as-is
+    *) WORKDIR="${CONTAINER_WORKSPACE}/${WORKDIR}" ;;
   esac
 fi
 
 # --- podman run flag assembly ------------------------------------------------
 RUN_FLAGS=(--pull=never --rm --init --userns=keep-id --security-opt label=disable)
 
+# The pinned preview stores credentials and sessions in the same SQLite
+# database. Keep that database intact in one reusable named volume rather than
+# copying credential rows into a project bind mount.
+DATA_VOLUME="$(config_jq -r --arg default "opencode2-data-${PROJECT_KEY}" ".persistence.data_volume // \$default")"
+if [[ -n "${DATA_VOLUME}" ]]; then
+  [[ "${DATA_VOLUME}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] \
+    || die "invalid persistence.data_volume: ${DATA_VOLUME}"
+  RUN_FLAGS+=(-v "${DATA_VOLUME}:/var/lib/opencode-data:U")
+  RUN_FLAGS+=(-e XDG_DATA_HOME=/var/lib/opencode-data)
+fi
+
 # TTY only when interactive (stdin and stdout are both a terminal).
 if [[ -t 0 && -t 1 ]]; then
   RUN_FLAGS+=(-it)
 fi
 
-# Workspace is always mounted at /src. When present, the sandbox config is also
-# mounted read-only for optional model-router overrides.
+# Keep /src as a compatibility alias while running OpenCode2 from the stable
+# project path used to distinguish sessions in the shared data volume.
 RUN_FLAGS+=(-v "${WORKSPACE}:/src")
+RUN_FLAGS+=(-v "${WORKSPACE}:${CONTAINER_WORKSPACE}")
 RUN_FLAGS+=(-w "${WORKDIR}")
 if [[ "${CONFIG_PRESENT}" -eq 1 ]]; then
   RUN_FLAGS+=(-v "${CONFIG_PATH}:/run/opencode/sandbox.json:ro")
@@ -232,7 +275,29 @@ done < <(config_jq -c '.mounts[]? // empty')
 # explicitly passed/set vars. Reserved names are rejected.
 declare -A ENV_MAP=()
 declare -A ENV_MODE=()
+declare -A SECRET_TARGETS=()
+declare -A SECRET_NAME_TARGETS=()
 declare -a ENV_ORDER=()
+
+for spec in "${PROVIDER_SECRET_SPECS[@]}"; do
+  IFS=: read -r target_env primary_secret alternate_secret <<< "${spec}"
+  SECRET_NAME_TARGETS["${primary_secret}"]="${target_env}"
+  [[ -n "${alternate_secret}" ]] && SECRET_NAME_TARGETS["${alternate_secret}"]="${target_env}"
+done
+
+# User-global Podman secrets are never injected into arbitrary projects merely
+# because they exist. A sandbox config must opt in by known secret name.
+while IFS= read -r requested_secret; do
+  [[ -n "${requested_secret}" ]] || continue
+  target_env="${SECRET_NAME_TARGETS[${requested_secret}]-}"
+  [[ -n "${target_env}" ]] || die "unknown provider_secrets entry: ${requested_secret}"
+  [[ -z "${SECRET_TARGETS[${target_env}]+x}" ]] \
+    || die "multiple provider secrets target ${target_env}"
+  podman secret exists "${requested_secret}" >/dev/null 2>&1 \
+    || die "configured Podman secret does not exist: ${requested_secret}"
+  RUN_FLAGS+=(--secret "${requested_secret},type=env,target=${target_env}")
+  SECRET_TARGETS["${target_env}"]="${requested_secret}"
+done < <(config_jq -r '.provider_secrets[]? // empty')
 
 add_env() {
   local name="$1"
@@ -240,6 +305,9 @@ add_env() {
   local mode="$3"
   is_valid_env_name "${name}" || die "invalid environment variable name: ${name}"
   is_reserved_env_name "${name}" && die "reserved environment variable: ${name}"
+  # A Podman secret is the less-exposed source and wins over inherited or
+  # literal values targeting the same provider variable.
+  [[ -n "${SECRET_TARGETS[${name}]+x}" ]] && return 0
   if [[ -z "${ENV_MAP[${name}]+x}" ]]; then
     ENV_ORDER+=("${name}")
   fi
