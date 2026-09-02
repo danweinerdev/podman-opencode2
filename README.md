@@ -33,6 +33,16 @@ image at build time rather than mounted into running containers.
 
 ## Build
 
+Rebuild the repository's configured sandbox image without starting OpenCode:
+
+```sh
+make build
+```
+
+This delegates to the launcher, so `.opencode-sandbox.json`, host UID/GID,
+optional local providers, and the launcher's build validation remain the single
+source of truth.
+
 The `Containerfile` is a multi-stage Fedora 44 build:
 
 1. **`sdd-builder`** — `golang:1.26.5-bookworm`; clones
