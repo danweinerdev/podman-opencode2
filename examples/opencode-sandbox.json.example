@@ -9,6 +9,7 @@
     }
   },
   "workspace": ".",
+  "containers": false,
   "mounts": [],
   "env": {
     "pass": ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL"],

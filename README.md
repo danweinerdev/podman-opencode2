@@ -209,7 +209,7 @@ invocation directory, not the script's installation directory.
 Behavior:
 
 - `--pull=never --rm --init --userns=keep-id --security-opt label=disable`.
-- TTY (`-it`) only when interactive. The selected workspace is mounted at
+- TTY (`-it`) only when interactive. Normally, the selected workspace is mounted at
   `/src` for command compatibility and at `/workspace/<cwd-hash>` for a stable,
   project-specific OpenCode2 identity. The latter is the default workdir;
   relative workdirs and `/src`-based workdirs are remapped beneath it. An
@@ -228,6 +228,15 @@ Behavior:
   `OPENCODE_MODEL_ROUTER_GLOBAL_CONFIG=/run/opencode/model-router-global.json`.
   Both control files and both environment variables are supplied when both
   configs exist.
+- When `containers: true` is selected, discovers the host's filesystem-accessible rootless
+  Podman socket first, then a rootless or system Docker socket. It mounts only
+  that socket at `/run/opencode-container-engine.sock` and sets both
+  `CONTAINER_HOST` and `DOCKER_HOST` to its Unix URI. Because bind paths sent to
+  that socket are interpreted by the host engine, the launcher also mirrors the
+  workspace at its canonical host path and uses that path as the default
+  workdir instead of `/workspace/<cwd-hash>`; `/src` remains available.
+  The base image does not install a container client; derived development
+  images must provide `podman-remote`, Docker CLI, or another compatible client.
 - On every launch, independently checks the host's exact `$HOME/.gitconfig`.
   When present, it canonicalizes and mounts only that readable regular file
   read-only at `/run/opencode/gitconfig` and sets `GIT_CONFIG_GLOBAL` to that
@@ -267,8 +276,9 @@ Behavior:
   logins and sessions in the same SQLite database, so keeping each project's
   database intact is safer than copying credential rows into project
   directories or exposing every project's state through one shared volume.
-  Stable CWD-derived workdirs and volumes allow resume from any PATH-installed
-  launcher. Configure an explicit common volume only when cross-project state
+  Stable CWD-derived volumes allow resume from any PATH-installed launcher;
+  workdirs are also CWD-derived except when `containers` mirrors the canonical
+  host path. Configure an explicit common volume only when cross-project state
   sharing is intentional.
 
 ### Sandbox config schema (schema_version 1)
@@ -283,7 +293,8 @@ Behavior:
     "args": { "OPENCODE2_VERSION": "0.0.0-beta-17823" } // optional build args
   },
   "workspace": ".",                          // optional; default $PWD; mounted at /src
-  "workdir": "app/",                         // optional; relative -> stable project path/app/
+  "containers": false,                       // optional host container-engine socket access
+  "workdir": "app/",                         // optional; relative -> selected workspace path/app/
   "mounts": [],                              // optional additional mounts
   "env": {                                   // optional
     "pass": ["GIT_AUTHOR_NAME"],             // forwarded only if set in host
@@ -320,6 +331,21 @@ Behavior:
 Mount `source` may be relative (resolved against the workspace) or absolute;
 an omitted `target` mirrors the resolved absolute source path. `runtime_args`
 accepts only `--add-host=`, `--pids-limit=`, and `--ulimit=` entries.
+`containers` must be a boolean and defaults to `false`. When true, the launcher
+prefers a filesystem-accessible user Podman socket over Docker, fails if neither is
+available, and manages `CONTAINER_HOST`/`DOCKER_HOST` itself. It mirrors the
+workspace at the canonical host path so nested container commands can safely
+use `$PWD` in bind mounts; relative and `/src`-based workdirs resolve beneath
+that host path and may not escape it. Additional mounts may not overlap this
+workspace mirror. Socket discovery validates the node and host-user access, not
+the engine API; remove stale socket files or restart the service if connection
+fails. The base image has no container client, so a derived image must install
+one. A socket that depends on a supplementary host group also requires a Podman
+OCI runtime supporting `--group-add keep-groups`. Access to either
+socket grants processes in the sandbox control
+equivalent to the host user who owns or can access the container engine,
+including the ability to start privileged containers and mount host paths. Use
+this option only in trusted repositories and images.
 Set `persistence.data_volume` to `""` for fully ephemeral OpenCode2 data. A
 fixed explicit volume name shares both login and session state across every
 project configured with that name. Moving a project changes the default CWD

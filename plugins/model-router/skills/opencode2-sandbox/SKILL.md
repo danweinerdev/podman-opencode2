@@ -51,7 +51,22 @@ the launcher from the host workspace root.
   workspace; `args` are passed as Podman build arguments.
 - `workspace` defaults to the host workspace root and is mounted at `/src`.
 - Relative and `/src`-based `workdir` values resolve below the stable
-  `/workspace/<cwd-hash>` project path.
+  `/workspace/<cwd-hash>` project path unless `containers` is enabled.
+- `containers` is an optional boolean, defaulting to `false`. When true, the
+  launcher prefers a filesystem-accessible rootless Podman socket over a rootless or
+  system Docker socket, mounts only the selected socket at
+  `/run/opencode-container-engine.sock`, and manages `CONTAINER_HOST` and
+  `DOCKER_HOST`. It also mirrors the workspace at its canonical host path and
+  resolves default, relative, and `/src`-based workdirs there because nested
+  bind paths are interpreted by the host engine. The workdir must remain within
+  that mirror, and additional mounts may not overlap it. Discovery checks the
+  socket node and permissions, not API liveness. The base image has no container
+  client; use this with a derived image that installs `podman-remote`, Docker
+  CLI, or another compatible client. Do not add manual socket,
+  workspace-mirror, or host-variable entries when using this option. Socket
+  access gives sandbox processes control equivalent to the host container-engine
+  user, including host-path mounts and privileged containers; enable it only
+  for trusted repositories and images.
 - `mounts` entries contain `source`, optional `target`, and optional
   `read_only`. Relative sources resolve from the configured workspace. Do not
   mount host OpenCode state from effective XDG directories, `.agents`,

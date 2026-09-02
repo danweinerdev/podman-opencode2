@@ -129,7 +129,24 @@ PROVIDER_SECRET_SPECS=(
 
 # Baked config/plugin paths and launcher control mounts; additional mounts may
 # not shadow these, including through lexical `..` path segments.
-Baked_roots=(/etc/opencode /opt/opencode /opt/mcp /run/opencode /src /workspace)
+Baked_roots=(
+  /etc/opencode
+  /opt/opencode
+  /opt/mcp
+  /run/opencode
+  /src
+  /workspace
+)
+# containers mode does not create the generated /workspace/<hash> mount, so a
+# host workspace that genuinely lives below /workspace can be mirrored safely.
+Containers_workspace_reserved_roots=(
+  /etc/opencode
+  /opt/opencode
+  /opt/mcp
+  /run/opencode
+  /run/opencode-container-engine.sock
+  /src
+)
 
 # Host agent state the container must never reach (by mount). The launcher
 # deliberately does not forward OpenCode, .agents, .claude, or .mcp state.
@@ -193,6 +210,11 @@ overlaps_global_git_config() {
 SCHEMA_VERSION="$(config_jq -r '.schema_version // 1')"
 [[ "${SCHEMA_VERSION}" == "1" ]] || die "unsupported schema_version: ${SCHEMA_VERSION}"
 
+CONTAINERS_TYPE="$(config_jq -r 'if has("containers") then (.containers | type) else "absent" end')"
+[[ "${CONTAINERS_TYPE}" == "absent" || "${CONTAINERS_TYPE}" == "boolean" ]] \
+  || die "containers must be a boolean"
+CONTAINERS_ENABLED="$(config_jq -r 'if .containers == true then 1 else 0 end')"
+
 IMAGE="$(config_jq -r '.image // "opencode2:latest"')"
 
 # Optional build block.
@@ -211,9 +233,9 @@ case "${CONTEXT}" in
   *) CONTEXT="${INVOCATION_ROOT}/${CONTEXT}" ;;
 esac
 
-# Workspace is mounted at /src for compatibility and at a stable, CWD-derived
-# path for OpenCode2's project/session identity. This keeps one central data
-# volume usable across projects without every project appearing as /src.
+# Workspace is mounted at /src for compatibility and normally at a stable,
+# CWD-derived path for OpenCode2's project/session identity. containers mode
+# uses the canonical host path instead so nested bind mounts remain meaningful.
 WORKSPACE="$(config_jq -r '.workspace // empty')"
 if [[ -z "${WORKSPACE}" ]]; then
   WORKSPACE="${INVOCATION_ROOT}"
@@ -236,7 +258,17 @@ fi
 PROJECT_DIGEST="$(printf '%s' "${INVOCATION_ROOT}" | sha256sum)"
 PROJECT_KEY="${PROJECT_DIGEST%% *}"
 PROJECT_KEY="${PROJECT_KEY:0:16}"
-CONTAINER_WORKSPACE="/workspace/${PROJECT_KEY}"
+if [[ "${CONTAINERS_ENABLED}" -eq 1 ]]; then
+  # Bind paths sent through a mounted host container-engine socket are resolved
+  # by the host daemon. Mirror the workspace's canonical host path so $PWD-based
+  # nested mounts name a path that exists on that host.
+  if paths_overlap "${WORKSPACE}" "${Containers_workspace_reserved_roots[@]}"; then
+    die "containers workspace target ${WORKSPACE} shadows a baked config/plugin path"
+  fi
+  CONTAINER_WORKSPACE="${WORKSPACE}"
+else
+  CONTAINER_WORKSPACE="/workspace/${PROJECT_KEY}"
+fi
 
 WORKDIR="$(config_jq -r '.workdir // empty')"
 if [[ -z "${WORKDIR}" ]]; then
@@ -249,9 +281,64 @@ else
     *) WORKDIR="${CONTAINER_WORKSPACE}/${WORKDIR}" ;;
   esac
 fi
+if [[ "${CONTAINERS_ENABLED}" -eq 1 ]]; then
+  WORKDIR="$(realpath -m -- "${WORKDIR}")" || die "invalid containers workdir: ${WORKDIR}"
+  if [[ "${WORKDIR}" != "${CONTAINER_WORKSPACE}" && "${WORKDIR}" != "${CONTAINER_WORKSPACE}"/* ]]; then
+    die "containers workdir ${WORKDIR} must stay within workspace ${CONTAINER_WORKSPACE}"
+  fi
+fi
 
 # --- podman run flag assembly ------------------------------------------------
 RUN_FLAGS=(--pull=never --rm --init --userns=keep-id --security-opt label=disable)
+
+CONTAINER_SOCKET_SOURCE=""
+CONTAINER_SOCKET_TARGET="/run/opencode-container-engine.sock"
+if [[ "${CONTAINERS_ENABLED}" -eq 1 ]]; then
+  SOCKET_CANDIDATES=()
+  if [[ "${XDG_RUNTIME_DIR:-}" == /* ]]; then
+    SOCKET_CANDIDATES+=("${XDG_RUNTIME_DIR}/podman/podman.sock")
+  fi
+  SOCKET_CANDIDATES+=("/run/user/$(id -u)/podman/podman.sock")
+  if [[ "${XDG_RUNTIME_DIR:-}" == /* ]]; then
+    SOCKET_CANDIDATES+=("${XDG_RUNTIME_DIR}/docker.sock")
+  fi
+  SOCKET_CANDIDATES+=("/run/user/$(id -u)/docker.sock")
+  SOCKET_CANDIDATES+=("/var/run/docker.sock")
+  SOCKET_CANDIDATES+=("/run/docker.sock")
+
+  declare -A SEEN_CONTAINER_SOCKETS=()
+  for candidate_path in "${SOCKET_CANDIDATES[@]}"; do
+    [[ -S "${candidate_path}" && -r "${candidate_path}" && -w "${candidate_path}" ]] \
+      || continue
+    canonical_candidate="$(realpath -- "${candidate_path}")" \
+      || die "unable to canonicalize container-engine socket: ${candidate_path}"
+    [[ -z "${SEEN_CONTAINER_SOCKETS[${canonical_candidate}]+x}" ]] || continue
+    SEEN_CONTAINER_SOCKETS["${canonical_candidate}"]=1
+    CONTAINER_SOCKET_SOURCE="${canonical_candidate}"
+    break
+  done
+
+  [[ -n "${CONTAINER_SOCKET_SOURCE}" ]] \
+    || die "containers is enabled, but no accessible Podman user or Docker socket was found"
+  RUN_FLAGS+=(-v "${CONTAINER_SOCKET_SOURCE}:${CONTAINER_SOCKET_TARGET}")
+
+  # Either engine can grant socket access through a supplementary host group.
+  # Preserve memberships only when owner, primary-group, and world permissions
+  # do not already explain this host user's read/write access.
+  socket_uid="$(stat -Lc '%u' -- "${CONTAINER_SOCKET_SOURCE}")" \
+    || die "unable to inspect container-engine socket owner: ${CONTAINER_SOCKET_SOURCE}"
+  socket_gid="$(stat -Lc '%g' -- "${CONTAINER_SOCKET_SOURCE}")" \
+    || die "unable to inspect container-engine socket group: ${CONTAINER_SOCKET_SOURCE}"
+  socket_mode="$(stat -Lc '%a' -- "${CONTAINER_SOCKET_SOURCE}")" \
+    || die "unable to inspect container-engine socket mode: ${CONTAINER_SOCKET_SOURCE}"
+  socket_mode_decimal=$((8#${socket_mode}))
+  if [[ "${socket_uid}" != "$(id -u)" && "${socket_gid}" != "$(id -g)" ]] \
+      && (( (socket_mode_decimal & 6) != 6 )); then
+    case " $(id -G) " in
+      *" ${socket_gid} "*) RUN_FLAGS+=(--group-add keep-groups) ;;
+    esac
+  fi
+fi
 
 # The pinned preview stores credentials and sessions in the same SQLite
 # database. Keep that database intact in one reusable named volume rather than
@@ -260,6 +347,10 @@ DATA_VOLUME="$(config_jq -r --arg default "opencode2-data-${PROJECT_KEY}" ".pers
 if [[ -n "${DATA_VOLUME}" ]]; then
   [[ "${DATA_VOLUME}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] \
     || die "invalid persistence.data_volume: ${DATA_VOLUME}"
+  if [[ "${CONTAINERS_ENABLED}" -eq 1 ]] \
+      && paths_overlap "${CONTAINER_WORKSPACE}" /var/lib/opencode-data; then
+    die "containers workspace ${CONTAINER_WORKSPACE} overlaps the OpenCode data mount"
+  fi
   RUN_FLAGS+=(-v "${DATA_VOLUME}:/var/lib/opencode-data:U")
   RUN_FLAGS+=(-e XDG_DATA_HOME=/var/lib/opencode-data)
 fi
@@ -269,8 +360,8 @@ if [[ -t 0 && -t 1 ]]; then
   RUN_FLAGS+=(-it)
 fi
 
-# Keep /src as a compatibility alias while running OpenCode2 from the stable
-# project path used to distinguish sessions in the shared data volume.
+# Keep /src as a compatibility alias while running OpenCode2 from the selected
+# generated or host-identical project path.
 RUN_FLAGS+=(-v "${WORKSPACE}:/src")
 RUN_FLAGS+=(-v "${WORKSPACE}:${CONTAINER_WORKSPACE}")
 RUN_FLAGS+=(-w "${WORKDIR}")
@@ -338,6 +429,14 @@ while IFS= read -r entry; do
   target="$(realpath -m -- "${target}")" || die "invalid mount target: ${target}"
   if paths_overlap "${target}" "${Baked_roots[@]}"; then
     die "mount target ${target} shadows a baked config/plugin path"
+  fi
+  if [[ "${CONTAINERS_ENABLED}" -eq 1 ]] \
+      && paths_overlap "${target}" "${CONTAINER_WORKSPACE}"; then
+    die "mount target ${target} overlaps the containers workspace mirror ${CONTAINER_WORKSPACE}"
+  fi
+  if [[ "${CONTAINERS_ENABLED}" -eq 1 ]] \
+      && paths_overlap "${target}" "${CONTAINER_SOCKET_TARGET}"; then
+    die "mount target ${target} shadows the managed container-engine socket"
   fi
 
   flag="${abs_source}:${target}"
@@ -413,6 +512,14 @@ while IFS= read -r kv; do
   add_env "${name}" "${value}" set
 done < <(config_jq -r '.env.set // {} | to_entries[] | "\(.key)=\(.value)"')
 
+if [[ "${CONTAINERS_ENABLED}" -eq 1 ]]; then
+  # These values describe the launcher-managed socket and deliberately override
+  # conflicting env.pass/env.set entries when container-engine access is opted in.
+  container_socket_uri="unix://${CONTAINER_SOCKET_TARGET}"
+  add_env CONTAINER_HOST "${container_socket_uri}" set
+  add_env DOCKER_HOST "${container_socket_uri}" set
+fi
+
 for name in "${ENV_ORDER[@]}"; do
   if [[ "${ENV_MODE[${name}]}" == "pass" ]]; then
     # Let Podman inherit the value from this process without embedding a secret
@@ -443,6 +550,10 @@ if GIT_COMMON_DIR="$(git -C "${WORKSPACE}" rev-parse --git-common-dir 2>/dev/nul
     fi
     if paths_overlap "${GIT_COMMON_DIR}" "${Baked_roots[@]}"; then
       die "git common directory ${GIT_COMMON_DIR} shadows a baked config/plugin path"
+    fi
+    if [[ "${CONTAINERS_ENABLED}" -eq 1 ]] \
+        && paths_overlap "${GIT_COMMON_DIR}" "${CONTAINER_WORKSPACE}"; then
+      die "git common directory ${GIT_COMMON_DIR} overlaps the containers workspace mirror"
     fi
     RUN_FLAGS+=(-v "${GIT_COMMON_DIR}:${GIT_COMMON_DIR}")
   fi

@@ -8,6 +8,20 @@ trap 'rm -rf "${TMP}"' EXIT
 mkdir -p "${TMP}/bin" "${TMP}/workspace" "${TMP}/test-home"
 export HOME="${TMP}/test-home"
 
+make_unix_socket() {
+  local path="$1"
+  mkdir -p "$(dirname "${path}")"
+  rm -f -- "${path}"
+  python3 - "${path}" <<'PY'
+import socket
+import sys
+
+sock = socket.socket(socket.AF_UNIX)
+sock.bind(sys.argv[1])
+sock.close()
+PY
+}
+
 cat > "${TMP}/bin/podman" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -42,11 +56,25 @@ exit 1
 EOF
 chmod 0755 "${TMP}/bin/podman"
 
+# Allow socket-fallback tests to hide the real user's conventional rootless
+# Podman path without changing the launcher's production discovery behavior.
+cat > "${TMP}/bin/id" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ -n "${FAKE_UID:-}" && "${1:-}" == "-u" ]]; then
+  printf '%s\n' "${FAKE_UID}"
+  exit 0
+fi
+exec /usr/bin/id "$@"
+EOF
+chmod 0755 "${TMP}/bin/id"
+
 cat > "${TMP}/workspace/.opencode-sandbox.json" <<'EOF'
 {
   "schema_version": 1,
   "image": "opencode2:test",
   "workspace": ".",
+  "containers": false,
   "mounts": [],
   "env": {
     "pass": ["OPENAI_API_KEY", "EMPTY_FORWARD"],
@@ -84,6 +112,10 @@ grep -Fx -- "opencode2-data-${WORKSPACE_KEY}:/var/lib/opencode-data:U" "${ARGV_L
 grep -Fx -- "XDG_DATA_HOME=/var/lib/opencode-data" "${ARGV_LOG}" >/dev/null
 grep -Fx -- "${TMP}/workspace:/workspace/${WORKSPACE_KEY}" "${ARGV_LOG}" >/dev/null
 grep -Fx -- "/workspace/${WORKSPACE_KEY}" "${ARGV_LOG}" >/dev/null
+if grep -Fq -- "/run/opencode-container-engine.sock" "${ARGV_LOG}"; then
+  printf 'launcher exposed a container-engine socket while containers was false\n' >&2
+  exit 1
+fi
 [[ "$(grep -Fxc -- "OPENAI_API_KEY" "${ARGV_LOG}")" -eq 1 ]]
 if grep -Fq -- "launch-secret-sentinel" "${ARGV_LOG}"; then
   printf 'provider secret leaked into podman argv\n' >&2
@@ -93,6 +125,133 @@ fi
 grep -Fx -- "OPENAI_API_KEY=launch-secret-sentinel" "${ENV_LOG}" >/dev/null
 grep -Fx -- "EMPTY_FORWARD_SET=x" "${ENV_LOG}" >/dev/null
 grep -Fx -- "EMPTY_FORWARD=" "${ENV_LOG}" >/dev/null
+
+# Opting into host container-engine access prefers the user Podman socket over
+# Docker, manages both client variables, and mirrors the workspace at its host
+# path so nested bind mounts do not reference the generated /workspace path.
+mkdir -p "${TMP}/containers-workspace/subdir" "${TMP}/containers-runtime"
+make_unix_socket "${TMP}/containers-runtime/podman/podman.sock"
+make_unix_socket "${TMP}/containers-runtime/docker.sock"
+cat > "${TMP}/containers-workspace/.opencode-sandbox.json" <<'EOF'
+{
+  "image": "opencode2:test",
+  "containers": true,
+  "workdir": "subdir",
+  "env": {
+    "set": {
+      "CONTAINER_HOST": "tcp://must-not-win.invalid",
+      "DOCKER_HOST": "tcp://must-not-win.invalid"
+    }
+  },
+  "command": ["/bin/true"]
+}
+EOF
+(
+  cd "${TMP}/containers-workspace"
+  HOME="${TMP}/test-home" XDG_RUNTIME_DIR="${TMP}/containers-runtime" \
+    PATH="${TMP}/bin:${PATH}" "${ROOT}/examples/opencode-container.sh"
+)
+grep -Fx -- "${TMP}/containers-runtime/podman/podman.sock:/run/opencode-container-engine.sock" \
+  "${ARGV_LOG}" >/dev/null
+if grep -Fq -- "${TMP}/containers-runtime/docker.sock:/run/opencode-container-engine.sock" \
+  "${ARGV_LOG}"; then
+  printf 'launcher preferred Docker over the user Podman socket\n' >&2
+  exit 1
+fi
+grep -Fx -- "${TMP}/containers-workspace:/src" "${ARGV_LOG}" >/dev/null
+grep -Fx -- "${TMP}/containers-workspace:${TMP}/containers-workspace" "${ARGV_LOG}" >/dev/null
+grep -Fx -- "${TMP}/containers-workspace/subdir" "${ARGV_LOG}" >/dev/null
+grep -Fx -- "CONTAINER_HOST=unix:///run/opencode-container-engine.sock" "${ARGV_LOG}" >/dev/null
+grep -Fx -- "DOCKER_HOST=unix:///run/opencode-container-engine.sock" "${ARGV_LOG}" >/dev/null
+if grep -Fq -- "must-not-win.invalid" "${ARGV_LOG}"; then
+  printf 'workspace environment overrode launcher-managed container-engine variables\n' >&2
+  exit 1
+fi
+if grep -Fq -- "/workspace/" "${ARGV_LOG}"; then
+  printf 'containers mode retained a generated workspace path\n' >&2
+  exit 1
+fi
+
+# Host-path workdirs and additional mounts may not escape or shadow the mirror
+# whose identity nested container bind mounts rely on.
+jq '.workdir = "../outside"' \
+  "${TMP}/containers-workspace/.opencode-sandbox.json" \
+  > "${TMP}/containers-workspace/.opencode-sandbox.json.new"
+mv "${TMP}/containers-workspace/.opencode-sandbox.json.new" \
+  "${TMP}/containers-workspace/.opencode-sandbox.json"
+if (
+  cd "${TMP}/containers-workspace"
+  HOME="${TMP}/test-home" XDG_RUNTIME_DIR="${TMP}/containers-runtime" \
+    PATH="${TMP}/bin:${PATH}" "${ROOT}/examples/opencode-container.sh"
+) 2>"${TMP}/containers-workdir.log"; then
+  printf 'containers mode accepted a workdir outside the mirrored workspace\n' >&2
+  exit 1
+fi
+grep -F -- "must stay within workspace" "${TMP}/containers-workdir.log" >/dev/null
+
+jq --arg target "${TMP}/containers-workspace/subdir" \
+  '.workdir = "." | .mounts = [{source: ".", target: $target}]' \
+  "${TMP}/containers-workspace/.opencode-sandbox.json" \
+  > "${TMP}/containers-workspace/.opencode-sandbox.json.new"
+mv "${TMP}/containers-workspace/.opencode-sandbox.json.new" \
+  "${TMP}/containers-workspace/.opencode-sandbox.json"
+if (
+  cd "${TMP}/containers-workspace"
+  HOME="${TMP}/test-home" XDG_RUNTIME_DIR="${TMP}/containers-runtime" \
+    PATH="${TMP}/bin:${PATH}" "${ROOT}/examples/opencode-container.sh"
+) 2>"${TMP}/containers-mount-overlap.log"; then
+  printf 'containers mode accepted a mount overlapping the workspace mirror\n' >&2
+  exit 1
+fi
+grep -F -- "overlaps the containers workspace mirror" \
+  "${TMP}/containers-mount-overlap.log" >/dev/null
+
+# With no user Podman socket, a rootless Docker socket is selected next.
+mkdir -p "${TMP}/docker-workspace" "${TMP}/docker-runtime"
+make_unix_socket "${TMP}/docker-runtime/docker.sock"
+printf '%s\n' '{"image":"opencode2:test","containers":true,"command":["/bin/true"]}' \
+  > "${TMP}/docker-workspace/.opencode-sandbox.json"
+(
+  cd "${TMP}/docker-workspace"
+  HOME="${TMP}/test-home" XDG_RUNTIME_DIR="${TMP}/docker-runtime" FAKE_UID=424242 \
+    PATH="${TMP}/bin:${PATH}" "${ROOT}/examples/opencode-container.sh"
+)
+grep -Fx -- "${TMP}/docker-runtime/docker.sock:/run/opencode-container-engine.sock" \
+  "${ARGV_LOG}" >/dev/null
+if grep -Fxq -- "keep-groups" "${ARGV_LOG}"; then
+  printf 'launcher added system-Docker group handling for a rootless Docker socket\n' >&2
+  exit 1
+fi
+
+# Non-boolean opt-in values fail before Podman is invoked.
+mkdir -p "${TMP}/containers-invalid"
+printf '%s\n' '{"containers":"true"}' > "${TMP}/containers-invalid/.opencode-sandbox.json"
+if (
+  cd "${TMP}/containers-invalid"
+  HOME="${TMP}/test-home" PATH="${TMP}/bin:${PATH}" \
+    "${ROOT}/examples/opencode-container.sh"
+) 2>"${TMP}/containers-invalid.log"; then
+  printf 'launcher accepted a non-boolean containers value\n' >&2
+  exit 1
+fi
+grep -F -- "containers must be a boolean" "${TMP}/containers-invalid.log" >/dev/null
+
+# On hosts without a system Docker socket, opting in with no available socket
+# fails closed. (A real accessible system socket is legitimately the fallback.)
+if [[ ! -S /var/run/docker.sock && ! -S /run/docker.sock ]]; then
+  mkdir -p "${TMP}/containers-missing" "${TMP}/empty-runtime"
+  printf '%s\n' '{"containers":true}' > "${TMP}/containers-missing/.opencode-sandbox.json"
+  if (
+    cd "${TMP}/containers-missing"
+    HOME="${TMP}/test-home" XDG_RUNTIME_DIR="${TMP}/empty-runtime" FAKE_UID=424242 \
+      PATH="${TMP}/bin:${PATH}" "${ROOT}/examples/opencode-container.sh"
+  ) 2>"${TMP}/containers-missing.log"; then
+    printf 'launcher accepted containers mode without an accessible socket\n' >&2
+    exit 1
+  fi
+  grep -F -- "no accessible Podman user or Docker socket was found" \
+    "${TMP}/containers-missing.log" >/dev/null
+fi
 
 # Lexical traversal in a mount target must not bypass the baked-path guard.
 jq '.mounts = [{"source": ".", "target": "/src/../opt/opencode"}]' \
