@@ -138,6 +138,7 @@ RUN set -eux; \
     npm install -g @opencode-ai/cli@"${OPENCODE2_VERSION}" --ignore-scripts; \
     node "$(npm root -g)/@opencode-ai/cli/postinstall.mjs"; \
     [ "$(opencode2 --version)" = "opencode2 v${OPENCODE2_VERSION}" ]; \
+    rm -rf /tmp/opencode; \
     ! command -v opencode >/dev/null 2>&1
 
 # Create an unprivileged user whose UID/GID match the host caller so
