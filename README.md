@@ -441,7 +441,7 @@ npm test           # node:test, including a mock AgentDraft
 
 # shell + config syntax
 bash -n examples/opencode-container.sh
-shellcheck examples/opencode-container.sh   # if shellcheck is installed
+shellcheck examples/opencode-container.sh
 tests/launcher-env.test.sh
 tests/local-provider-build.test.sh  # Podman integration; builds present/changed/absent catalogs
 jq empty container-config.json

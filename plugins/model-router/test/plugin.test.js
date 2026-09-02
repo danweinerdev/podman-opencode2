@@ -132,6 +132,15 @@ test("container keeps policy assets root-owned and installs only native agents",
   assert.match(source, /CMD \["opencode2", "--standalone"\]/)
 })
 
+test("final runtime image includes Git and ShellCheck", async () => {
+  const source = await readFile(resolve(ROOT, "..", "..", "Containerfile"), "utf8")
+  const runtime = source.slice(source.lastIndexOf("FROM docker.io/library/fedora:44"))
+  assert.match(runtime, /ca-certificates curl wget git gnupg2/)
+  assert.match(runtime, /jq ripgrep fd-find less vim nano ShellCheck/)
+  assert.match(runtime, /command -v git/)
+  assert.match(runtime, /command -v shellcheck/)
+})
+
 test("baked workers use native v2 permissions and subagent terminology", async () => {
   for (const agent of BAKED_AGENTS) {
     const source = await readFile(resolve(ROOT, "agents", `${agent}.md`), "utf8")

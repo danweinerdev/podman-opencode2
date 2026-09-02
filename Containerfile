@@ -117,12 +117,16 @@ ARG OPENCODE2_VERSION=0.0.0-beta-17823
 RUN dnf install -y --setopt=install_weak_deps=False \
         ca-certificates curl wget git gnupg2 \
         nodejs24 nodejs24-npm \
-        jq ripgrep fd-find less vim nano \
+        jq ripgrep fd-find less vim nano ShellCheck \
         gdb lldb strace ltrace \
         procps-ng file unzip xz tar diffutils \
         python3 \
         shadow-utils \
         openssl-libs zlib \
+    && command -v git >/dev/null \
+    && command -v shellcheck >/dev/null \
+    && git --version \
+    && shellcheck --version \
     && dnf clean all
 
 # OpenCode2 CLI, pinned via the @opencode-ai/cli npm package. Its postinstall
