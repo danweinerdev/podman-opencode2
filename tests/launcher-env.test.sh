@@ -328,8 +328,45 @@ if (
 fi
 grep -F -- "overlaps host OpenCode/.agents/.claude/.mcp state" "${TMP}/symlink-overlap.log" >/dev/null
 
+# A .git file must expose its external metadata root at the same absolute path.
+# Cover Git's usual absolute pointer and an equivalent relative pointer.
+mkdir -p "${TMP}/git-source"
+git init -q --initial-branch=main "${TMP}/git-source"
+git -C "${TMP}/git-source" \
+  -c user.name=Test -c user.email=test@example.invalid \
+  commit -qm initial --allow-empty
+git -C "${TMP}/git-source" worktree add -q --detach "${TMP}/git-linked-worktree" HEAD
+printf '%s\n' '{"image":"opencode2:test","command":["/bin/true"]}' \
+  > "${TMP}/git-linked-worktree/.opencode-sandbox.json"
+GIT_LINKED_DIR="$(git -C "${TMP}/git-linked-worktree" rev-parse --git-dir)"
+GIT_LINKED_COMMON="$(git -C "${TMP}/git-linked-worktree" rev-parse --git-common-dir)"
+(
+  cd "${TMP}/git-linked-worktree"
+  HOME="${TMP}/test-home" PATH="${TMP}/bin:${PATH}" "${ROOT}/examples/opencode-container.sh"
+)
+grep -Fx -- "${GIT_LINKED_COMMON}:${GIT_LINKED_COMMON}" "${ARGV_LOG}" >/dev/null
+
+GIT_LINKED_RELATIVE="$(realpath --relative-to="${TMP}/git-linked-worktree" "${GIT_LINKED_DIR}")"
+printf 'gitdir: %s\n' "${GIT_LINKED_RELATIVE}" > "${TMP}/git-linked-worktree/.git"
+(
+  cd "${TMP}/git-linked-worktree"
+  HOME="${TMP}/test-home" PATH="${TMP}/bin:${PATH}" "${ROOT}/examples/opencode-container.sh"
+)
+grep -Fx -- "${GIT_LINKED_COMMON}:${GIT_LINKED_COMMON}" "${ARGV_LOG}" >/dev/null
+
+# A stale .git pointer is an actionable error rather than a silent omission.
+printf 'gitdir: ../missing-worktree-metadata\n' > "${TMP}/git-linked-worktree/.git"
+if (
+  cd "${TMP}/git-linked-worktree"
+  HOME="${TMP}/test-home" PATH="${TMP}/bin:${PATH}" "${ROOT}/examples/opencode-container.sh"
+) 2>"${TMP}/git-stale-pointer.log"; then
+  printf 'launcher accepted a stale linked-worktree gitdir pointer\n' >&2
+  exit 1
+fi
+grep -F -- "linked-worktree gitdir does not exist" "${TMP}/git-stale-pointer.log" >/dev/null
+
 # Linked worktree support must apply the same protection to the external Git
-# common directory before mounting it into the container.
+# metadata root before mounting it into the container.
 mkdir -p "${TMP}/git-home/.agents"
 git init -q --initial-branch=main "${TMP}/git-home/.agents/main"
 git -C "${TMP}/git-home/.agents/main" \
@@ -345,7 +382,7 @@ if (
   printf 'launcher accepted a protected linked-worktree common directory\n' >&2
   exit 1
 fi
-grep -F -- "git common directory" "${TMP}/git-common-overlap.log" >/dev/null
+grep -F -- "git metadata directory" "${TMP}/git-common-overlap.log" >/dev/null
 grep -F -- "overlaps host OpenCode/.agents/.claude/.mcp state" "${TMP}/git-common-overlap.log" >/dev/null
 
 # Effective custom XDG locations are host OpenCode state too.

@@ -50,6 +50,9 @@ the launcher from the host workspace root.
 - `build` is optional. `containerfile` and `context` resolve from the host
   workspace; `args` are passed as Podman build arguments.
 - `workspace` defaults to the host workspace root and is mounted at `/src`.
+- When the workspace's `.git` is a file, the launcher validates its `gitdir`
+  and mounts the external common metadata root at its matching absolute host
+  path. A stale or malformed worktree pointer is rejected.
 - Relative and `/src`-based `workdir` values resolve below the stable
   `/workspace/<cwd-hash>` project path unless `containers` is enabled.
 - `containers` is an optional boolean, defaulting to `false`. When true, the

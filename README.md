@@ -209,12 +209,14 @@ invocation directory, not the script's installation directory.
 Behavior:
 
 - `--pull=never --rm --init --userns=keep-id --security-opt label=disable`.
-- TTY (`-it`) only when interactive. Normally, the selected workspace is mounted at
-  `/src` for command compatibility and at `/workspace/<cwd-hash>` for a stable,
+- TTY (`-it`) only when interactive. Normally, the selected workspace is
+  mounted at `/src` for command compatibility and at `/workspace/<cwd-hash>` for a stable,
   project-specific OpenCode2 identity. The latter is the default workdir;
-  relative workdirs and `/src`-based workdirs are remapped beneath it. An
-  external git common dir (linked worktree) is detected and mounted at the same
-  absolute path so git still works in-container.
+  relative workdirs and `/src`-based workdirs are remapped beneath it. A linked
+  worktree's `.git` file is validated directly; its external common
+  metadata root is mounted at the same absolute host path so Git still works
+  in-container. Stale or malformed pointers fail clearly instead of
+  silently starting without repository metadata.
 - When a sandbox config exists, mounts it read-only at
   `/run/opencode/sandbox.json` and sets
   `OPENCODE_MODEL_ROUTER_CONFIG=/run/opencode/sandbox.json` so the model-router

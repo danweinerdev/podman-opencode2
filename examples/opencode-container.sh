@@ -530,33 +530,67 @@ for name in "${ENV_ORDER[@]}"; do
   fi
 done
 
-# Shared git common dir: a linked worktree keeps objects/refs in a sibling
-# common dir; expose it at the same absolute path so git works in-container.
-if GIT_COMMON_DIR="$(git -C "${WORKSPACE}" rev-parse --git-common-dir 2>/dev/null)"; then
+# Linked worktrees and submodules store a gitdir pointer in .git. Validate it
+# explicitly so stale metadata fails clearly instead of silently suppressing
+# the existing common-directory mount.
+GIT_FILE_PRESENT=0
+if [[ -f "${WORKSPACE}/.git" ]]; then
+  GIT_FILE_PRESENT=1
+  GIT_FILE_ENTRY="$(<"${WORKSPACE}/.git")"
+  GIT_FILE_ENTRY="${GIT_FILE_ENTRY%$'\r'}"
+  [[ "${GIT_FILE_ENTRY}" != *$'\n'* && "${GIT_FILE_ENTRY}" == "gitdir: "* ]] \
+    || die "malformed linked-worktree git file: ${WORKSPACE}/.git"
+  GIT_DIR_REF="${GIT_FILE_ENTRY#gitdir: }"
+  [[ -n "${GIT_DIR_REF}" ]] || die "linked-worktree git file has an empty gitdir: ${WORKSPACE}/.git"
+  case "${GIT_DIR_REF}" in
+    /*) GIT_DIR_PATH="${GIT_DIR_REF}" ;;
+    *) GIT_DIR_PATH="${WORKSPACE}/${GIT_DIR_REF}" ;;
+  esac
+  GIT_DIR_PATH="$(realpath -- "${GIT_DIR_PATH}")" \
+    || die "linked-worktree gitdir does not exist: ${GIT_DIR_REF}"
+  [[ -d "${GIT_DIR_PATH}" ]] || die "linked-worktree gitdir is not a directory: ${GIT_DIR_PATH}"
+fi
+
+GIT_COMMON_DIR=""
+if GIT_COMMON_REF="$(git -C "${WORKSPACE}" rev-parse --git-common-dir 2>/dev/null)"; then
+  GIT_COMMON_DIR="${GIT_COMMON_REF}"
   case "${GIT_COMMON_DIR}" in
     /*) : ;;
     *) GIT_COMMON_DIR="${WORKSPACE}/${GIT_COMMON_DIR}" ;;
   esac
-  GIT_COMMON_DIR="$(cd "${GIT_COMMON_DIR}" 2>/dev/null && pwd)" || GIT_COMMON_DIR=""
-  if [[ -n "${GIT_COMMON_DIR}" && "${GIT_COMMON_DIR}/" != "${WORKSPACE}/"* ]]; then
-    if paths_overlap "${GIT_COMMON_DIR}" "${Host_state_roots[@]}"; then
-      die "git common directory ${GIT_COMMON_DIR} overlaps host OpenCode/.agents/.claude/.mcp state"
-    fi
-    if overlaps_global_router "${GIT_COMMON_DIR}"; then
-      die "git common directory ${GIT_COMMON_DIR} overlaps the user-global model-router config"
-    fi
-    if overlaps_global_git_config "${GIT_COMMON_DIR}"; then
-      die "git common directory ${GIT_COMMON_DIR} overlaps the user-global Git config"
-    fi
-    if paths_overlap "${GIT_COMMON_DIR}" "${Baked_roots[@]}"; then
-      die "git common directory ${GIT_COMMON_DIR} shadows a baked config/plugin path"
-    fi
-    if [[ "${CONTAINERS_ENABLED}" -eq 1 ]] \
-        && paths_overlap "${GIT_COMMON_DIR}" "${CONTAINER_WORKSPACE}"; then
-      die "git common directory ${GIT_COMMON_DIR} overlaps the containers workspace mirror"
-    fi
-    RUN_FLAGS+=(-v "${GIT_COMMON_DIR}:${GIT_COMMON_DIR}")
+  GIT_COMMON_DIR="$(realpath -- "${GIT_COMMON_DIR}")" || GIT_COMMON_DIR=""
+elif [[ "${GIT_FILE_PRESENT}" -eq 1 ]]; then
+  die "unable to resolve linked-worktree common directory from ${WORKSPACE}/.git"
+fi
+
+if [[ -n "${GIT_COMMON_DIR}" \
+    && "${GIT_COMMON_DIR}" != "${WORKSPACE}" \
+    && "${GIT_COMMON_DIR}" != "${WORKSPACE}"/* ]]; then
+  if paths_overlap "${GIT_COMMON_DIR}" "${Host_state_roots[@]}"; then
+    die "git metadata directory ${GIT_COMMON_DIR} overlaps host OpenCode/.agents/.claude/.mcp state"
   fi
+  if overlaps_global_router "${GIT_COMMON_DIR}"; then
+    die "git metadata directory ${GIT_COMMON_DIR} overlaps the user-global model-router config"
+  fi
+  if overlaps_global_git_config "${GIT_COMMON_DIR}"; then
+    die "git metadata directory ${GIT_COMMON_DIR} overlaps the user-global Git config"
+  fi
+  if paths_overlap "${GIT_COMMON_DIR}" "${Baked_roots[@]}"; then
+    die "git metadata directory ${GIT_COMMON_DIR} shadows a baked config/plugin path"
+  fi
+  if [[ "${CONTAINERS_ENABLED}" -eq 1 ]] \
+      && paths_overlap "${GIT_COMMON_DIR}" "${CONTAINER_WORKSPACE}"; then
+    die "git metadata directory ${GIT_COMMON_DIR} overlaps the containers workspace mirror"
+  fi
+  if [[ -n "${DATA_VOLUME}" ]] \
+      && paths_overlap "${GIT_COMMON_DIR}" /var/lib/opencode-data; then
+    die "git metadata directory ${GIT_COMMON_DIR} overlaps the OpenCode data mount"
+  fi
+  if [[ "${CONTAINERS_ENABLED}" -eq 1 ]] \
+      && paths_overlap "${GIT_COMMON_DIR}" "${CONTAINER_SOCKET_TARGET}"; then
+    die "git metadata directory ${GIT_COMMON_DIR} shadows the managed container-engine socket"
+  fi
+  RUN_FLAGS+=(-v "${GIT_COMMON_DIR}:${GIT_COMMON_DIR}")
 fi
 
 # --- Build (only when needed, only from configured local build) --------------
