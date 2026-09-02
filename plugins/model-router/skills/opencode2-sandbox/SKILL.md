@@ -90,15 +90,19 @@ the launcher from the host workspace root.
   require.
 - `persistence.data_volume` defaults to a CWD-derived per-project named volume,
   `opencode2-data-<cwd-hash>`. The pinned preview stores provider logins and
-  sessions in one SQLite database, so the launcher persists each project's
-  database intact and isolated by default. A fixed explicit name intentionally
-  shares both kinds of state across projects; an empty string disables
+  sessions in one SQLite database and UI preferences under `XDG_STATE_HOME`, so
+  the launcher persists both trees in one isolated volume by default. A fixed
+  explicit name intentionally shares all of that state across projects; an
+  empty string disables
   persistence. The CWD-derived container workdir and volume remain stable even
   when the launcher itself lives elsewhere on `PATH`.
 - Model-router precedence is baked/plugin options < the standalone user-global
   `${XDG_CONFIG_HOME:-$HOME/.config}/opencode2/model-router.json` < the
   workspace's top-level `model_router`. Each layer shallow-merges partial
-  `profiles`, `agents`, and an optional `default_agent`. The global result must
+  `profiles`, `agents`, `default_agent`, and `pin_default_agent_model`. The last
+  setting defaults to `false`, allowing the persisted UI model to control the
+  default agent while workers remain profile-routed; set it to `true` to pin the
+  default agent to its profile too. The global result must
   be valid before the workspace layer is applied; a workspace cannot repair an
   invalid global cross-reference.
 - On every launch, a present global router must be one JSON object in a regular

@@ -103,7 +103,10 @@ test("default export is the v2/promise { id, setup } shape", () => {
 
 test("container config registers the router through the native v2 loader", async () => {
   const config = JSON.parse(await readFile(resolve(ROOT, "..", "..", "container-config.json"), "utf8"))
+  const schema = JSON.parse(await readFile(resolve(ROOT, "..", "..", "container-config.schema.json"), "utf8"))
   assert.equal(config.$schema, "./container-config.schema.json")
+  assert.equal(schema.required.includes("model"), false)
+  assert.deepEqual(schema.$defs.routerConfig.properties.pin_default_agent_model, { type: "boolean" })
   assert.equal("plugin" in config, false, "singular plugin selects the legacy v1 loader")
   assert.equal("small_model" in config, false)
   assert.equal("subagent_depth" in config, false)
@@ -119,6 +122,8 @@ test("container config registers the router through the native v2 loader", async
   assert.ok(entry, "native v2 model-router entry is present")
   assert.equal(typeof entry.options, "object")
   assert.equal(entry.options.schema_version, 1)
+  assert.equal(entry.options.pin_default_agent_model, false)
+  assert.equal("model" in config, false)
   assert.deepEqual(Object.keys(entry.options.agents).sort(), [...BAKED_AGENTS].sort())
 })
 
@@ -216,6 +221,7 @@ test("source does not contain legacy v1 hook or dispatch markers", async () => {
 test("assigns models across multiple providers (OpenAI + DeepSeek)", () => {
   const config = {
     schema_version: 1,
+    pin_default_agent_model: true,
     profiles: {
       orchestration: { model: "openai/gpt-5.6-sol" },
       reasoning: { model: "deepseek/deepseek-v4-pro" },
@@ -260,6 +266,7 @@ test("assigns models across multiple providers (OpenAI + DeepSeek)", () => {
 test("assigns variant and merges request headers/body, leaving unconfigured request empty", () => {
   const config = {
     schema_version: 1,
+    pin_default_agent_model: true,
     profiles: {
       orchestration: {
         model: "openai/gpt-5.6-sol",
@@ -340,6 +347,50 @@ test("sets the default agent via draft.default", () => {
   const { draft, defaults } = makeDraft([...BAKED_AGENTS].map((id) => agentInfo(id)))
   applyAgentConfig(draft, fullConfig())
   assert.deepEqual(defaults, ["orchestrator"])
+})
+
+test("can leave the default agent model unpinned while routing worker agents", () => {
+  const config = fullConfig()
+  config.pin_default_agent_model = false
+  config.profiles.orchestration = {
+    ...config.profiles.orchestration,
+    request: { headers: { "x-routing": "primary" } },
+  }
+  const { draft, agent, defaults } = makeDraft(
+    [...BAKED_AGENTS].map((id) =>
+      agentInfo(id, id === "orchestrator" ? { model: { providerID: "user", id: "selected" } } : {}),
+    ),
+  )
+
+  applyAgentConfig(draft, config)
+
+  assert.deepEqual(agent("orchestrator").model, { providerID: "user", id: "selected" })
+  assert.deepEqual(agent("orchestrator").request.headers, { "x-routing": "primary" })
+  assert.deepEqual(agent("reasoner").model, {
+    providerID: "deepseek",
+    id: "deepseek-v4-pro",
+    variant: "high",
+  })
+  assert.deepEqual(defaults, ["orchestrator"])
+})
+
+test("defaults to an unpinned default-agent model when the option is omitted", () => {
+  const config = fullConfig()
+  delete config.pin_default_agent_model
+  const { draft, agent } = makeDraft(
+    [...BAKED_AGENTS].map((id) =>
+      agentInfo(id, id === "orchestrator" ? { model: { providerID: "user", id: "selected" } } : {}),
+    ),
+  )
+
+  applyAgentConfig(draft, config)
+
+  assert.deepEqual(agent("orchestrator").model, { providerID: "user", id: "selected" })
+  assert.deepEqual(agent("reasoner").model, {
+    providerID: "deepseek",
+    id: "deepseek-v4-pro",
+    variant: "high",
+  })
 })
 
 test("leaves unmapped agents untouched", () => {
@@ -455,6 +506,10 @@ test("rejects structurally invalid configs", () => {
   const badRequest = fullConfig()
   badRequest.profiles.reasoning.request = { headers: "nope" }
   assert.throws(() => validateConfig(badRequest), /request.headers must be an object/)
+
+  const badPinDefault = fullConfig()
+  badPinDefault.pin_default_agent_model = "false"
+  assert.throws(() => validateConfig(badPinDefault), /pin_default_agent_model must be a boolean/)
 })
 
 test("modelRefFor omits variant when absent and includes it when present", () => {
@@ -477,6 +532,7 @@ test("DEFAULT_CONFIG is self-consistent and covers every baked agent", () => {
   assert.equal(validateConfig(DEFAULT_CONFIG), DEFAULT_CONFIG)
   assert.equal(DEFAULT_CONFIG.schema_version, 1)
   assert.equal(DEFAULT_CONFIG.default_agent, "orchestrator")
+  assert.equal(DEFAULT_CONFIG.pin_default_agent_model, false)
   // Demonstrates both providers.
   const providers = new Set(
     Object.values(DEFAULT_CONFIG.profiles).map((profile) => profile.model.split("/")[0]),
@@ -504,6 +560,7 @@ test("mergeConfig shallow-merges partial profiles and agents over defaults", () 
       reasoner: "reasoning",
     },
     default_agent: "reasoner",
+    pin_default_agent_model: true,
   }
   const merged = mergeConfig(DEFAULT_CONFIG, override)
 
@@ -517,6 +574,7 @@ test("mergeConfig shallow-merges partial profiles and agents over defaults", () 
   assert.equal(merged.agents.orchestrator, "orchestration")
   // default_agent overridden.
   assert.equal(merged.default_agent, "reasoner")
+  assert.equal(merged.pin_default_agent_model, true)
 
   // The merged result is a fully valid config.
   assert.equal(validateConfig(merged), merged)
@@ -538,6 +596,10 @@ test("mergeConfig validates the override shape before merging", () => {
   assert.throws(() => mergeConfig(DEFAULT_CONFIG, { agents: "nope" }), /agents must be an object/)
   assert.throws(() => mergeConfig(DEFAULT_CONFIG, { agents: { "bad id": "x" } }), /invalid agent id/)
   assert.throws(() => mergeConfig(DEFAULT_CONFIG, { default_agent: 42 }), /default_agent must name an agent/)
+  assert.throws(
+    () => mergeConfig(DEFAULT_CONFIG, { pin_default_agent_model: "false" }),
+    /pin_default_agent_model must be a boolean/,
+  )
   assert.throws(() => mergeConfig(DEFAULT_CONFIG, { unknown_key: true }), /unknown field/)
 })
 
@@ -620,7 +682,7 @@ test("setup registers DEFAULT_CONFIG when there are no options and no env overri
 
     const { draft, agent } = makeDraft([...BAKED_AGENTS].map((id) => agentInfo(id)))
     await transform(draft)
-    assert.deepEqual(agent("orchestrator").model, { providerID: "openai", id: "gpt-5.6-sol" })
+    assert.equal(agent("orchestrator").model, undefined)
     assert.deepEqual(agent("reasoner").model, { providerID: "deepseek", id: "deepseek-v4-pro", variant: "high" })
   })
 })
@@ -656,10 +718,9 @@ test("setup merges a project override from OPENCODE_MODEL_ROUTER_CONFIG over the
     const { draft, agent, defaults } = makeDraft(BAKED_AGENTS.map((id) => agentInfo(id)))
     await transform(draft)
 
-    // Overridden profile wins.
-    assert.deepEqual(agent("reasoner").model, { providerID: "anthropic", id: "claude-opus-4-1", variant: "high" })
-    // Untouched defaults survive.
+    // The former default remains routed; the selected default is left to the UI.
     assert.deepEqual(agent("orchestrator").model, { providerID: "openai", id: "gpt-5.6-sol" })
+    assert.equal(agent("reasoner").model, undefined)
     // Overridden default_agent applied.
     assert.deepEqual(defaults, ["reasoner"])
   })
@@ -688,11 +749,7 @@ test("setup merges a standalone global override over the defaults", async (t) =>
 
     const { draft, agent, defaults } = makeDraft(BAKED_AGENTS.map((id) => agentInfo(id)))
     await transform(draft)
-    assert.deepEqual(agent("reasoner").model, {
-      providerID: "anthropic",
-      id: "claude-opus-4-1",
-      variant: "high",
-    })
+    assert.equal(agent("reasoner").model, undefined)
     assert.deepEqual(agent("orchestrator").model, { providerID: "openai", id: "gpt-5.6-sol" })
     assert.deepEqual(defaults, ["reasoner"])
   })
@@ -728,7 +785,7 @@ test("setup applies workspace overrides after global overrides", async (t) => {
     await transform(draft)
     assert.deepEqual(agent("reasoner").model, { providerID: "google", id: "gemini-2.5-pro" })
     assert.deepEqual(agent("extractor").model, { providerID: "xai", id: "grok-4" })
-    assert.deepEqual(agent("orchestrator").model, { providerID: "openai", id: "gpt-5.6-sol" })
+    assert.equal(agent("orchestrator").model, undefined)
     assert.deepEqual(defaults, ["orchestrator"])
   })
 })

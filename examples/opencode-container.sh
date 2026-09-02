@@ -340,9 +340,8 @@ if [[ "${CONTAINERS_ENABLED}" -eq 1 ]]; then
   fi
 fi
 
-# The pinned preview stores credentials and sessions in the same SQLite
-# database. Keep that database intact in one reusable named volume rather than
-# copying credential rows into a project bind mount.
+# The pinned preview stores credentials and sessions under XDG data and UI
+# preferences under XDG state. Keep both isolated in one reusable named volume.
 DATA_VOLUME="$(config_jq -r --arg default "opencode2-data-${PROJECT_KEY}" ".persistence.data_volume // \$default")"
 if [[ -n "${DATA_VOLUME}" ]]; then
   [[ "${DATA_VOLUME}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] \
@@ -353,6 +352,7 @@ if [[ -n "${DATA_VOLUME}" ]]; then
   fi
   RUN_FLAGS+=(-v "${DATA_VOLUME}:/var/lib/opencode-data:U")
   RUN_FLAGS+=(-e XDG_DATA_HOME=/var/lib/opencode-data)
+  RUN_FLAGS+=(-e XDG_STATE_HOME=/var/lib/opencode-data/state)
 fi
 
 # TTY only when interactive (stdin and stdout are both a terminal).

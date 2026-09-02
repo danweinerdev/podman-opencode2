@@ -2,7 +2,6 @@
   "$schema": "./container-config.schema.json",
   "share": "disabled",
   "autoupdate": false,
-  "model": "openai/gpt-5.6-sol",
   "default_agent": "orchestrator",
   "permissions": [
     { "action": "external_directory", "resource": "/opt/opencode/sandbox/*", "effect": "allow" },
@@ -38,6 +37,7 @@
       "package": "file:///opt/opencode/plugins/model-router/index.js",
       "options": {
         "schema_version": 1,
+        "pin_default_agent_model": false,
         "profiles": {
           "orchestration": { "model": "openai/gpt-5.6-sol" },
           "reasoning": { "model": "deepseek/deepseek-v4-pro", "variant": "high" },

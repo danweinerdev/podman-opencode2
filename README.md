@@ -126,18 +126,20 @@ foreground CLI instead of creating persistent background-service metadata.
 
 `plugins/model-router/` is a **v2-only** plugin built on
 `@opencode-ai/plugin/v2/promise` (pinned `1.18.25`). It default-exports
-`{ id, setup }` and uses `ctx.agent.transform` to assign each agent a native
-`AgentV2Info.model` (`ModelRef`) and optional request `headers`/`body` per
-agent id, plus `draft.default(...)`. Routing accepts arbitrary valid agent ids
-when a matching definition is already present, so derived images can add and
-route their own agent definitions without mappings synthesizing new agents.
+`{ id, setup }` and uses `ctx.agent.transform` to assign worker agents native
+`AgentV2Info.model` (`ModelRef`) values and optional request `headers`/`body`
+per agent id, plus `draft.default(...)`. The default agent is UI-controlled
+unless explicitly pinned. Routing accepts arbitrary valid agent ids when a
+matching definition is already present, so derived images can add and route
+their own agent definitions without mappings synthesizing new agents.
 
 Config is assembled from three sources, in increasing precedence:
 
 1. **Defaults** — the native v2 plugin-entry options baked into
    `container-config.json` (`{ schema_version, profiles, agents,
-   default_agent }`); baked profiles demonstrate OpenAI + DeepSeek routing and
-   need only `OPENAI_API_KEY` / `DEEPSEEK_API_KEY`.
+   default_agent, pin_default_agent_model }`); baked profiles demonstrate
+   OpenAI + DeepSeek routing and need only `OPENAI_API_KEY` /
+   `DEEPSEEK_API_KEY`.
 2. **User-global override** — on every launch,
    `${XDG_CONFIG_HOME:-$HOME/.config}/opencode2/model-router.json` is discovered
    as a standalone partial router config. When present, the exact file is
@@ -146,11 +148,11 @@ Config is assembled from three sources, in increasing precedence:
    global layer is validated before any project override is applied.
 3. **Project overrides** — the workspace's `$PWD/.opencode-sandbox.json` is
    mounted read-only at `/run/opencode/sandbox.json`, and the launcher sets
-   `OPENCODE_MODEL_ROUTER_CONFIG=/run/opencode/sandbox.json`. The plugin reads
-   that file's top-level `model_router` block and shallow-merges its partial
-   `profiles`/`agents`/`default_agent` over the global result, then validates
-   the final result. `OPENCODE_MODEL_ROUTER_CONFIG` remains compatible for
-   launchers that provide only a workspace config.
+    `OPENCODE_MODEL_ROUTER_CONFIG=/run/opencode/sandbox.json`. The plugin reads
+    that file's top-level `model_router` block and shallow-merges its partial
+    `profiles`/`agents`/`default_agent`/`pin_default_agent_model` over the global
+    result, then validates the final result. `OPENCODE_MODEL_ROUTER_CONFIG`
+    remains compatible for launchers that provide only a workspace config.
 
 Router config is runtime input: editing the user-global or workspace routing
 file requires only restarting the launcher/container, not rebuilding the
@@ -283,11 +285,12 @@ Behavior:
   `--secret ...,type=env,target=...`. Merely creating a user-global secret does
   not expose it to every project. A selected secret takes precedence over a
   same-named host environment variable or `env.set` value.
-- Persists OpenCode2's complete data store in a CWD-derived per-project named
-  volume (`opencode2-data-<cwd-hash>`). The pinned preview stores provider
-  logins and sessions in the same SQLite database, so keeping each project's
-  database intact is safer than copying credential rows into project
-  directories or exposing every project's state through one shared volume.
+- Persists OpenCode2's data and state directories in a CWD-derived per-project
+  named volume (`opencode2-data-<cwd-hash>`). The pinned preview stores provider
+  logins and sessions in the data SQLite database and UI preferences under its
+  state directory. Keeping both intact is safer than copying credential rows
+  into project directories or exposing every project's state through one
+  shared volume.
   Stable CWD-derived volumes allow resume from any PATH-installed launcher;
   workdirs are also CWD-derived except when `containers` mirrors the canonical
   host path. Configure an explicit common volume only when cross-project state
@@ -321,6 +324,7 @@ Behavior:
   },
   "model_router": {                          // optional; shallow-merged over the baked defaults
     "schema_version": 1,
+    "pin_default_agent_model": false,        // let the persisted UI model win
     "profiles": {                            // partial: full profile per name
       "reasoning": { "model": "anthropic/claude-opus-4-1", "variant": "high" }
     },
@@ -359,18 +363,22 @@ equivalent to the host user who owns or can access the container engine,
 including the ability to start privileged containers and mount host paths. Use
 this option only in trusted repositories and images.
 Set `persistence.data_volume` to `""` for fully ephemeral OpenCode2 data. A
-fixed explicit volume name shares both login and session state across every
+fixed explicit volume name shares login, session, and UI state across every
 project configured with that name. Moving a project changes the default CWD
 hash; set an explicit project-specific volume name first if persistence must
 survive that move.
 
 The `model_router` block is a **partial** override: it shallow-merges its
 `profiles` and `agents` maps over the user-global result (an entry replaces the
-same-named entry; new profiles and agent mappings may be introduced), and
-`default_agent` falls back through the user-global layer to the baked value when
-omitted. A new mapping must correspond to an agent definition supplied by a
-derived image. The override is applied by the model-router plugin via
-`OPENCODE_MODEL_ROUTER_CONFIG`.
+same-named entry; new profiles and agent mappings may be introduced), while
+`default_agent` and `pin_default_agent_model` fall back through the user-global
+layer to their baked values when omitted. The baked value is `false`, leaving
+the primary agent's model under OpenCode's persisted UI selection while worker
+agents remain profile-routed. Set it to `true` when the default agent must also
+use its profile model. Before the first UI selection, OpenCode's provider
+fallback supplies the primary model. A new mapping must correspond to an agent
+definition supplied by a derived image. The override is applied by the
+model-router plugin via `OPENCODE_MODEL_ROUTER_CONFIG`.
 
 ## User-global model routing
 

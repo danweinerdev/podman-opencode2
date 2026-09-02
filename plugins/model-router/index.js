@@ -61,6 +61,7 @@ export const BAKED_AGENTS = Object.freeze([
  */
 export const DEFAULT_CONFIG = Object.freeze({
   schema_version: 1,
+  pin_default_agent_model: false,
   profiles: {
     orchestration: { model: "openai/gpt-5.6-sol" },
     reasoning: { model: "deepseek/deepseek-v4-pro", variant: "high" },
@@ -155,7 +156,8 @@ function validateProfile(profile, context) {
  *     schema_version: 1,
  *     profiles: { [name]: { model: "provider/model", variant?, request? } },
  *     agents: { [agent-id]: "<profile-name>" },
- *     default_agent: "<agent-id>"   // optional; must resolve to a profile
+ *     default_agent: "<agent-id>",  // optional; must resolve to a profile
+ *     pin_default_agent_model: false // optional; defaults to false
  *   }
  *
  * - `profiles` is required and non-empty; every profile must be valid.
@@ -165,7 +167,11 @@ function validateProfile(profile, context) {
  */
 export function validateConfig(value) {
   if (!isObject(value)) throw new Error("model-router config must be an object")
-  rejectUnknown(value, ["schema_version", "profiles", "agents", "default_agent"], "model-router config")
+  rejectUnknown(
+    value,
+    ["schema_version", "profiles", "agents", "default_agent", "pin_default_agent_model"],
+    "model-router config",
+  )
 
   if (value.schema_version !== SCHEMA_VERSION) {
     throw new Error(`unsupported schema_version: ${String(value.schema_version)}`)
@@ -193,6 +199,10 @@ export function validateConfig(value) {
     }
   }
 
+  if (value.pin_default_agent_model !== undefined && typeof value.pin_default_agent_model !== "boolean") {
+    throw new Error("pin_default_agent_model must be a boolean")
+  }
+
   if (value.default_agent !== undefined) {
     if (typeof value.default_agent !== "string" || value.default_agent.length === 0) {
       throw new Error("default_agent must name an agent")
@@ -218,7 +228,11 @@ export function validateConfig(value) {
  */
 export function validateOverride(value) {
   if (!isObject(value)) throw new Error("model_router must be an object")
-  rejectUnknown(value, ["schema_version", "profiles", "agents", "default_agent"], "model_router")
+  rejectUnknown(
+    value,
+    ["schema_version", "profiles", "agents", "default_agent", "pin_default_agent_model"],
+    "model_router",
+  )
 
   if (value.schema_version !== undefined && value.schema_version !== SCHEMA_VERSION) {
     throw new Error(`unsupported schema_version: ${String(value.schema_version)}`)
@@ -243,6 +257,9 @@ export function validateOverride(value) {
       }
     }
   }
+  if (value.pin_default_agent_model !== undefined && typeof value.pin_default_agent_model !== "boolean") {
+    throw new Error("pin_default_agent_model must be a boolean")
+  }
   if (value.default_agent !== undefined) {
     if (typeof value.default_agent !== "string" || value.default_agent.length === 0) {
       throw new Error("default_agent must name an agent")
@@ -256,9 +273,9 @@ export function validateOverride(value) {
  * Shallow-merge a partial override over a full base config: profile and agent
  * maps merge at the top-level key (an override entry replaces the base entry
  * for that name; profile objects are not deep-merged). Overrides may add
- * profiles and agent mappings; `default_agent`/`schema_version` fall back to
- * the base when absent. The override is shape-validated first; the caller
- * validates the merged result.
+ * profiles and agent mappings; scalar settings fall back to the base when
+ * absent. The override is shape-validated first; the caller validates the
+ * merged result.
  */
 export function mergeConfig(base, override) {
   validateOverride(override)
@@ -269,6 +286,8 @@ export function mergeConfig(base, override) {
   }
   const defaultAgent = override.default_agent ?? base.default_agent
   if (defaultAgent !== undefined) merged.default_agent = defaultAgent
+  const pinDefaultAgentModel = override.pin_default_agent_model ?? base.pin_default_agent_model
+  if (pinDefaultAgentModel !== undefined) merged.pin_default_agent_model = pinDefaultAgentModel
   return merged
 }
 
@@ -314,7 +333,8 @@ export async function readModelRouterOverride(path) {
  * Apply a validated config to an `AgentDraft`:
  *   - for every configured agent mapping, set `agent.model` to the profile's
  *     `ModelRef` and merge any optional request headers/body into
- *     `agent.request`;
+ *     `agent.request`; when `pin_default_agent_model` is false, preserve the
+ *     default agent's existing model instead;
  *   - call `draft.default(config.default_agent)` when a default is set.
  *
  * Pure: operates only on the supplied draft; does not touch the filesystem,
@@ -322,6 +342,7 @@ export async function readModelRouterOverride(path) {
  */
 export function applyAgentConfig(draft, config) {
   const resolved = validateConfig(config)
+  const pinDefaultAgentModel = resolved.pin_default_agent_model ?? false
   const missing = Object.keys(resolved.agents).filter((agentID) => draft.get(agentID) === undefined)
   if (missing.length > 0) {
     throw new Error(`model-router agent definition(s) not found: ${missing.join(", ")}`)
@@ -335,7 +356,9 @@ export function applyAgentConfig(draft, config) {
     const profile = resolved.profiles[profileName]
     if (!profile) continue
     draft.update(agentID, (item) => {
-      item.model = modelRefFor(profile)
+      if (pinDefaultAgentModel || agentID !== resolved.default_agent) {
+        item.model = modelRefFor(profile)
+      }
       if (isObject(profile.request)) {
         if (!isObject(item.request)) item.request = {}
         if (isObject(profile.request.headers)) {

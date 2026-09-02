@@ -3,7 +3,7 @@
   "title": "Pinned OpenCode2 container configuration",
   "type": "object",
   "additionalProperties": false,
-  "required": ["model", "default_agent", "agents", "skills", "mcp", "permissions", "plugins"],
+  "required": ["default_agent", "agents", "skills", "mcp", "permissions", "plugins"],
   "properties": {
     "$schema": { "type": "string" },
     "share": { "enum": ["manual", "auto", "disabled"] },
@@ -98,6 +98,7 @@
       "required": ["schema_version", "profiles", "agents"],
       "properties": {
         "schema_version": { "const": 1 },
+        "pin_default_agent_model": { "type": "boolean" },
         "profiles": {
           "type": "object",
           "minProperties": 1,

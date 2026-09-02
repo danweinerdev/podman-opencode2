@@ -23,6 +23,7 @@
   },
   "model_router": {
     "schema_version": 1,
+    "pin_default_agent_model": false,
     "profiles": {
       "reasoning": { "model": "anthropic/claude-opus-4-1", "variant": "high" }
     },

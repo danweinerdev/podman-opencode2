@@ -2,9 +2,9 @@
 
 Native v2 model-routing plugin for **OpenCode2**. It is built exclusively on the
 `@opencode-ai/plugin/v2/promise` API and uses the `ctx.agent.transform` hook to
-assign each agent its own native `AgentV2Info.model` (`ModelRef`) and optional
+assign worker agents native `AgentV2Info.model` (`ModelRef`) values and optional
 request headers/body, plus the default agent. The native v2 `subagent` tool then
-runs each agent on its assigned model directly.
+runs each worker on its assigned model directly.
 
 There is **no** v1 hook function, no `tool.execute.before/after` interception,
 no SDK child-session dispatch, and no placeholder/return-ok relay. This is a
@@ -59,7 +59,8 @@ A **full** config (the plugin defaults, or the merged result):
     }
   },
   "agents": { "<agent-id>": "<profile-name>" },
-  "default_agent": "orchestrator"
+  "default_agent": "orchestrator",
+  "pin_default_agent_model": false
 }
 ```
 
@@ -70,12 +71,18 @@ A **full** config (the plugin defaults, or the merged result):
   to route additional agent definitions.
 - `default_agent` is **optional**; when present it must name an agent that maps
   to a defined profile.
+- `pin_default_agent_model` is optional and defaults to `false`, which keeps
+  selecting the default agent while leaving its model under OpenCode's
+  persisted UI preference. Set it to `true` to route that agent through its
+  profile too. Request options still apply in either mode. Before a UI model has
+  been selected, OpenCode uses its provider fallback.
 
 A **partial override** (either the standalone user-global document or the
 `model_router` block of a sandbox config) may carry only the keys it wants to
 change — e.g. a single profile, a single agent mapping, or just
-`default_agent`. Its entries replace the same-named entries in lower-precedence
-layers (shallow merge; profile objects are not deep-merged). An override may
+`default_agent`/`pin_default_agent_model`. Its entries replace the same-named
+entries in lower-precedence layers (shallow merge; profile objects are not
+deep-merged). An override may
 point an agent at a profile defined by a lower layer. Global cross-references
 are validated after merging over defaults, before the workspace layer; final
 cross-references are validated again after the workspace merge.

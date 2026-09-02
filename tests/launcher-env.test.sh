@@ -110,6 +110,7 @@ WORKSPACE_KEY="${WORKSPACE_DIGEST%% *}"
 WORKSPACE_KEY="${WORKSPACE_KEY:0:16}"
 grep -Fx -- "opencode2-data-${WORKSPACE_KEY}:/var/lib/opencode-data:U" "${ARGV_LOG}" >/dev/null
 grep -Fx -- "XDG_DATA_HOME=/var/lib/opencode-data" "${ARGV_LOG}" >/dev/null
+grep -Fx -- "XDG_STATE_HOME=/var/lib/opencode-data/state" "${ARGV_LOG}" >/dev/null
 grep -Fx -- "${TMP}/workspace:/workspace/${WORKSPACE_KEY}" "${ARGV_LOG}" >/dev/null
 grep -Fx -- "/workspace/${WORKSPACE_KEY}" "${ARGV_LOG}" >/dev/null
 if grep -Fq -- "/run/opencode-container-engine.sock" "${ARGV_LOG}"; then
@@ -666,6 +667,7 @@ printf '%s\n' '{"persistence":{"data_volume":"project-opencode-data"}}' \
   HOME="${TMP}/default-home" PATH="${TMP}/bin:${PATH}" opencode-container
 )
 grep -Fx -- "project-opencode-data:/var/lib/opencode-data:U" "${ARGV_LOG}" >/dev/null
+grep -Fx -- "XDG_STATE_HOME=/var/lib/opencode-data/state" "${ARGV_LOG}" >/dev/null
 
 # An optional user-wide local-provider catalog is validated and exposed only to
 # the image build. Its digest is both a build-cache key and an integrity check.
