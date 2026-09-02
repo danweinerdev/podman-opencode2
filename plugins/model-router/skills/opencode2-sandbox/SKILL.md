@@ -31,6 +31,18 @@ the launcher from the host workspace root.
    `OPENCODE2_VERSION` unless the image source has been deliberately upgraded.
 4. Validate JSON with `jq empty .opencode-sandbox.json` and shell syntax with
    `bash -n opencode-container.sh`. Build or run the image only when requested.
+5. For machine-wide local models, copy
+   `/opt/opencode/sandbox/local-providers.json.example` to
+   `${XDG_CONFIG_HOME:-$HOME/.config}/opencode2/local-providers.json` on the
+   host and customize it. Never add credentials to this build-time catalog.
+6. For machine-wide routing preferences, create the standalone partial config
+   `${XDG_CONFIG_HOME:-$HOME/.config}/opencode2/model-router.json` on the host.
+   This runtime file is deliberately not baked into the image. Restart the
+   launcher/container after an edit; do not rebuild the image. Never put
+   credentials in this or the workspace router.
+7. The launcher automatically exposes the host's exact user-global
+   `$HOME/.gitconfig` read-only across workspaces. Do not add a per-workspace
+   mount for it.
 
 ## Sandbox fields
 
@@ -45,6 +57,14 @@ the launcher from the host workspace root.
   mount host OpenCode state from effective XDG directories, `.agents`,
   `.claude`, or `.mcp` state, and do not target `/etc/opencode`,
   `/opt/opencode`, `/opt/mcp`, `/run/opencode`, `/src`, or `/workspace`.
+- On every launch, a present `$HOME/.gitconfig` must resolve to a readable
+  regular file. The launcher mounts only its canonical exact file read-only at
+  `/run/opencode/gitconfig` and sets `GIT_CONFIG_GLOBAL` to that path; it mounts
+  neither host `HOME` nor the parent directory and does not set or forward
+  `HOME`. This does not expose Git credential files/helpers or included files.
+  Inline secrets in `.gitconfig` become readable in the container; relative
+  includes resolve from `/run/opencode`, and other includes or credential
+  helpers may require separately available paths or programs.
 - `env.pass` forwards a named host variable only when set. `env.set` provides a
   literal value. Never place provider secrets in `env.set`; supported provider
   API keys use a configured `provider_secrets` entry when selected, then fall
@@ -57,8 +77,25 @@ the launcher from the host workspace root.
   shares both kinds of state across projects; an empty string disables
   persistence. The CWD-derived container workdir and volume remain stable even
   when the launcher itself lives elsewhere on `PATH`.
-- `model_router` shallow-merges partial `profiles`, `agents`, and an optional
-  `default_agent` over the baked routing defaults.
+- Model-router precedence is baked/plugin options < the standalone user-global
+  `${XDG_CONFIG_HOME:-$HOME/.config}/opencode2/model-router.json` < the
+  workspace's top-level `model_router`. Each layer shallow-merges partial
+  `profiles`, `agents`, and an optional `default_agent`. The global result must
+  be valid before the workspace layer is applied; a workspace cannot repair an
+  invalid global cross-reference.
+- On every launch, a present global router must be one JSON object in a regular
+  file. The launcher canonicalizes and mounts that exact file, never its parent
+  directory, read-only at `/run/opencode/model-router-global.json`, and sets
+  `OPENCODE_MODEL_ROUTER_GLOBAL_CONFIG`. It independently mounts a present
+  workspace sandbox at `/run/opencode/sandbox.json` and retains
+  `OPENCODE_MODEL_ROUTER_CONFIG`; both are supplied when both exist. Router
+  edits require only a launcher/container restart.
+- During an image build, the launcher optionally validates the host's shared
+  `opencode2/local-providers.json`, mounts only that file into the build, and
+  bakes its canonical JSON as `/opt/opencode/config/opencode/opencode.json`.
+  Its SHA-256 invalidates the relevant build layer. Changes require `--rebuild`;
+  absent catalogs remain absent, and secrets belong in Podman secrets rather
+  than this image layer.
 - `network`, `capabilities`, and the restricted `runtime_args` list control the
   Podman sandbox. Allowed runtime arguments are `--add-host=`, `--pids-limit=`,
   and `--ulimit=` forms only.
@@ -66,4 +103,5 @@ the launcher from the host workspace root.
 
 Treat `.opencode-sandbox.json` as executable project tooling: it controls image
 builds, mounts, environment values, capabilities, networking, and commands.
-Keep secrets out of the file and report every security-relevant change.
+Keep secrets out of it and all model-router config; use Podman secrets or
+provider environment variables, and report every security-relevant change.

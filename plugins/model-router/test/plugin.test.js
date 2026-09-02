@@ -12,6 +12,7 @@ import defaultExport, {
   mergeConfig,
   modelRefFor,
   readModelRouterOverride,
+  readStandaloneModelRouterOverride,
   validateConfig,
   validateOverride,
 } from "../index.js"
@@ -75,6 +76,12 @@ async function withEnv(key, value, fn) {
     if (prev === undefined) delete process.env[key]
     else process.env[key] = prev
   }
+}
+
+async function withRouterEnv(globalValue, workspaceValue, fn) {
+  return withEnv("OPENCODE_MODEL_ROUTER_GLOBAL_CONFIG", globalValue, () =>
+    withEnv("OPENCODE_MODEL_ROUTER_CONFIG", workspaceValue, fn),
+  )
 }
 
 async function withTempSandbox(t, json) {
@@ -428,9 +435,9 @@ test("rejects structurally invalid configs", () => {
   badModel.profiles.reasoning.model = "no-provider-prefix"
   assert.throws(() => validateConfig(badModel), /provider\/model format/)
 
-  const doubleSlash = fullConfig()
-  doubleSlash.profiles.reasoning.model = "a/b/c"
-  assert.throws(() => validateConfig(doubleSlash), /provider\/model format/)
+  const emptyModelId = fullConfig()
+  emptyModelId.profiles.reasoning.model = "provider/"
+  assert.throws(() => validateConfig(emptyModelId), /provider\/model format/)
 
   const badVariant = fullConfig()
   badVariant.profiles.reasoning.variant = ""
@@ -450,6 +457,10 @@ test("modelRefFor omits variant when absent and includes it when present", () =>
     providerID: "deepseek",
     id: "deepseek-v4-pro",
     variant: "max",
+  })
+  assert.deepEqual(modelRefFor({ model: "openrouter/anthropic/claude-sonnet" }), {
+    providerID: "openrouter",
+    id: "anthropic/claude-sonnet",
   })
 })
 
@@ -564,8 +575,27 @@ test("readModelRouterOverride throws on a non-object document", async (t) => {
   await assert.rejects(readModelRouterOverride(path), /must be a JSON object/)
 })
 
+test("readStandaloneModelRouterOverride reads a standalone partial config", async (t) => {
+  const path = await withTempSandbox(t, {
+    schema_version: 1,
+    profiles: { reasoning: { model: "anthropic/claude-opus-4-1" } },
+  })
+  assert.deepEqual(await readStandaloneModelRouterOverride(path), {
+    schema_version: 1,
+    profiles: { reasoning: { model: "anthropic/claude-opus-4-1" } },
+  })
+})
+
+test("readStandaloneModelRouterOverride rejects malformed and non-object JSON", async (t) => {
+  const malformed = await withTempSandbox(t, "{ not json")
+  await assert.rejects(readStandaloneModelRouterOverride(malformed), /invalid JSON in model-router config/)
+
+  const nonObject = await withTempSandbox(t, "[]")
+  await assert.rejects(readStandaloneModelRouterOverride(nonObject), /must be a JSON object/)
+})
+
 test("setup registers DEFAULT_CONFIG when there are no options and no env override", async () => {
-  await withEnv("OPENCODE_MODEL_ROUTER_CONFIG", undefined, async () => {
+  await withRouterEnv(undefined, undefined, async () => {
     let transform = null
     let reloads = 0
     const ctx = {
@@ -600,7 +630,7 @@ test("setup merges a project override from OPENCODE_MODEL_ROUTER_CONFIG over the
     },
   })
 
-  await withEnv("OPENCODE_MODEL_ROUTER_CONFIG", path, async () => {
+  await withRouterEnv(undefined, path, async () => {
     let transform = null
     let reloads = 0
     const ctx = {
@@ -626,11 +656,94 @@ test("setup merges a project override from OPENCODE_MODEL_ROUTER_CONFIG over the
   })
 })
 
+test("setup merges a standalone global override over the defaults", async (t) => {
+  const globalPath = await withTempSandbox(t, {
+    schema_version: 1,
+    profiles: {
+      reasoning: { model: "anthropic/claude-opus-4-1", variant: "high" },
+    },
+    agents: { reasoner: "reasoning" },
+    default_agent: "reasoner",
+  })
+
+  await withRouterEnv(globalPath, undefined, async () => {
+    let transform = null
+    const ctx = {
+      options: undefined,
+      agent: {
+        transform: async (fn) => (transform = fn),
+        reload: async () => {},
+      },
+    }
+    await defaultExport.setup(ctx)
+
+    const { draft, agent, defaults } = makeDraft(BAKED_AGENTS.map((id) => agentInfo(id)))
+    await transform(draft)
+    assert.deepEqual(agent("reasoner").model, {
+      providerID: "anthropic",
+      id: "claude-opus-4-1",
+      variant: "high",
+    })
+    assert.deepEqual(agent("orchestrator").model, { providerID: "openai", id: "gpt-5.6-sol" })
+    assert.deepEqual(defaults, ["reasoner"])
+  })
+})
+
+test("setup applies workspace overrides after global overrides", async (t) => {
+  const globalPath = await withTempSandbox(t, {
+    profiles: {
+      reasoning: { model: "anthropic/claude-opus-4-1" },
+      extraction: { model: "xai/grok-4" },
+    },
+    default_agent: "reasoner",
+  })
+  const workspacePath = await withTempSandbox(t, {
+    model_router: {
+      profiles: { reasoning: { model: "google/gemini-2.5-pro" } },
+      default_agent: "orchestrator",
+    },
+  })
+
+  await withRouterEnv(globalPath, workspacePath, async () => {
+    let transform = null
+    const ctx = {
+      options: undefined,
+      agent: {
+        transform: async (fn) => (transform = fn),
+        reload: async () => {},
+      },
+    }
+    await defaultExport.setup(ctx)
+
+    const { draft, agent, defaults } = makeDraft(BAKED_AGENTS.map((id) => agentInfo(id)))
+    await transform(draft)
+    assert.deepEqual(agent("reasoner").model, { providerID: "google", id: "gemini-2.5-pro" })
+    assert.deepEqual(agent("extractor").model, { providerID: "xai", id: "grok-4" })
+    assert.deepEqual(agent("orchestrator").model, { providerID: "openai", id: "gpt-5.6-sol" })
+    assert.deepEqual(defaults, ["orchestrator"])
+  })
+})
+
+test("setup validates global cross-references before workspace overrides", async (t) => {
+  const globalPath = await withTempSandbox(t, {
+    agents: { reasoner: "workspace-only" },
+  })
+  const workspacePath = await withTempSandbox(t, {
+    model_router: {
+      profiles: { "workspace-only": { model: "openai/gpt-5.6-luna" } },
+    },
+  })
+  await withRouterEnv(globalPath, workspacePath, async () => {
+    const ctx = { options: undefined, agent: { transform: async () => {}, reload: async () => {} } }
+    await assert.rejects(defaultExport.setup(ctx), /references missing profile "workspace-only"/)
+  })
+})
+
 test("setup propagates a malformed override as a thrown error", async (t) => {
   const path = await withTempSandbox(t, {
     model_router: { schema_version: 2 },
   })
-  await withEnv("OPENCODE_MODEL_ROUTER_CONFIG", path, async () => {
+  await withRouterEnv(undefined, path, async () => {
     const ctx = { options: undefined, agent: { transform: async () => {}, reload: async () => {} } }
     await assert.rejects(defaultExport.setup(ctx), /unsupported schema_version/)
   })

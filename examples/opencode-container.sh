@@ -22,6 +22,16 @@ set -euo pipefail
 die() { printf 'opencode-container: %s\n' "$*" >&2; exit 1; }
 warn() { printf 'opencode-container: warning: %s\n' "$*" >&2; }
 
+TEMP_FILES=()
+cleanup_temp_files() {
+  local path
+  for path in "${TEMP_FILES[@]}"; do
+    rm -f -- "${path}"
+  done
+  TEMP_FILES=()
+}
+trap cleanup_temp_files EXIT
+
 command -v jq >/dev/null 2>&1 || die "jq is required (install it and retry)"
 command -v podman >/dev/null 2>&1 || die "podman is required (install it and retry)"
 command -v git >/dev/null 2>&1 || die "git is required (used to detect a shared git common dir)"
@@ -29,13 +39,44 @@ command -v sha256sum >/dev/null 2>&1 || die "sha256sum is required (used for sta
 
 INVOCATION_ROOT="$(realpath -- "${PWD}")"
 CONFIG_PATH="${INVOCATION_ROOT}/.opencode-sandbox.json"
+GLOBAL_ROUTER_PATH="${XDG_CONFIG_HOME:-${HOME}/.config}/opencode2/model-router.json"
+GLOBAL_ROUTER_PRESENT=0
+if [[ -e "${GLOBAL_ROUTER_PATH}" || -L "${GLOBAL_ROUTER_PATH}" ]]; then
+  [[ -f "${GLOBAL_ROUTER_PATH}" ]] \
+    || die "global model-router config is not a regular file: ${GLOBAL_ROUTER_PATH}"
+  jq -e -s 'length == 1 and (.[0] | type == "object")' "${GLOBAL_ROUTER_PATH}" >/dev/null \
+    || die "invalid global model-router config: ${GLOBAL_ROUTER_PATH}"
+  GLOBAL_ROUTER_PATH="$(realpath -- "${GLOBAL_ROUTER_PATH}")" \
+    || die "unable to canonicalize global model-router config: ${GLOBAL_ROUTER_PATH}"
+  GLOBAL_ROUTER_PRESENT=1
+fi
+
+# Git's user-global config follows host HOME, independently of the workspace and
+# the XDG paths used by OpenCode. Mount only the canonical file and point Git at
+# a stable launcher-owned target so this also works with prebuilt images whose
+# baked username differs from the host username.
+GLOBAL_GIT_CONFIG_PATH="${HOME}/.gitconfig"
+GLOBAL_GIT_CONFIG_PRESENT=0
+if [[ -e "${GLOBAL_GIT_CONFIG_PATH}" || -L "${GLOBAL_GIT_CONFIG_PATH}" ]]; then
+  [[ -f "${GLOBAL_GIT_CONFIG_PATH}" && -r "${GLOBAL_GIT_CONFIG_PATH}" ]] \
+    || die "user-global Git config is not a readable regular file: ${GLOBAL_GIT_CONFIG_PATH}"
+  GLOBAL_GIT_CONFIG_PATH="$(realpath -- "${GLOBAL_GIT_CONFIG_PATH}")" \
+    || die "unable to canonicalize user-global Git config: ${GLOBAL_GIT_CONFIG_PATH}"
+  GLOBAL_GIT_CONFIG_PRESENT=1
+fi
+GLOBAL_GIT_CONFIG_TARGET="/run/opencode/gitconfig"
+
 CONFIG_PRESENT=0
 if [[ -e "${CONFIG_PATH}" && ! -f "${CONFIG_PATH}" ]]; then
   die "sandbox config is not a regular file: ${CONFIG_PATH}"
 elif [[ -f "${CONFIG_PATH}" ]]; then
   CONFIG_PRESENT=1
 else
-  warn "no .opencode-sandbox.json found; using image opencode2:latest, workspace ${INVOCATION_ROOT}, and baked routing defaults"
+  if [[ "${GLOBAL_ROUTER_PRESENT}" -eq 1 ]]; then
+    warn "no .opencode-sandbox.json found; using image opencode2:latest, workspace ${INVOCATION_ROOT}, and user-global routing config"
+  else
+    warn "no .opencode-sandbox.json found; using image opencode2:latest, workspace ${INVOCATION_ROOT}, and baked routing defaults"
+  fi
 fi
 
 config_jq() {
@@ -108,7 +149,7 @@ done
 is_reserved_env_name() {
   local name="$1"
   case "${name}" in
-    HOME|PATH|XDG_*|OPENCODE_*) return 0 ;;
+    HOME|PATH|GIT_CONFIG_GLOBAL|XDG_*|OPENCODE_*) return 0 ;;
   esac
   return 1
 }
@@ -131,6 +172,21 @@ paths_overlap() {
     fi
   done
   return 1
+}
+
+overlaps_optional_canonical_file() {
+  local path="$1"
+  local present="$2"
+  local protected_file="$3"
+  [[ "${present}" -eq 1 ]] && paths_overlap "${path}" "${protected_file}"
+}
+
+overlaps_global_router() {
+  overlaps_optional_canonical_file "$1" "${GLOBAL_ROUTER_PRESENT}" "${GLOBAL_ROUTER_PATH}"
+}
+
+overlaps_global_git_config() {
+  overlaps_optional_canonical_file "$1" "${GLOBAL_GIT_CONFIG_PRESENT}" "${GLOBAL_GIT_CONFIG_PATH}"
 }
 
 # --- Config loading + validation --------------------------------------------
@@ -169,6 +225,12 @@ esac
 WORKSPACE="$(realpath -- "${WORKSPACE}")" || die "workspace does not exist: ${WORKSPACE}"
 if paths_overlap "${WORKSPACE}" "${Host_state_roots[@]}"; then
   die "workspace ${WORKSPACE} overlaps host OpenCode/.agents/.claude/.mcp state"
+fi
+if overlaps_global_router "${WORKSPACE}"; then
+  die "workspace ${WORKSPACE} overlaps the user-global model-router config"
+fi
+if overlaps_global_git_config "${WORKSPACE}"; then
+  die "workspace ${WORKSPACE} overlaps the user-global Git config"
 fi
 
 PROJECT_DIGEST="$(printf '%s' "${INVOCATION_ROOT}" | sha256sum)"
@@ -212,6 +274,14 @@ fi
 RUN_FLAGS+=(-v "${WORKSPACE}:/src")
 RUN_FLAGS+=(-v "${WORKSPACE}:${CONTAINER_WORKSPACE}")
 RUN_FLAGS+=(-w "${WORKDIR}")
+if [[ "${GLOBAL_GIT_CONFIG_PRESENT}" -eq 1 ]]; then
+  RUN_FLAGS+=(-v "${GLOBAL_GIT_CONFIG_PATH}:${GLOBAL_GIT_CONFIG_TARGET}:ro")
+  RUN_FLAGS+=(-e GIT_CONFIG_GLOBAL="${GLOBAL_GIT_CONFIG_TARGET}")
+fi
+if [[ "${GLOBAL_ROUTER_PRESENT}" -eq 1 ]]; then
+  RUN_FLAGS+=(-v "${GLOBAL_ROUTER_PATH}:/run/opencode/model-router-global.json:ro")
+  RUN_FLAGS+=(-e OPENCODE_MODEL_ROUTER_GLOBAL_CONFIG=/run/opencode/model-router-global.json)
+fi
 if [[ "${CONFIG_PRESENT}" -eq 1 ]]; then
   RUN_FLAGS+=(-v "${CONFIG_PATH}:/run/opencode/sandbox.json:ro")
   RUN_FLAGS+=(-e OPENCODE_MODEL_ROUTER_CONFIG=/run/opencode/sandbox.json)
@@ -253,6 +323,12 @@ while IFS= read -r entry; do
   abs_source="$(realpath -- "${source_path}")" || die "mount source does not exist: ${source}"
   if paths_overlap "${abs_source}" "${Host_state_roots[@]}"; then
     die "mount source ${abs_source} overlaps host OpenCode/.agents/.claude/.mcp state"
+  fi
+  if overlaps_global_router "${abs_source}"; then
+    die "mount source ${abs_source} overlaps the user-global model-router config"
+  fi
+  if overlaps_global_git_config "${abs_source}"; then
+    die "mount source ${abs_source} overlaps the user-global Git config"
   fi
 
   if [[ -z "${target}" ]]; then
@@ -359,6 +435,12 @@ if GIT_COMMON_DIR="$(git -C "${WORKSPACE}" rev-parse --git-common-dir 2>/dev/nul
     if paths_overlap "${GIT_COMMON_DIR}" "${Host_state_roots[@]}"; then
       die "git common directory ${GIT_COMMON_DIR} overlaps host OpenCode/.agents/.claude/.mcp state"
     fi
+    if overlaps_global_router "${GIT_COMMON_DIR}"; then
+      die "git common directory ${GIT_COMMON_DIR} overlaps the user-global model-router config"
+    fi
+    if overlaps_global_git_config "${GIT_COMMON_DIR}"; then
+      die "git common directory ${GIT_COMMON_DIR} overlaps the user-global Git config"
+    fi
     if paths_overlap "${GIT_COMMON_DIR}" "${Baked_roots[@]}"; then
       die "git common directory ${GIT_COMMON_DIR} shadows a baked config/plugin path"
     fi
@@ -385,22 +467,92 @@ if [[ "${REBUILD}" -eq 1 || "${IMAGE_EXISTS}" -eq 0 ]]; then
   [[ "${HAS_BUILD_CONFIG}" -eq 1 ]] || die "image ${IMAGE} is missing and no build block is configured"
   [[ -f "${CONTAINERFILE}" ]] || die "containerfile not found: ${CONTAINERFILE}"
 
-  BUILD_ARG_FLAGS=(
+  BUILD_FLAGS=(
     --build-arg "USER_UID=$(id -u)"
     --build-arg "USER_GID=$(id -g)"
     --build-arg "USERNAME=$(id -un)"
   )
   while IFS= read -r arg; do
-    [[ -n "${arg}" ]] && BUILD_ARG_FLAGS+=(--build-arg "${arg}")
+    [[ -n "${arg}" ]] && BUILD_FLAGS+=(--build-arg "${arg}")
   done < <(config_jq -r '.build.args // {} | to_entries[] | "\(.key)=\(.value)"')
+
+  # A user-wide local-provider catalog is optional and build-time only. Keep it
+  # outside both this repository and the runtime mounts, validate its constrained
+  # provider-only shape, and expose only that one file to the image build. The
+  # digest is also a cache key and is verified again by the Containerfile.
+  LOCAL_PROVIDERS_PATH="${XDG_CONFIG_HOME:-${HOME}/.config}/opencode2/local-providers.json"
+  LOCAL_PROVIDERS_SHA256="absent"
+  if [[ -e "${LOCAL_PROVIDERS_PATH}" && ! -f "${LOCAL_PROVIDERS_PATH}" ]]; then
+    die "local provider catalog is not a regular file: ${LOCAL_PROVIDERS_PATH}"
+  elif [[ -f "${LOCAL_PROVIDERS_PATH}" ]]; then
+    jq -e -s '
+      length == 1
+      and (.[0] |
+        type == "object"
+        and ((keys - ["$schema", "provider"]) | length == 0)
+        and (.provider |
+          type == "object"
+          and length > 0
+          and all(to_entries[];
+            (.key | type == "string" and length > 0)
+            and (.value |
+              type == "object"
+              and (.npm == "@ai-sdk/openai-compatible")
+              and ((has("name") | not) or (.name | type == "string" and length > 0))
+              and (.options | type == "object")
+              and (.options.baseURL | type == "string" and length > 0)
+              and (.models |
+                type == "object"
+                and length > 0
+                and all(to_entries[];
+                  (.key | type == "string" and length > 0)
+                  and (.value |
+                    type == "object"
+                    and ((has("name") | not) or (.name | type == "string" and length > 0))
+                    and ((has("limit") | not) or (.limit |
+                      type == "object"
+                      and ((has("context") | not) or (.context | type == "number" and . > 0))
+                      and ((has("output") | not) or (.output | type == "number" and . > 0))
+                    ))
+                  )
+                )
+              )
+            )
+          )
+        )
+        and ([.. | objects | keys[]]
+          | all(.[];
+            test("^(api[-_]?key|authorization|headers|token|access[-_]?token|secret|client[-_]?secret|password|credential|credentials)$"; "i")
+            | not
+          ))
+      )
+    ' "${LOCAL_PROVIDERS_PATH}" >/dev/null \
+      || die "invalid local provider catalog: ${LOCAL_PROVIDERS_PATH}"
+    LOCAL_PROVIDERS_PATH="$(realpath -- "${LOCAL_PROVIDERS_PATH}")"
+    LOCAL_PROVIDERS_BUILD_PATH="$(mktemp "${TMPDIR:-/tmp}/opencode2-local-providers.XXXXXX.json")"
+    TEMP_FILES+=("${LOCAL_PROVIDERS_BUILD_PATH}")
+    # Mount only a canonical serialization of the validated object. Besides
+    # making formatting-only edits cache-neutral, this ensures duplicate keys
+    # or other discarded parser input cannot survive as hidden image-layer data.
+    jq -S . "${LOCAL_PROVIDERS_PATH}" > "${LOCAL_PROVIDERS_BUILD_PATH}"
+    chmod 0600 "${LOCAL_PROVIDERS_BUILD_PATH}"
+    LOCAL_PROVIDERS_DIGEST="$(sha256sum -- "${LOCAL_PROVIDERS_BUILD_PATH}")"
+    LOCAL_PROVIDERS_SHA256="${LOCAL_PROVIDERS_DIGEST%% *}"
+    BUILD_FLAGS+=(
+      --security-opt label=disable
+      --volume "${LOCAL_PROVIDERS_BUILD_PATH}:/run/opencode2-build-config/local-providers.json:ro"
+    )
+  fi
+  BUILD_FLAGS+=(--build-arg "LOCAL_PROVIDERS_SHA256=${LOCAL_PROVIDERS_SHA256}")
 
   printf 'opencode-container: building %s (containerfile %s, context %s)\n' \
     "${IMAGE}" "${CONTAINERFILE}" "${CONTEXT}"
   podman build \
-    "${BUILD_ARG_FLAGS[@]}" \
+    "${BUILD_FLAGS[@]}" \
     -t "${IMAGE}" \
     -f "${CONTAINERFILE}" \
     "${CONTEXT}"
+  cleanup_temp_files
 fi
 
 # --- Command selection -------------------------------------------------------

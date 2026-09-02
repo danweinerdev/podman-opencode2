@@ -1,0 +1,20 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "local-openai": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Local OpenAI-compatible server",
+      "options": {
+        "baseURL": "http://host.containers.internal:8080/v1"
+      },
+      "models": {
+        "model-1": {
+          "name": "Local model 1"
+        },
+        "model-2": {
+          "name": "Local model 2"
+        }
+      }
+    }
+  }
+}

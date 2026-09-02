@@ -15,6 +15,7 @@ builder stages, so the runtime image ships no dev toolchain.
 | `/opt/opencode/plugins/sdd/` | SDD planner OpenCode skills + shared resources |
 | `/opt/opencode/plugins/model-router/` | native v2 model-router plugin |
 | `/opt/opencode/sandbox/` | host launcher and sandbox-config templates |
+| `/opt/opencode/config/opencode/opencode.json` | optional build-imported local-provider catalog |
 | `/opt/opencode/config/opencode/agent/*.md` | 10 baked native v2 agent definitions |
 | `/opt/opencode/config/opencode/command/*.md` | baked code-graph slash commands |
 | `/etc/opencode/container-config.json` | baked `OPENCODE_CONFIG` |
@@ -24,8 +25,11 @@ OpenCode data/state/cache (`~/.local/share`, `~/.local/state`, `~/.cache`)
 are writable under the image user's home. The XDG `opencode/` policy directory,
 its baked agent/command subdirectories, and the authoritative config under
 `/etc` remain root-owned. The default standalone process uses a private stdio
-server and creates no background-service metadata there. Nothing depends on
-host state.
+server and creates no background-service metadata there. The launcher never
+mounts host OpenCode application state. Its optional exact-file user
+configuration mounts are the standalone model-router file and user-global Git
+config described below; the optional local-provider catalog is copied into the
+image at build time rather than mounted into running containers.
 
 ## Build
 
@@ -60,6 +64,23 @@ podman build \
   -f Containerfile .
 ```
 
+That plain command intentionally builds without a machine-local provider
+catalog. A launcher-driven build imports the optional shared catalog
+automatically. For a direct build, provide the same read-only mount and digest:
+
+```sh
+providers="${XDG_CONFIG_HOME:-$HOME/.config}/opencode2/local-providers.json"
+digest="$(sha256sum "$providers")"; digest="${digest%% *}"
+podman build \
+  --security-opt label=disable \
+  --volume "$providers:/run/opencode2-build-config/local-providers.json:ro" \
+  --build-arg "LOCAL_PROVIDERS_SHA256=$digest" \
+  --build-arg "USER_UID=$(id -u)" \
+  --build-arg "USER_GID=$(id -g)" \
+  --build-arg "USERNAME=$(id -un)" \
+  -t opencode2:latest -f Containerfile .
+```
+
 ### Child images
 
 Derive from the baked image with a plain `FROM` — everything (binaries, plugin
@@ -68,11 +89,13 @@ assets, config, env) is inherited:
 ```dockerfile
 FROM opencode2:latest
 # e.g. add a private provider model or a project-specific skill directory
-COPY provider.json /opt/opencode/config/opencode/provider.json
+COPY local-providers.json /opt/opencode/config/opencode/opencode.json
 ```
 
 `OPENCODE_CONFIG`, `XDG_CONFIG_HOME`, and the disable flags are set by `ENV` in
-the base image and survive `FROM`.
+the base image and survive `FROM`. The exact global configuration filename is
+`opencode.json`; the pinned OpenCode2 build does not load an arbitrary
+`provider.json` fragment.
 
 ## Encapsulation
 
@@ -99,18 +122,31 @@ agent id, plus `draft.default(...)`. Routing accepts arbitrary valid agent ids
 when a matching definition is already present, so derived images can add and
 route their own agent definitions without mappings synthesizing new agents.
 
-Config is assembled from two sources:
+Config is assembled from three sources, in increasing precedence:
 
 1. **Defaults** — the native v2 plugin-entry options baked into
    `container-config.json` (`{ schema_version, profiles, agents,
    default_agent }`); baked profiles demonstrate OpenAI + DeepSeek routing and
    need only `OPENAI_API_KEY` / `DEEPSEEK_API_KEY`.
-2. **Project overrides** — the workspace's `$PWD/.opencode-sandbox.json` is
+2. **User-global override** — on every launch,
+   `${XDG_CONFIG_HOME:-$HOME/.config}/opencode2/model-router.json` is discovered
+   as a standalone partial router config. When present, the exact file is
+   mounted read-only at `/run/opencode/model-router-global.json`, and
+   `OPENCODE_MODEL_ROUTER_GLOBAL_CONFIG` points the plugin to it. The merged
+   global layer is validated before any project override is applied.
+3. **Project overrides** — the workspace's `$PWD/.opencode-sandbox.json` is
    mounted read-only at `/run/opencode/sandbox.json`, and the launcher sets
    `OPENCODE_MODEL_ROUTER_CONFIG=/run/opencode/sandbox.json`. The plugin reads
    that file's top-level `model_router` block and shallow-merges its partial
-   `profiles`/`agents`/`default_agent` over the defaults, then validates the
-   merged result.
+   `profiles`/`agents`/`default_agent` over the global result, then validates
+   the final result. `OPENCODE_MODEL_ROUTER_CONFIG` remains compatible for
+   launchers that provide only a workspace config.
+
+Router config is runtime input: editing the user-global or workspace routing
+file requires only restarting the launcher/container, not rebuilding the
+image. Never put API keys, authorization headers, tokens, passwords, or other
+credentials in either model-router config; use Podman secrets or supported
+provider environment variables.
 
 **v2-only limitations** — this plugin deliberately has no v1 surface:
 
@@ -156,10 +192,12 @@ container.
 `PATH`-safe; requires Bash, `jq`, `podman`, `git`, and `sha256sum`. It detects
 `$PWD/.opencode-sandbox.json`: when present it applies and mounts that file;
 when absent it warns and uses `opencode2:latest`, the current directory as the
-workspace, a stable CWD-derived workdir, baked model routing, and
-`opencode2 --standalone`. The launcher itself can therefore live anywhere on
-`PATH`; project discovery and session persistence are based on the invocation
-directory, not the script's installation directory.
+workspace, a stable CWD-derived workdir, and `opencode2 --standalone`. On every
+launch it independently discovers the optional user-global model-router config
+and the host's exact `$HOME/.gitconfig`, falling back to baked routing when
+neither routing override exists. The launcher itself can therefore live
+anywhere on `PATH`; project discovery and session persistence are based on the
+invocation directory, not the script's installation directory.
 
 ```sh
 ./examples/opencode-container.sh                 # build if needed, run opencode2 --standalone
@@ -182,10 +220,34 @@ Behavior:
   `OPENCODE_MODEL_ROUTER_CONFIG=/run/opencode/sandbox.json` so the model-router
   plugin can apply project overrides. No config means no control-file mount or
   override environment variable.
+- Independently discovers
+  `${XDG_CONFIG_HOME:-$HOME/.config}/opencode2/model-router.json`. A present
+  path must be one JSON object in a regular file; the launcher canonicalizes
+  and mounts that exact file (not its parent directory) read-only at
+  `/run/opencode/model-router-global.json`, then sets
+  `OPENCODE_MODEL_ROUTER_GLOBAL_CONFIG=/run/opencode/model-router-global.json`.
+  Both control files and both environment variables are supplied when both
+  configs exist.
+- On every launch, independently checks the host's exact `$HOME/.gitconfig`.
+  When present, it canonicalizes and mounts only that readable regular file
+  read-only at `/run/opencode/gitconfig` and sets `GIT_CONFIG_GLOBAL` to that
+  path, so it works even when a prebuilt image has a different username. It
+  does not mount host `HOME`, the file's parent, Git credential files/helpers,
+  or files named by `include`/`includeIf`, and it does not forward or set
+  `HOME`. No per-workspace `mounts` entry is required. Inline secrets in
+  `.gitconfig` become readable inside the container; relative includes resolve
+  from `/run/opencode`, and other includes or credential helpers work only when
+  their paths or programs are separately available in the container.
 - Builds only when the image is absent or `--rebuild` is passed, and only from
   a configured local `build` block; always passes host `USER_UID`/`USER_GID`/
   `USERNAME` build args. Therefore config-free operation expects the default
   `opencode2:latest` image to exist locally.
+- When a build occurs, optionally validates and imports the user-wide local
+  provider catalog at
+  `${XDG_CONFIG_HOME:-$HOME/.config}/opencode2/local-providers.json`. Only that
+  file's validated canonical JSON is mounted read-only into the build, and its
+  SHA-256 is passed as a cache key and verified by the `Containerfile`. It is
+  not mounted at runtime.
 - Auto-forwards only provider env vars that are **set** (the common provider
   list plus `AZURE_OPENAI_API_KEY`); rejects `HOME`/`PATH`/`XDG_*`/`OPENCODE_*`
   as explicit env; never mounts host `opencode` state from the effective XDG
@@ -265,11 +327,84 @@ hash; set an explicit project-specific volume name first if persistence must
 survive that move.
 
 The `model_router` block is a **partial** override: it shallow-merges its
-`profiles` and `agents` maps over the baked defaults (an entry replaces the
-same-named default; new profiles and agent mappings may be introduced), and
-`default_agent` falls back to the baked value when omitted. A new mapping must
-correspond to an agent definition supplied by a derived image. The override is
-applied by the model-router plugin via `OPENCODE_MODEL_ROUTER_CONFIG`.
+`profiles` and `agents` maps over the user-global result (an entry replaces the
+same-named entry; new profiles and agent mappings may be introduced), and
+`default_agent` falls back through the user-global layer to the baked value when
+omitted. A new mapping must correspond to an agent definition supplied by a
+derived image. The override is applied by the model-router plugin via
+`OPENCODE_MODEL_ROUTER_CONFIG`.
+
+## User-global model routing
+
+`examples/model-router.json.example` is the standalone partial-config shape for
+machine-wide routing preferences. Install it outside repositories:
+
+```sh
+mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/opencode2"
+cp examples/model-router.json.example \
+  "${XDG_CONFIG_HOME:-$HOME/.config}/opencode2/model-router.json"
+```
+
+The three-layer precedence is baked/plugin options < user-global standalone
+config < workspace `model_router`. Each profile entry is replaced as a whole,
+not deep-merged. The global layer must resolve all of its cross-references after
+merging over the baked options; a workspace override cannot repair an invalid
+global mapping. Changes take effect after restarting the launcher/container and
+do not require an image rebuild. Keep credentials out of this file and the
+workspace `model_router`; use Podman secrets or provider environment variables.
+
+## Shared local providers
+
+`examples/local-providers.json.example` is a generalized provider/model catalog
+for local OpenAI-compatible servers such as llama.cpp, Ollama, or LM Studio.
+Install a machine-specific copy outside every repository:
+
+```sh
+mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/opencode2"
+cp examples/local-providers.json.example \
+  "${XDG_CONFIG_HOME:-$HOME/.config}/opencode2/local-providers.json"
+```
+
+For example, a llama.cpp server reachable from Podman on host port 18080 can be
+declared as:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "llama.cpp": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "llama.cpp (local)",
+      "options": {
+        "baseURL": "http://host.containers.internal:18080/v1"
+      },
+      "models": {
+        "qwen3.8-27b-q8-latest": {
+          "name": "Qwen 3.8 27B (local)",
+          "limit": { "context": 262144, "output": 32768 }
+        }
+      }
+    }
+  }
+}
+```
+
+The provider is then available as `llama.cpp/qwen3.8-27b-q8-latest` to the model
+picker and to `model_router.profiles`. The server must listen on an address
+reachable through `host.containers.internal`; unlike a container-loopback URL,
+this does not require `network: "host"` for the tested llama.cpp setup.
+
+The launcher consumes the shared catalog only when it builds the image. Run
+`opencode-container --rebuild` after adding, changing, or removing it. The
+catalog is installed in the image as
+`/opt/opencode/config/opencode/opencode.json`, where OpenCode merges it with the
+baked `/etc/opencode/container-config.json`. Canonicalization also prevents
+discarded duplicate-key bytes from surviving in the image layer. Do not put API
+keys, authorization
+headers, tokens, passwords, or other secrets in this file: its contents become
+an image layer. The launcher rejects those obvious credential field names;
+continue to use Podman secrets or forwarded environment variables for
+credentials.
 
 ## Credentials and OAuth
 
@@ -308,9 +443,11 @@ npm test           # node:test, including a mock AgentDraft
 bash -n examples/opencode-container.sh
 shellcheck examples/opencode-container.sh   # if shellcheck is installed
 tests/launcher-env.test.sh
+tests/local-provider-build.test.sh  # Podman integration; builds present/changed/absent catalogs
 jq empty container-config.json
 jq empty container-config.schema.json
-jq empty examples/.opencode-sandbox.json.example
+jq empty examples/opencode-sandbox.json.example
+jq empty examples/local-providers.json.example
 npx --yes ajv-cli@5 validate -s container-config.schema.json \
   -d container-config.json --spec=draft2020
 ```

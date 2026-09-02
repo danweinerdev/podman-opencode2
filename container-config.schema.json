@@ -42,7 +42,7 @@
   "$defs": {
     "model": {
       "type": "string",
-      "pattern": "^[^/]+/[^/]+$"
+      "pattern": "^[^/]+/.+$"
     },
     "agent": {
       "type": "object",

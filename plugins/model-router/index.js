@@ -10,16 +10,19 @@
  * SDK child-session relay, and no decoy/return-ok flow.
  *
  * Config resolution: the baked plugin tuple `options` provide the full default
- * config. When `OPENCODE_MODEL_ROUTER_CONFIG` names a launcher-mounted sandbox
- * JSON, the plugin reads its top-level `model_router` block and shallow-merges
- * that block's `profiles`/`agents`/`default_agent` over the defaults, then
- * validates the merged result. Routing accepts arbitrary valid agent ids so a
+ * config. `OPENCODE_MODEL_ROUTER_GLOBAL_CONFIG` may name a launcher-mounted
+ * standalone partial config, and `OPENCODE_MODEL_ROUTER_CONFIG` may name a
+ * launcher-mounted sandbox JSON whose top-level `model_router` block is the
+ * workspace override. Each layer shallow-merges over the previous one. The
+ * global result is validated before the workspace is read, then the final
+ * result is validated again. Routing accepts arbitrary valid agent ids so a
  * sandbox can route additional agent definitions supplied by a derived image.
  *
  * Exported for tests:
  *   - `validateConfig(value)`        full merged-config validation (throws)
  *   - `validateOverride(value)`      partial `model_router` shape validation
  *   - `mergeConfig(base, override)`  shallow profile/agent merge
+ *   - `readStandaloneModelRouterOverride(path)` read a standalone partial config
  *   - `readModelRouterOverride(path)` read + parse a sandbox JSON file
  *   - `modelRefFor(profile)`         profile -> { providerID, id, variant? }
  *   - `applyAgentConfig(draft, config)`  pure draft application
@@ -102,7 +105,7 @@ export function parseModelRef(model) {
     throw new Error("profile.model must be a non-empty string")
   }
   const separator = model.indexOf("/")
-  if (separator <= 0 || separator === model.length - 1 || model.indexOf("/", separator + 1) !== -1) {
+  if (separator <= 0 || separator === model.length - 1) {
     throw new Error(`profile.model must use provider/model format: ${JSON.stringify(model)}`)
   }
   return {
@@ -269,12 +272,8 @@ export function mergeConfig(base, override) {
   return merged
 }
 
-/**
- * Read a launcher-mounted sandbox JSON and return its top-level `model_router`
- * block, or `undefined` when the file has no such key. Throws on an unreadable
- * path, invalid JSON, or a non-object document.
- */
-export async function readModelRouterOverride(path) {
+/** Read and parse one model-router-related JSON object. */
+async function readModelRouterDocument(path) {
   let text
   try {
     text = await readFile(path, "utf8")
@@ -282,15 +281,32 @@ export async function readModelRouterOverride(path) {
     throw new Error(`unable to read model-router config ${JSON.stringify(path)}: ${err.message}`)
   }
 
-  let sandbox
+  let document
   try {
-    sandbox = JSON.parse(text)
+    document = JSON.parse(text)
   } catch (err) {
     throw new Error(`invalid JSON in model-router config ${JSON.stringify(path)}: ${err.message}`)
   }
-  if (!isObject(sandbox)) {
+  if (!isObject(document)) {
     throw new Error(`model-router config ${JSON.stringify(path)} must be a JSON object`)
   }
+  return document
+}
+
+/**
+ * Read a standalone partial model-router config. Throws on an unreadable path,
+ * invalid JSON, or a non-object document.
+ */
+export async function readStandaloneModelRouterOverride(path) {
+  return readModelRouterDocument(path)
+}
+
+/**
+ * Read a launcher-mounted sandbox JSON and return its top-level `model_router`
+ * block, or `undefined` when the file has no such key.
+ */
+export async function readModelRouterOverride(path) {
+  const sandbox = await readModelRouterDocument(path)
   return sandbox.model_router
 }
 
@@ -344,11 +360,17 @@ export const plugin = define({
     const base = isObject(options) && Object.keys(options).length > 0 ? validateConfig(options) : DEFAULT_CONFIG
 
     let config = base
+    const globalOverridePath = process.env.OPENCODE_MODEL_ROUTER_GLOBAL_CONFIG
+    if (typeof globalOverridePath === "string" && globalOverridePath.length > 0) {
+      const globalOverride = await readStandaloneModelRouterOverride(globalOverridePath)
+      config = validateConfig(mergeConfig(base, globalOverride))
+    }
+
     const overridePath = process.env.OPENCODE_MODEL_ROUTER_CONFIG
     if (typeof overridePath === "string" && overridePath.length > 0) {
       const override = await readModelRouterOverride(overridePath)
       if (override !== undefined) {
-        config = validateConfig(mergeConfig(base, override))
+        config = validateConfig(mergeConfig(config, override))
       }
     }
 

@@ -5,14 +5,16 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "${TMP}"' EXIT
 
-mkdir -p "${TMP}/bin" "${TMP}/workspace"
+mkdir -p "${TMP}/bin" "${TMP}/workspace" "${TMP}/test-home"
+export HOME="${TMP}/test-home"
 
 cat > "${TMP}/bin/podman" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
 if [[ "${1:-}" == "image" && "${2:-}" == "exists" ]]; then
-  exit 0
+  [[ "${PODMAN_IMAGE_EXISTS:-1}" == "1" ]]
+  exit
 fi
 
 if [[ "${1:-}" == "secret" && "${2:-}" == "exists" ]]; then
@@ -27,6 +29,11 @@ if [[ "${1:-}" == "run" ]]; then
     printf 'EMPTY_FORWARD_SET=%s\n' "${EMPTY_FORWARD+x}"
     printf 'EMPTY_FORWARD=%s\n' "${EMPTY_FORWARD-}"
   } > "${ENV_LOG}"
+  exit 0
+fi
+
+if [[ "${1:-}" == "build" ]]; then
+  printf '%s\n' "$@" > "${BUILD_ARGV_LOG}"
   exit 0
 fi
 
@@ -54,7 +61,8 @@ EOF
 
 ARGV_LOG="${TMP}/argv.log"
 ENV_LOG="${TMP}/env.log"
-export ARGV_LOG ENV_LOG
+BUILD_ARGV_LOG="${TMP}/build-argv.log"
+export ARGV_LOG ENV_LOG BUILD_ARGV_LOG
 
 (
   cd "${TMP}/workspace"
@@ -233,6 +241,173 @@ if grep -Fq -- "/run/opencode/sandbox.json" "${ARGV_LOG}"; then
   printf 'config-free launcher mounted or advertised an absent sandbox config\n' >&2
   exit 1
 fi
+if grep -Fq -- "/run/opencode/model-router-global.json" "${ARGV_LOG}"; then
+  printf 'config-free launcher mounted or advertised an absent global router config\n' >&2
+  exit 1
+fi
+if grep -Fq -- "/run/opencode/gitconfig" "${ARGV_LOG}"; then
+  printf 'config-free launcher mounted an absent user-global Git config\n' >&2
+  exit 1
+fi
+
+# HOME and the file itself may both be symlinks. The launcher must still mount
+# only the canonical exact file at the stable Git override target, not host HOME
+# or the source file's parent directory.
+mkdir -p "${TMP}/gitconfig-home-real" "${TMP}/gitconfig-real"
+printf '%s\n' '[user]' '  name = Test User' > "${TMP}/gitconfig-real/config"
+ln -s "${TMP}/gitconfig-real/config" "${TMP}/gitconfig-home-real/.gitconfig"
+ln -s "${TMP}/gitconfig-home-real" "${TMP}/gitconfig-home-link"
+(
+  cd "${TMP}/default-workspace"
+  HOME="${TMP}/gitconfig-home-link" XDG_CONFIG_HOME="${TMP}/unused-xdg-config" \
+    PATH="${TMP}/bin:${PATH}" opencode-container
+) 2>"${TMP}/gitconfig-warning.log"
+grep -Fx -- "${TMP}/gitconfig-real/config:/run/opencode/gitconfig:ro" \
+  "${ARGV_LOG}" >/dev/null
+grep -Fx -- "GIT_CONFIG_GLOBAL=/run/opencode/gitconfig" "${ARGV_LOG}" >/dev/null
+if grep -Fq -- "${TMP}/gitconfig-real:" "${ARGV_LOG}"; then
+  printf 'launcher mounted the user-global Git config parent directory\n' >&2
+  exit 1
+fi
+if grep -Fq -- "${TMP}/gitconfig-home-real:" "${ARGV_LOG}"; then
+  printf 'launcher mounted host HOME for the user-global Git config\n' >&2
+  exit 1
+fi
+
+# An additional writable mount cannot expose the canonical config through a
+# second path.
+mkdir -p "${TMP}/gitconfig-overlap-workspace"
+printf '%s\n' '{"mounts":[{"source":"'"${TMP}/gitconfig-real"'","target":"/mnt/gitconfig"}]}' \
+  > "${TMP}/gitconfig-overlap-workspace/.opencode-sandbox.json"
+if (
+  cd "${TMP}/gitconfig-overlap-workspace"
+  HOME="${TMP}/gitconfig-home-link" XDG_CONFIG_HOME="${TMP}/unused-xdg-config" \
+    PATH="${TMP}/bin:${PATH}" opencode-container
+) 2>"${TMP}/gitconfig-overlap.log"; then
+  printf 'launcher exposed the user-global Git config through an additional mount\n' >&2
+  exit 1
+fi
+grep -F -- "overlaps the user-global Git config" "${TMP}/gitconfig-overlap.log" >/dev/null
+
+# Workspace environment settings cannot redirect Git away from the dedicated
+# launcher-owned global config mount.
+printf '%s\n' '{"env":{"set":{"GIT_CONFIG_GLOBAL":"/mnt/other"}}}' \
+  > "${TMP}/gitconfig-overlap-workspace/.opencode-sandbox.json"
+if (
+  cd "${TMP}/gitconfig-overlap-workspace"
+  HOME="${TMP}/gitconfig-home-link" XDG_CONFIG_HOME="${TMP}/unused-xdg-config" \
+    PATH="${TMP}/bin:${PATH}" opencode-container
+) 2>"${TMP}/gitconfig-env-override.log"; then
+  printf 'launcher allowed workspace override of GIT_CONFIG_GLOBAL\n' >&2
+  exit 1
+fi
+grep -F -- "reserved environment variable: GIT_CONFIG_GLOBAL" \
+  "${TMP}/gitconfig-env-override.log" >/dev/null
+
+# A standalone user-global router config is discovered on every launch,
+# canonicalized, and mounted as one exact read-only file without requiring a
+# workspace sandbox config.
+mkdir -p "${TMP}/global-config-real/opencode2"
+ln -s "${TMP}/global-config-real" "${TMP}/global-config-link"
+printf '%s\n' '{"schema_version":1,"profiles":{"reasoning":{"model":"anthropic/claude-opus-4-1"}}}' \
+  > "${TMP}/global-config-real/opencode2/model-router.json"
+(
+  cd "${TMP}/default-workspace"
+  HOME="${TMP}/default-home" XDG_CONFIG_HOME="${TMP}/global-config-link" \
+    PATH="${TMP}/bin:${PATH}" opencode-container
+) 2>"${TMP}/global-warning.log"
+grep -F -- "user-global routing config" "${TMP}/global-warning.log" >/dev/null
+if grep -Fq -- "baked routing defaults" "${TMP}/global-warning.log"; then
+  printf 'launcher described routing as baked-only despite a global config\n' >&2
+  exit 1
+fi
+grep -Fx -- "${TMP}/global-config-real/opencode2/model-router.json:/run/opencode/model-router-global.json:ro" \
+  "${ARGV_LOG}" >/dev/null
+grep -Fx -- "OPENCODE_MODEL_ROUTER_GLOBAL_CONFIG=/run/opencode/model-router-global.json" \
+  "${ARGV_LOG}" >/dev/null
+if grep -Fxq -- "${TMP}/global-config-real/opencode2:/run/opencode" "${ARGV_LOG}"; then
+  printf 'launcher mounted the global router parent directory\n' >&2
+  exit 1
+fi
+
+# The exact read-only control mount must not be bypassable through a workspace
+# or additional mount that exposes the same host file through a writable path.
+mkdir -p "${TMP}/global-overlap-workspace"
+printf '%s\n' '{"mounts":[{"source":"'"${TMP}/global-config-real/opencode2"'","target":"/mnt/global-config"}]}' \
+  > "${TMP}/global-overlap-workspace/.opencode-sandbox.json"
+if (
+  cd "${TMP}/global-overlap-workspace"
+  HOME="${TMP}/default-home" XDG_CONFIG_HOME="${TMP}/global-config-link" \
+    PATH="${TMP}/bin:${PATH}" opencode-container
+) 2>"${TMP}/global-overlap.log"; then
+  printf 'launcher exposed the global router through an additional mount\n' >&2
+  exit 1
+fi
+grep -F -- "overlaps the user-global model-router config" "${TMP}/global-overlap.log" >/dev/null
+
+# Global and workspace router inputs are independent and must both be mounted
+# when both files exist.
+printf '{}\n' > "${TMP}/default-workspace/.opencode-sandbox.json"
+(
+  cd "${TMP}/default-workspace"
+  HOME="${TMP}/default-home" XDG_CONFIG_HOME="${TMP}/global-config-link" \
+    PATH="${TMP}/bin:${PATH}" opencode-container
+)
+grep -Fx -- "${TMP}/global-config-real/opencode2/model-router.json:/run/opencode/model-router-global.json:ro" \
+  "${ARGV_LOG}" >/dev/null
+grep -Fx -- "OPENCODE_MODEL_ROUTER_GLOBAL_CONFIG=/run/opencode/model-router-global.json" \
+  "${ARGV_LOG}" >/dev/null
+grep -Fx -- "${TMP}/default-workspace/.opencode-sandbox.json:/run/opencode/sandbox.json:ro" \
+  "${ARGV_LOG}" >/dev/null
+grep -Fx -- "OPENCODE_MODEL_ROUTER_CONFIG=/run/opencode/sandbox.json" "${ARGV_LOG}" >/dev/null
+
+# Malformed, multiple-document, non-object, and non-file global inputs fail
+# before Podman instead of silently falling back to another routing layer.
+printf '%s\n' '{ not json' > "${TMP}/global-config-real/opencode2/model-router.json"
+if (
+  cd "${TMP}/default-workspace"
+  HOME="${TMP}/default-home" XDG_CONFIG_HOME="${TMP}/global-config-link" \
+    PATH="${TMP}/bin:${PATH}" opencode-container
+) 2>"${TMP}/global-malformed.log"; then
+  printf 'launcher accepted malformed global router JSON\n' >&2
+  exit 1
+fi
+grep -F -- "invalid global model-router config" "${TMP}/global-malformed.log" >/dev/null
+
+printf '%s\n' '{}' '{}' > "${TMP}/global-config-real/opencode2/model-router.json"
+if (
+  cd "${TMP}/default-workspace"
+  HOME="${TMP}/default-home" XDG_CONFIG_HOME="${TMP}/global-config-link" \
+    PATH="${TMP}/bin:${PATH}" opencode-container
+) 2>"${TMP}/global-multiple.log"; then
+  printf 'launcher accepted multiple global router JSON documents\n' >&2
+  exit 1
+fi
+grep -F -- "invalid global model-router config" "${TMP}/global-multiple.log" >/dev/null
+
+printf '%s\n' '[]' > "${TMP}/global-config-real/opencode2/model-router.json"
+if (
+  cd "${TMP}/default-workspace"
+  HOME="${TMP}/default-home" XDG_CONFIG_HOME="${TMP}/global-config-link" \
+    PATH="${TMP}/bin:${PATH}" opencode-container
+) 2>"${TMP}/global-non-object.log"; then
+  printf 'launcher accepted a non-object global router config\n' >&2
+  exit 1
+fi
+grep -F -- "invalid global model-router config" "${TMP}/global-non-object.log" >/dev/null
+
+rm "${TMP}/global-config-real/opencode2/model-router.json"
+mkdir "${TMP}/global-config-real/opencode2/model-router.json"
+if (
+  cd "${TMP}/default-workspace"
+  HOME="${TMP}/default-home" XDG_CONFIG_HOME="${TMP}/global-config-link" \
+    PATH="${TMP}/bin:${PATH}" opencode-container
+) 2>"${TMP}/global-not-file.log"; then
+  printf 'launcher accepted a non-file global router path\n' >&2
+  exit 1
+fi
+grep -F -- "global model-router config is not a regular file" "${TMP}/global-not-file.log" >/dev/null
+rm -r "${TMP}/global-config-real/opencode2/model-router.json"
 
 # A present partial config inherits the same defaults and is mounted so its
 # optional router block can be consumed.
@@ -295,3 +470,84 @@ printf '%s\n' '{"persistence":{"data_volume":"project-opencode-data"}}' \
   HOME="${TMP}/default-home" PATH="${TMP}/bin:${PATH}" opencode-container
 )
 grep -Fx -- "project-opencode-data:/var/lib/opencode-data:U" "${ARGV_LOG}" >/dev/null
+
+# An optional user-wide local-provider catalog is validated and exposed only to
+# the image build. Its digest is both a build-cache key and an integrity check.
+mkdir -p "${TMP}/build-workspace" "${TMP}/shared-config/opencode2"
+jq -n --arg containerfile "${ROOT}/Containerfile" --arg context "${ROOT}" '
+  {
+    image: "opencode2:provider-build-test",
+    build: {containerfile: $containerfile, context: $context},
+    command: ["/bin/true"]
+  }
+' > "${TMP}/build-workspace/.opencode-sandbox.json"
+cp "${ROOT}/examples/local-providers.json.example" \
+  "${TMP}/shared-config/opencode2/local-providers.json"
+jq -S . "${TMP}/shared-config/opencode2/local-providers.json" \
+  > "${TMP}/expected-canonical-providers.json"
+PROVIDER_DIGEST="$(sha256sum "${TMP}/expected-canonical-providers.json")"
+PROVIDER_DIGEST="${PROVIDER_DIGEST%% *}"
+(
+  cd "${TMP}/build-workspace"
+  HOME="${TMP}/build-home" XDG_CONFIG_HOME="${TMP}/shared-config" \
+    PODMAN_IMAGE_EXISTS=0 PATH="${TMP}/bin:${PATH}" opencode-container
+)
+grep -Fx -- "LOCAL_PROVIDERS_SHA256=${PROVIDER_DIGEST}" "${BUILD_ARGV_LOG}" >/dev/null
+grep -Fx -- "label=disable" "${BUILD_ARGV_LOG}" >/dev/null
+grep -E -- '^/.+:/run/opencode2-build-config/local-providers\.json:ro$' \
+  "${BUILD_ARGV_LOG}" >/dev/null
+
+# Removing the catalog must produce an explicit absent cache key and no build
+# mount, ensuring a rebuild can also remove a previously baked catalog.
+rm "${TMP}/shared-config/opencode2/local-providers.json"
+(
+  cd "${TMP}/build-workspace"
+  HOME="${TMP}/build-home" XDG_CONFIG_HOME="${TMP}/shared-config" \
+    PODMAN_IMAGE_EXISTS=0 PATH="${TMP}/bin:${PATH}" opencode-container
+)
+grep -Fx -- "LOCAL_PROVIDERS_SHA256=absent" "${BUILD_ARGV_LOG}" >/dev/null
+if grep -Fq -- "/run/opencode2-build-config/local-providers.json" "${BUILD_ARGV_LOG}"; then
+  printf 'launcher mounted a missing local-provider catalog into the build\n' >&2
+  exit 1
+fi
+
+# Malformed, empty, or credential-bearing catalogs fail before Podman build.
+printf '%s\n' '{"provider":{"local":{"npm":"@ai-sdk/openai-compatible","options":{"baseURL":"http://host.containers.internal:18080/v1","apiKey":"must-not-be-baked"},"models":{"model":{}}}}}' \
+  > "${TMP}/shared-config/opencode2/local-providers.json"
+if (
+  cd "${TMP}/build-workspace"
+  HOME="${TMP}/build-home" XDG_CONFIG_HOME="${TMP}/shared-config" \
+    PODMAN_IMAGE_EXISTS=0 PATH="${TMP}/bin:${PATH}" opencode-container
+) 2>"${TMP}/provider-invalid.log"; then
+  printf 'launcher accepted a credential-bearing local-provider catalog\n' >&2
+  exit 1
+fi
+grep -F -- "invalid local provider catalog" "${TMP}/provider-invalid.log" >/dev/null
+
+# Validation must consume exactly one document and reject non-object models;
+# otherwise a valid trailing document could hide bytes that get baked verbatim.
+printf '%s\n' '{"provider":{"first-valid":{"npm":"@ai-sdk/openai-compatible","options":{"baseURL":"http://host.containers.internal:18080/v1"},"models":{"model":{}}}}}' \
+  > "${TMP}/shared-config/opencode2/local-providers.json"
+jq -c . "${ROOT}/examples/local-providers.json.example" \
+  >> "${TMP}/shared-config/opencode2/local-providers.json"
+if (
+  cd "${TMP}/build-workspace"
+  HOME="${TMP}/build-home" XDG_CONFIG_HOME="${TMP}/shared-config" \
+    PODMAN_IMAGE_EXISTS=0 PATH="${TMP}/bin:${PATH}" opencode-container
+) 2>"${TMP}/provider-multiple.log"; then
+  printf 'launcher accepted multiple local-provider JSON documents\n' >&2
+  exit 1
+fi
+grep -F -- "invalid local provider catalog" "${TMP}/provider-multiple.log" >/dev/null
+
+printf '%s\n' '{"provider":{"local":{"npm":"@ai-sdk/openai-compatible","options":{"baseURL":"http://host.containers.internal:18080/v1"},"models":{"broken":null}}}}' \
+  > "${TMP}/shared-config/opencode2/local-providers.json"
+if (
+  cd "${TMP}/build-workspace"
+  HOME="${TMP}/build-home" XDG_CONFIG_HOME="${TMP}/shared-config" \
+    PODMAN_IMAGE_EXISTS=0 PATH="${TMP}/bin:${PATH}" opencode-container
+) 2>"${TMP}/provider-model.log"; then
+  printf 'launcher accepted a non-object local model definition\n' >&2
+  exit 1
+fi
+grep -F -- "invalid local provider catalog" "${TMP}/provider-model.log" >/dev/null

@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "profiles": {
+    "orchestration": {
+      "model": "openai/gpt-5.6-sol"
+    },
+    "reasoning": {
+      "model": "deepseek/deepseek-v4-pro",
+      "variant": "high"
+    },
+    "implementation": {
+      "model": "deepseek/deepseek-v4-pro",
+      "variant": "max"
+    },
+    "extraction": {
+      "model": "openai/gpt-5.6-luna"
+    },
+    "review": {
+      "model": "deepseek/deepseek-v4-flash"
+    }
+  },
+  "agents": {
+    "orchestrator": "orchestration",
+    "reasoner": "reasoning",
+    "extractor": "extraction",
+    "bulk-researcher": "extraction",
+    "bounded-editor": "reasoning",
+    "implementer": "implementation",
+    "review-plan-drift": "review",
+    "review-quality": "orchestration",
+    "review-spec-compliance": "review",
+    "review-blind-spots": "reasoning"
+  },
+  "default_agent": "orchestrator"
+}
