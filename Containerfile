@@ -31,7 +31,7 @@ ENV GOFLAGS=-buildvcs=false
 # portable .opencode-plugin tree (plugin.json + skills/ + shared/) alongside it.
 # Its collaboration prompts are rendered by the skills into the restricted
 # native workers, so the separate Claude-oriented agent catalog is not copied.
-ARG SDD_PLANNER_REF=de54ad99c3922f0af3d95489e085ce1687e89797
+ARG SDD_PLANNER_REF=cce260a596fc9b3dc78bd273699a3f3617460aaa
 RUN set -eux; \
     git clone --filter=blob:none --no-tags \
         https://github.com/danweinerdev/claude-sdd-planner.git /tmp/claude-sdd-planner; \
