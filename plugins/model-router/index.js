@@ -29,7 +29,9 @@
  *   - `BAKED_AGENTS` and `DEFAULT_CONFIG`
  */
 
-import { readFile } from "node:fs/promises"
+import { readdir, readFile } from "node:fs/promises"
+import { homedir } from "node:os"
+import { resolve } from "node:path"
 
 import { define } from "@opencode-ai/plugin/v2/promise"
 
@@ -340,18 +342,22 @@ export async function readModelRouterOverride(path) {
  * Pure: operates only on the supplied draft; does not touch the filesystem,
  * the SDK client, or any v1 hook surface.
  */
-export function applyAgentConfig(draft, config) {
+export function applyAgentConfig(draft, config, declaredAgentIDs = []) {
   const resolved = validateConfig(config)
   const pinDefaultAgentModel = resolved.pin_default_agent_model ?? false
-  const missing = Object.keys(resolved.agents).filter((agentID) => draft.get(agentID) === undefined)
+  const declared = new Set(declaredAgentIDs)
+  const missing = Object.keys(resolved.agents).filter(
+    (agentID) => draft.get(agentID) === undefined && !declared.has(agentID),
+  )
   if (missing.length > 0) {
     throw new Error(`model-router agent definition(s) not found: ${missing.join(", ")}`)
   }
 
   // Preflight every mapping before mutation so a typo cannot synthesize an
   // unrestricted primary agent through AgentDraft.update's create-on-miss
-  // behavior. Derived images remain supported when their definitions are
-  // already present in the draft.
+  // behavior. The pinned runtime activates external plugins before its
+  // Markdown-agent transform, so declared definitions are allowed to be
+  // created here and completed by that later transform.
   for (const [agentID, profileName] of Object.entries(resolved.agents)) {
     const profile = resolved.profiles[profileName]
     if (!profile) continue
@@ -376,6 +382,26 @@ export function applyAgentConfig(draft, config) {
   return resolved
 }
 
+async function declaredAgentIDs() {
+  const roots = [resolve(process.env.XDG_CONFIG_HOME ?? resolve(homedir(), ".config"), "opencode")]
+  if (process.env.OPENCODE_CONFIG_DIR) roots.push(resolve(process.env.OPENCODE_CONFIG_DIR))
+
+  const ids = new Set(BAKED_AGENTS)
+  for (const root of roots) {
+    for (const folder of ["agent", "agents"]) {
+      try {
+        const entries = await readdir(resolve(root, folder), { withFileTypes: true })
+        for (const entry of entries) {
+          if (entry.isFile() && entry.name.endsWith(".md")) ids.add(entry.name.slice(0, -3))
+        }
+      } catch (error) {
+        if (error?.code !== "ENOENT") throw error
+      }
+    }
+  }
+  return ids
+}
+
 export const plugin = define({
   id: "opencode-model-router",
   setup: async (ctx) => {
@@ -397,13 +423,10 @@ export const plugin = define({
       }
     }
 
+    const declared = await declaredAgentIDs()
     await ctx.agent.transform((draft) => {
-      applyAgentConfig(draft, config)
+      applyAgentConfig(draft, config, declared)
     })
-    // External plugins load after the location's built-in agent transforms may
-    // already have rendered once. Force a fresh render so this newly registered
-    // transform is visible immediately to agent selection and debug APIs.
-    await ctx.agent.reload()
   },
 })
 

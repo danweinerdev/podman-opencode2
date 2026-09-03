@@ -244,7 +244,7 @@ case "${WORKSPACE}" in
   /*) : ;;
   *) WORKSPACE="${INVOCATION_ROOT}/${WORKSPACE}" ;;
 esac
-WORKSPACE="$(realpath -- "${WORKSPACE}")" || die "workspace does not exist: ${WORKSPACE}"
+WORKSPACE="$(realpath -e -- "${WORKSPACE}")" || die "workspace does not exist: ${WORKSPACE}"
 if paths_overlap "${WORKSPACE}" "${Host_state_roots[@]}"; then
   die "workspace ${WORKSPACE} overlaps host OpenCode/.agents/.claude/.mcp state"
 fi
@@ -411,7 +411,7 @@ while IFS= read -r entry; do
     /*) source_path="${source}" ;;
     *) source_path="${WORKSPACE}/${source}" ;;
   esac
-  abs_source="$(realpath -- "${source_path}")" || die "mount source does not exist: ${source}"
+  abs_source="$(realpath -e -- "${source_path}")" || die "mount source does not exist: ${source}"
   if paths_overlap "${abs_source}" "${Host_state_roots[@]}"; then
     die "mount source ${abs_source} overlaps host OpenCode/.agents/.claude/.mcp state"
   fi
@@ -546,7 +546,7 @@ if [[ -f "${WORKSPACE}/.git" ]]; then
     /*) GIT_DIR_PATH="${GIT_DIR_REF}" ;;
     *) GIT_DIR_PATH="${WORKSPACE}/${GIT_DIR_REF}" ;;
   esac
-  GIT_DIR_PATH="$(realpath -- "${GIT_DIR_PATH}")" \
+  GIT_DIR_PATH="$(realpath -e -- "${GIT_DIR_PATH}")" \
     || die "linked-worktree gitdir does not exist: ${GIT_DIR_REF}"
   [[ -d "${GIT_DIR_PATH}" ]] || die "linked-worktree gitdir is not a directory: ${GIT_DIR_PATH}"
 fi

@@ -420,6 +420,22 @@ test("rejects missing agent definitions before mutating the draft", () => {
   assert.deepEqual(defaults, [])
 })
 
+test("allows an agent backed by a later Markdown definition to be created", () => {
+  const { draft, agent, defaults } = makeDraft([])
+  const config = {
+    schema_version: 1,
+    pin_default_agent_model: true,
+    profiles: { extraction: { model: "openai/gpt-5.6-luna" } },
+    agents: { extractor: "extraction" },
+    default_agent: "extractor",
+  }
+
+  applyAgentConfig(draft, config, ["extractor"])
+
+  assert.deepEqual(agent("extractor").model, { providerID: "openai", id: "gpt-5.6-luna" })
+  assert.deepEqual(defaults, ["extractor"])
+})
+
 test("routes arbitrary valid agent ids, not a closed role list", () => {
   const config = {
     schema_version: 1,
@@ -668,19 +684,17 @@ test("readStandaloneModelRouterOverride rejects malformed and non-object JSON", 
 test("setup registers DEFAULT_CONFIG when there are no options and no env override", async () => {
   await withRouterEnv(undefined, undefined, async () => {
     let transform = null
-    let reloads = 0
     const ctx = {
       options: undefined,
       agent: {
         transform: async (fn) => (transform = fn),
-        reload: async () => reloads++,
+        reload: async () => assert.fail("setup must not reload before Markdown agents are registered"),
       },
     }
     await defaultExport.setup(ctx)
     assert.equal(typeof transform, "function")
-    assert.equal(reloads, 1)
 
-    const { draft, agent } = makeDraft([...BAKED_AGENTS].map((id) => agentInfo(id)))
+    const { draft, agent } = makeDraft([])
     await transform(draft)
     assert.equal(agent("orchestrator").model, undefined)
     assert.deepEqual(agent("reasoner").model, { providerID: "deepseek", id: "deepseek-v4-pro", variant: "high" })
@@ -703,17 +717,15 @@ test("setup merges a project override from OPENCODE_MODEL_ROUTER_CONFIG over the
 
   await withRouterEnv(undefined, path, async () => {
     let transform = null
-    let reloads = 0
     const ctx = {
       options: undefined,
       agent: {
         transform: async (fn) => (transform = fn),
-        reload: async () => reloads++,
+        reload: async () => assert.fail("setup must not reload before Markdown agents are registered"),
       },
     }
     await defaultExport.setup(ctx)
     assert.equal(typeof transform, "function")
-    assert.equal(reloads, 1)
 
     const { draft, agent, defaults } = makeDraft(BAKED_AGENTS.map((id) => agentInfo(id)))
     await transform(draft)

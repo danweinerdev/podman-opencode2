@@ -329,6 +329,34 @@ if (
 fi
 grep -F -- "overlaps host OpenCode/.agents/.claude/.mcp state" "${TMP}/symlink-overlap.log" >/dev/null
 
+# A workspace that does not exist is rejected, not silently canonicalized to a
+# phantom path (realpath on a missing path must fail closed).
+mkdir -p "${TMP}/missing-workspace"
+jq --arg workspace "${TMP}/missing-workspace-target" \
+  '.workspace = $workspace | .mounts = []' \
+  "${TMP}/workspace/.opencode-sandbox.json" > "${TMP}/missing-workspace/.opencode-sandbox.json"
+if (
+  cd "${TMP}/missing-workspace"
+  HOME="${TMP}/test-home" PATH="${TMP}/bin:${PATH}" "${ROOT}/examples/opencode-container.sh"
+) 2>"${TMP}/workspace-missing.log"; then
+  printf 'launcher accepted a non-existent workspace\n' >&2
+  exit 1
+fi
+grep -F -- "workspace does not exist" "${TMP}/workspace-missing.log" >/dev/null
+
+# A mount whose source does not exist is rejected before any target validation.
+mkdir -p "${TMP}/missing-mount-source"
+jq '.workspace = "." | .mounts = [{source: "no-such-dir", target: "/mnt/missing"}]' \
+  "${TMP}/workspace/.opencode-sandbox.json" > "${TMP}/missing-mount-source/.opencode-sandbox.json"
+if (
+  cd "${TMP}/missing-mount-source"
+  HOME="${TMP}/test-home" PATH="${TMP}/bin:${PATH}" "${ROOT}/examples/opencode-container.sh"
+) 2>"${TMP}/mount-source-missing.log"; then
+  printf 'launcher accepted a non-existent mount source\n' >&2
+  exit 1
+fi
+grep -F -- "mount source does not exist" "${TMP}/mount-source-missing.log" >/dev/null
+
 # A .git file must expose its external metadata root at the same absolute path.
 # Cover Git's usual absolute pointer and an equivalent relative pointer.
 mkdir -p "${TMP}/git-source"
