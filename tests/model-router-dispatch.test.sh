@@ -60,26 +60,50 @@ jq -n \
     }
   }' >"${TMP}/providers.json"
 
+# The user-global layer routes both agents to the OPPOSITE provider on purpose.
+# Only the workspace `model_router` block below may correct it, so the final
+# assertions prove the sandbox block's profiles/agents actually won.
 jq -n '{
   schema_version: 1,
   pin_default_agent_model: true,
   profiles: {
-    orchestration: {
-      model: "fake-parent/parent-model",
-      request: {headers: {"x-router-route": "parent"}, body: {router_marker: "parent"}}
-    },
-    extraction: {
-      model: "fake-worker/worker-model",
-      request: {headers: {"x-router-route": "worker"}, body: {router_marker: "worker"}}
-    }
+    orchestration: {model: "fake-worker/worker-model"},
+    extraction: {model: "fake-parent/parent-model"}
   },
   agents: {
     orchestrator: "orchestration",
-    extractor: "extraction",
-    title: "orchestration"
+    extractor: "extraction"
   },
   default_agent: "orchestrator"
-}' >"${TMP}/router.json"
+}' >"${TMP}/router-global.json"
+
+# A full sandbox config (extra keys included) whose top-level `model_router`
+# block is the workspace override: it must shallow-merge over the global layer
+# and re-route both agents to the correct providers.
+jq -n '{
+  schema_version: 1,
+  workspace: ".",
+  model_router: {
+    schema_version: 1,
+    pin_default_agent_model: true,
+    profiles: {
+      orchestration: {
+        model: "fake-parent/parent-model",
+        request: {headers: {"x-router-route": "parent"}, body: {router_marker: "parent"}}
+      },
+      extraction: {
+        model: "fake-worker/worker-model",
+        request: {headers: {"x-router-route": "worker"}, body: {router_marker: "worker"}}
+      }
+    },
+    agents: {
+      orchestrator: "orchestration",
+      extractor: "extraction",
+      title: "orchestration"
+    },
+    default_agent: "orchestrator"
+  }
+}' >"${TMP}/sandbox.json"
 
 podman build \
   --security-opt label=disable \
@@ -91,10 +115,12 @@ podman build \
 podman run -d --name "${CONTAINER}" --pull=never \
   --userns=keep-id --security-opt label=disable --network host \
   -e "OPENCODE_SERVER_PASSWORD=${PASSWORD}" \
-  -e OPENCODE_MODEL_ROUTER_GLOBAL_CONFIG=/run/opencode/model-router.json \
+  -e OPENCODE_MODEL_ROUTER_GLOBAL_CONFIG=/run/opencode/model-router-global.json \
+  -e OPENCODE_MODEL_ROUTER_CONFIG=/run/opencode/sandbox.json \
   -v "${ROOT}:/workspace" \
   -v "${TMP}/providers.json:/opt/opencode/config/opencode/opencode.json:ro" \
-  -v "${TMP}/router.json:/run/opencode/model-router.json:ro" \
+  -v "${TMP}/router-global.json:/run/opencode/model-router-global.json:ro" \
+  -v "${TMP}/sandbox.json:/run/opencode/sandbox.json:ro" \
   -w /workspace --entrypoint opencode2 "${TAG}" \
   serve --hostname 127.0.0.1 --port "${OPENCODE_PORT}" >/dev/null
 
@@ -181,4 +207,4 @@ jq -e 'any(.[]; .provider == "worker" and .model == "worker-model")' <<<"${REQUE
 jq -e 'all(.[] | select(.provider == "parent"); .model == "parent-model")' <<<"${REQUESTS}" >/dev/null
 jq -e 'all(.[] | select(.provider == "worker"); .model == "worker-model")' <<<"${REQUESTS}" >/dev/null
 
-printf 'model-router foreground/background dispatch integration test passed\n'
+printf 'model-router foreground/background dispatch integration test passed (sandbox model_router block overrides global routing)\n'
