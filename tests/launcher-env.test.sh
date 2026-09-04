@@ -777,3 +777,89 @@ if (
   exit 1
 fi
 grep -F -- "invalid local provider catalog" "${TMP}/provider-model.log" >/dev/null
+
+# --image selects a fully qualified name to build from the context repository.
+# The build is tagged with the first 8 characters of the context HEAD plus
+# latest, and the run uses the hash-pinned reference.
+mkdir -p "${TMP}/fqn-context"
+printf 'FROM scratch\n' > "${TMP}/fqn-context/Containerfile"
+git init -q --initial-branch=main "${TMP}/fqn-context"
+git -C "${TMP}/fqn-context" \
+  -c user.name=Test -c user.email=test@example.invalid \
+  commit -qm initial --allow-empty
+FQN_SHA="$(git -C "${TMP}/fqn-context" rev-parse --verify HEAD)"
+FQN_SHA="${FQN_SHA:0:8}"
+mkdir -p "${TMP}/fqn-workspace"
+jq -n --arg containerfile "${TMP}/fqn-context/Containerfile" --arg context "${TMP}/fqn-context" '
+  {
+    image: "opencode2:test",
+    build: {containerfile: $containerfile, context: $context},
+    command: ["/bin/true"]
+  }
+' > "${TMP}/fqn-workspace/.opencode-sandbox.json"
+(
+  cd "${TMP}/fqn-workspace"
+  HOME="${TMP}/test-home" PODMAN_IMAGE_EXISTS=0 PATH="${TMP}/bin:${PATH}" \
+    "${ROOT}/examples/opencode-container.sh" --rebuild \
+    --image "example.com/fqn-test/opencode2"
+)
+grep -Fx -- "-t" "${BUILD_ARGV_LOG}" >/dev/null
+grep -Fx -- "example.com/fqn-test/opencode2:${FQN_SHA}" "${BUILD_ARGV_LOG}" >/dev/null
+grep -Fx -- "example.com/fqn-test/opencode2:latest" "${BUILD_ARGV_LOG}" >/dev/null
+[[ "$(grep -Fxc -- "-t" "${BUILD_ARGV_LOG}")" -eq 2 ]]
+grep -Fx -- "example.com/fqn-test/opencode2:${FQN_SHA}" "${ARGV_LOG}" >/dev/null
+if grep -Fq -- "opencode2:test" "${ARGV_LOG}"; then
+  printf 'launcher ran the configured image despite --image\n' >&2
+  exit 1
+fi
+if grep -Fq -- "example.com/fqn-test/opencode2:latest" "${ARGV_LOG}"; then
+  printf 'launcher ran the latest tag instead of the hash-pinned reference\n' >&2
+  exit 1
+fi
+
+# A missing image is not rebuilt when the hash-pinned reference already exists
+# and --rebuild is not passed.
+rm -f "${BUILD_ARGV_LOG}"
+(
+  cd "${TMP}/fqn-workspace"
+  HOME="${TMP}/test-home" PODMAN_IMAGE_EXISTS=1 PATH="${TMP}/bin:${PATH}" \
+    "${ROOT}/examples/opencode-container.sh" \
+    --image "example.com/fqn-test/opencode2"
+)
+if [[ -e "${BUILD_ARGV_LOG}" ]]; then
+  printf 'launcher rebuilt despite an existing hash-pinned image\n' >&2
+  exit 1
+fi
+grep -Fx -- "example.com/fqn-test/opencode2:${FQN_SHA}" "${ARGV_LOG}" >/dev/null
+
+# A tag on the --image name is rejected rather than silently mangled.
+if (
+  cd "${TMP}/fqn-workspace"
+  HOME="${TMP}/test-home" PODMAN_IMAGE_EXISTS=0 PATH="${TMP}/bin:${PATH}" \
+    "${ROOT}/examples/opencode-container.sh" \
+    --image "example.com/fqn-test/opencode2:tagged"
+) 2>"${TMP}/fqn-tagged.log"; then
+  printf 'launcher accepted a tagged --image name\n' >&2
+  exit 1
+fi
+grep -F -- "without a tag" "${TMP}/fqn-tagged.log" >/dev/null
+
+# A build context without git history cannot produce a hash-pinned tag.
+mkdir -p "${TMP}/nongit-context"
+printf 'FROM scratch\n' > "${TMP}/nongit-context/Containerfile"
+jq -n --arg containerfile "${TMP}/nongit-context/Containerfile" --arg context "${TMP}/nongit-context" '
+  {
+    image: "opencode2:test",
+    build: {containerfile: $containerfile, context: $context},
+    command: ["/bin/true"]
+  }
+' > "${TMP}/fqn-workspace/.opencode-sandbox.json"
+if (
+  cd "${TMP}/fqn-workspace"
+  HOME="${TMP}/test-home" PODMAN_IMAGE_EXISTS=0 PATH="${TMP}/bin:${PATH}" \
+    "${ROOT}/examples/opencode-container.sh" --image "example.com/fqn-test/opencode2"
+) 2>"${TMP}/fqn-nongit.log"; then
+  printf 'launcher accepted --image with a non-git build context\n' >&2
+  exit 1
+fi
+grep -F -- "git repository" "${TMP}/fqn-nongit.log" >/dev/null

@@ -43,6 +43,17 @@ This delegates to the launcher, so `.opencode-sandbox.json`, host UID/GID,
 optional local providers, and the launcher's build validation remain the single
 source of truth.
 
+To build a fully qualified image name, pass `IMAGE` (a name without a tag;
+`registry:port/name` is fine):
+
+```sh
+make build IMAGE=quay.io/example/opencode2
+```
+
+The build is tagged `quay.io/example/opencode2:<git short hash (8 chars)>`
+and `quay.io/example/opencode2:latest`, where the hash comes from the first 8
+characters of the build context's `HEAD` commit.
+
 The `Containerfile` is a multi-stage Fedora 44 build:
 
 1. **`sdd-builder`** — `golang:1.26.5-bookworm`; clones
@@ -214,6 +225,7 @@ invocation directory, not the script's installation directory.
 ```sh
 ./examples/opencode-container.sh                 # build if needed, run opencode2 --standalone
 ./examples/opencode-container.sh --rebuild       # force rebuild, then run
+./examples/opencode-container.sh --image FQN     # build as FQN:<git-sha8> + FQN:latest, run FQN:<git-sha8>
 ./examples/opencode-container.sh shell           # bash instead
 ./examples/opencode-container.sh -- <cmd...>     # arbitrary command
 ```
@@ -265,6 +277,11 @@ Behavior:
   a configured local `build` block; always passes host `USER_UID`/`USER_GID`/
   `USERNAME` build args. Therefore config-free operation expects the default
   `opencode2:latest` image to exist locally.
+- `--image <FQN>` (or `--image=<FQN>`) overrides the configured image name for
+  the build and the run. The build context must be a git repository with at
+  least one commit: the image is tagged `<FQN>:<first 8 chars of the context
+  HEAD>` and `<FQN>:latest`, and the hash-pinned reference is what gets run.
+  A name that already carries a tag is rejected.
 - When a build occurs, optionally validates and imports the user-wide local
   provider catalog at
   `${XDG_CONFIG_HOME:-$HOME/.config}/opencode2/local-providers.json`. Only that

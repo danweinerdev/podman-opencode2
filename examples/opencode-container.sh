@@ -11,8 +11,12 @@
 # Usage:
 #   ./opencode-container.sh                # build if needed, then run the default command
 #   ./opencode-container.sh --rebuild      # force-rebuild the image, then run
+#   ./opencode-container.sh --image FQN    # build as FQN:<git-sha8> + FQN:latest, run FQN:<git-sha8>
 #   ./opencode-container.sh shell          # drop into bash instead
 #   ./opencode-container.sh -- <cmd...>    # run an arbitrary command
+#
+# --image takes a fully qualified name without a tag (registry:port/name is
+# fine). The build context must be a git repository with at least one commit.
 #
 # Requirements: bash, jq, podman, git, sha256sum.
 
@@ -595,12 +599,38 @@ fi
 
 # --- Build (only when needed, only from configured local build) --------------
 REBUILD=0
+IMAGE_FQN=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --rebuild) REBUILD=1; shift ;;
+    --image)
+      [[ $# -ge 2 ]] || die "--image requires a value"
+      IMAGE_FQN="$2"
+      shift 2 ;;
+    --image=*) IMAGE_FQN="${1#--image=}"; shift ;;
     *) break ;;
   esac
 done
+
+# --image selects a fully qualified name (no tag) to build from this
+# repository. The image is tagged both with the first 8 characters of the
+# build context's HEAD commit and with latest, and the hash-pinned reference
+# is what gets run.
+if [[ -n "${IMAGE_FQN}" ]]; then
+  case "${IMAGE_FQN}" in
+    *[[:space:]]*) die "--image contains whitespace: ${IMAGE_FQN}" ;;
+  esac
+  if [[ "${IMAGE_FQN##*/}" == *:* ]]; then
+    die "--image must be a fully qualified name without a tag (got ${IMAGE_FQN}); the launcher tags <name>:<git-sha> and <name>:latest"
+  fi
+  GIT_SHA="$(git -C "${CONTEXT}" rev-parse --verify HEAD 2>/dev/null)" \
+    || die "--image requires the build context to be a git repository with at least one commit: ${CONTEXT}"
+  GIT_SHA="${GIT_SHA:0:8}"
+  IMAGE="${IMAGE_FQN}:${GIT_SHA}"
+  IMAGE_TAGS=("${IMAGE}" "${IMAGE_FQN}:latest")
+else
+  IMAGE_TAGS=("${IMAGE}")
+fi
 
 HAS_BUILD_CONFIG=0
 [[ -n "$(config_jq -r '.build // empty')" ]] && HAS_BUILD_CONFIG=1
@@ -690,11 +720,16 @@ if [[ "${REBUILD}" -eq 1 || "${IMAGE_EXISTS}" -eq 0 ]]; then
   fi
   BUILD_FLAGS+=(--build-arg "LOCAL_PROVIDERS_SHA256=${LOCAL_PROVIDERS_SHA256}")
 
+  TAG_FLAGS=()
+  for tag in "${IMAGE_TAGS[@]}"; do
+    TAG_FLAGS+=(-t "${tag}")
+  done
+
   printf 'opencode-container: building %s (containerfile %s, context %s)\n' \
-    "${IMAGE}" "${CONTAINERFILE}" "${CONTEXT}"
+    "${IMAGE_TAGS[*]}" "${CONTAINERFILE}" "${CONTEXT}"
   podman build \
     "${BUILD_FLAGS[@]}" \
-    -t "${IMAGE}" \
+    "${TAG_FLAGS[@]}" \
     -f "${CONTAINERFILE}" \
     "${CONTEXT}"
   cleanup_temp_files
