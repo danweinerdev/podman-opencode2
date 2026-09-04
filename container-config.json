@@ -47,6 +47,7 @@
         },
         "agents": {
           "orchestrator": "orchestration",
+          "engineer": "implementation",
           "reasoner": "reasoning",
           "implementer": "implementation",
           "extractor": "extraction",

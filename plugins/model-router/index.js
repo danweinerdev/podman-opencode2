@@ -42,8 +42,9 @@ export const SCHEMA_VERSION = 1
  * model-router plugin assigns each a model via the `agents` map.
  */
 export const BAKED_AGENTS = Object.freeze([
-  // native v2 orchestration / implementation / review workers
+  // native v2 primaries and orchestration / implementation / review workers
   "orchestrator",
+  "engineer",
   "reasoner",
   "extractor",
   "bulk-researcher",
@@ -73,6 +74,7 @@ export const DEFAULT_CONFIG = Object.freeze({
   },
   agents: {
     orchestrator: "orchestration",
+    engineer: "implementation",
     reasoner: "reasoning",
     implementer: "implementation",
     extractor: "extraction",

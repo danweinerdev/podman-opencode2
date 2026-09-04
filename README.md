@@ -16,7 +16,7 @@ builder stages, so the runtime image ships no dev toolchain.
 | `/opt/opencode/plugins/model-router/` | native v2 model-router plugin |
 | `/opt/opencode/sandbox/` | host launcher and sandbox-config templates |
 | `/opt/opencode/config/opencode/opencode.json` | optional build-imported local-provider catalog |
-| `/opt/opencode/config/opencode/agent/*.md` | 10 baked native v2 agent definitions |
+| `/opt/opencode/config/opencode/agent/*.md` | 11 baked native v2 agent definitions |
 | `/opt/opencode/config/opencode/command/*.md` | baked code-graph slash commands |
 | `/etc/opencode/container-config.json` | baked `OPENCODE_CONFIG` |
 | `/etc/opencode/container-config.schema.json` | schema matching the pinned preview config shape |
@@ -186,9 +186,11 @@ provider environment variables.
 
 ## Agent definitions
 
-Baked under `/opt/opencode/config/opencode/agent/` (10 total):
+Baked under `/opt/opencode/config/opencode/agent/` (11 total):
 
-- **Native v2 workers** — `orchestrator` (primary), `reasoner`, `extractor`,
+- **Native v2 workers** — `orchestrator` and `engineer` (both primary;
+  `engineer` replaces the built-in Engineer as a solo agent that investigates,
+  decides, implements, and verifies in one context), `reasoner`, `extractor`,
   `bulk-researcher`, `bounded-editor`, `implementer`, and the four review lanes
   `review-plan-drift`, `review-quality`, `review-spec-compliance`,
   `review-blind-spots`.

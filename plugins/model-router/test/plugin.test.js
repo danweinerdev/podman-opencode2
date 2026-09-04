@@ -50,10 +50,12 @@ function makeDraft(agents) {
   }
 }
 
+const PRIMARY_AGENT_IDS = new Set(["orchestrator", "engineer"])
+
 function agentInfo(id, overrides = {}) {
   return {
     id,
-    mode: id === "orchestrator" ? "primary" : "subagent",
+    mode: PRIMARY_AGENT_IDS.has(id) ? "primary" : "subagent",
     hidden: false,
     request: { headers: {}, body: {} },
     permissions: [],
@@ -152,7 +154,7 @@ test("baked workers use native v2 permissions and subagent terminology", async (
     assert.match(source, /^permissions:/m, `${agent} must use the v2 permissions field`)
     assert.doesNotMatch(source, /^permission:/m, `${agent} must not use the v1 permission field`)
     assert.doesNotMatch(source, /<frugal_result\b/, `${agent} must not require an unused result footer`)
-    if (agent !== "orchestrator") {
+    if (!PRIMARY_AGENT_IDS.has(agent)) {
       const broadRead = source.indexOf('- { action: read, resource: "*", effect: allow }')
       const envAsk = source.indexOf('- { action: read, resource: "*.env", effect: ask }')
       const envVariantAsk = source.indexOf('- { action: read, resource: "*.env.*", effect: ask }')
@@ -557,7 +559,7 @@ test("DEFAULT_CONFIG is self-consistent and covers every baked agent", () => {
   assert.ok(providers.has("deepseek"))
 
   // Every baked agent resolves to a defined profile.
-  assert.equal(BAKED_AGENTS.length, 10)
+  assert.equal(BAKED_AGENTS.length, 11)
   for (const id of BAKED_AGENTS) {
     const profileName = DEFAULT_CONFIG.agents[id]
     assert.equal(typeof profileName, "string", `${id} has a profile mapping`)
