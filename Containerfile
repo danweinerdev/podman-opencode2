@@ -173,10 +173,10 @@ RUN cd /opt/opencode/plugins/model-router \
 # Host-side sandbox templates are readable by the baked setup skill. They are
 # copied into a mounted workspace for the user to run after leaving the image.
 RUN mkdir -p /opt/opencode/sandbox
-COPY examples/opencode-container.sh /opt/opencode/sandbox/opencode-container.sh
+COPY bin/opencode-container /opt/opencode/sandbox/opencode-container
 COPY examples/opencode-sandbox.json.example /opt/opencode/sandbox/.opencode-sandbox.json.example
 COPY examples/local-providers.json.example /opt/opencode/sandbox/local-providers.json.example
-RUN chmod 0755 /opt/opencode/sandbox/opencode-container.sh \
+RUN chmod 0755 /opt/opencode/sandbox/opencode-container \
     && chmod 0644 /opt/opencode/sandbox/.opencode-sandbox.json.example \
         /opt/opencode/sandbox/local-providers.json.example
 

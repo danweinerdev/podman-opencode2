@@ -97,7 +97,7 @@ export ARGV_LOG ENV_LOG BUILD_ARGV_LOG
   PATH="${TMP}/bin:${PATH}" \
     OPENAI_API_KEY="launch-secret-sentinel" \
     EMPTY_FORWARD="" \
-    "${ROOT}/examples/opencode-container.sh"
+    "${ROOT}/bin/opencode-container"
 )
 
 grep -Fx -- "OPENAI_API_KEY" "${ARGV_LOG}" >/dev/null
@@ -150,7 +150,7 @@ EOF
 (
   cd "${TMP}/containers-workspace"
   HOME="${TMP}/test-home" XDG_RUNTIME_DIR="${TMP}/containers-runtime" \
-    PATH="${TMP}/bin:${PATH}" "${ROOT}/examples/opencode-container.sh"
+    PATH="${TMP}/bin:${PATH}" "${ROOT}/bin/opencode-container"
 )
 grep -Fx -- "${TMP}/containers-runtime/podman/podman.sock:/run/opencode-container-engine.sock" \
   "${ARGV_LOG}" >/dev/null
@@ -183,7 +183,7 @@ mv "${TMP}/containers-workspace/.opencode-sandbox.json.new" \
 if (
   cd "${TMP}/containers-workspace"
   HOME="${TMP}/test-home" XDG_RUNTIME_DIR="${TMP}/containers-runtime" \
-    PATH="${TMP}/bin:${PATH}" "${ROOT}/examples/opencode-container.sh"
+    PATH="${TMP}/bin:${PATH}" "${ROOT}/bin/opencode-container"
 ) 2>"${TMP}/containers-workdir.log"; then
   printf 'containers mode accepted a workdir outside the mirrored workspace\n' >&2
   exit 1
@@ -199,7 +199,7 @@ mv "${TMP}/containers-workspace/.opencode-sandbox.json.new" \
 if (
   cd "${TMP}/containers-workspace"
   HOME="${TMP}/test-home" XDG_RUNTIME_DIR="${TMP}/containers-runtime" \
-    PATH="${TMP}/bin:${PATH}" "${ROOT}/examples/opencode-container.sh"
+    PATH="${TMP}/bin:${PATH}" "${ROOT}/bin/opencode-container"
 ) 2>"${TMP}/containers-mount-overlap.log"; then
   printf 'containers mode accepted a mount overlapping the workspace mirror\n' >&2
   exit 1
@@ -215,7 +215,7 @@ printf '%s\n' '{"image":"opencode2:test","containers":true,"command":["/bin/true
 (
   cd "${TMP}/docker-workspace"
   HOME="${TMP}/test-home" XDG_RUNTIME_DIR="${TMP}/docker-runtime" FAKE_UID=424242 \
-    PATH="${TMP}/bin:${PATH}" "${ROOT}/examples/opencode-container.sh"
+    PATH="${TMP}/bin:${PATH}" "${ROOT}/bin/opencode-container"
 )
 grep -Fx -- "${TMP}/docker-runtime/docker.sock:/run/opencode-container-engine.sock" \
   "${ARGV_LOG}" >/dev/null
@@ -230,7 +230,7 @@ printf '%s\n' '{"containers":"true"}' > "${TMP}/containers-invalid/.opencode-san
 if (
   cd "${TMP}/containers-invalid"
   HOME="${TMP}/test-home" PATH="${TMP}/bin:${PATH}" \
-    "${ROOT}/examples/opencode-container.sh"
+    "${ROOT}/bin/opencode-container"
 ) 2>"${TMP}/containers-invalid.log"; then
   printf 'launcher accepted a non-boolean containers value\n' >&2
   exit 1
@@ -245,7 +245,7 @@ if [[ ! -S /var/run/docker.sock && ! -S /run/docker.sock ]]; then
   if (
     cd "${TMP}/containers-missing"
     HOME="${TMP}/test-home" XDG_RUNTIME_DIR="${TMP}/empty-runtime" FAKE_UID=424242 \
-      PATH="${TMP}/bin:${PATH}" "${ROOT}/examples/opencode-container.sh"
+      PATH="${TMP}/bin:${PATH}" "${ROOT}/bin/opencode-container"
   ) 2>"${TMP}/containers-missing.log"; then
     printf 'launcher accepted containers mode without an accessible socket\n' >&2
     exit 1
@@ -260,7 +260,7 @@ jq '.mounts = [{"source": ".", "target": "/src/../opt/opencode"}]' \
 mv "${TMP}/workspace/.opencode-sandbox.json.new" "${TMP}/workspace/.opencode-sandbox.json"
 if (
   cd "${TMP}/workspace"
-  PATH="${TMP}/bin:${PATH}" "${ROOT}/examples/opencode-container.sh"
+  PATH="${TMP}/bin:${PATH}" "${ROOT}/bin/opencode-container"
 ) 2>"${TMP}/rejected.log"; then
   printf 'launcher accepted a mount target that traverses into a baked path\n' >&2
   exit 1
@@ -275,7 +275,7 @@ jq --arg workspace "${TMP}/host-home" \
   "${TMP}/workspace/.opencode-sandbox.json" > "${TMP}/host-home/.opencode-sandbox.json"
 if (
   cd "${TMP}/host-home"
-  HOME="${TMP}/host-home" PATH="${TMP}/bin:${PATH}" "${ROOT}/examples/opencode-container.sh"
+  HOME="${TMP}/host-home" PATH="${TMP}/bin:${PATH}" "${ROOT}/bin/opencode-container"
 ) 2>"${TMP}/workspace-overlap.log"; then
   printf 'launcher accepted a workspace containing protected host state\n' >&2
   exit 1
@@ -290,7 +290,7 @@ jq --arg source "${TMP}/mount-home" \
 mv "${TMP}/workspace/.opencode-sandbox.json.new" "${TMP}/workspace/.opencode-sandbox.json"
 if (
   cd "${TMP}/workspace"
-  HOME="${TMP}/mount-home" PATH="${TMP}/bin:${PATH}" "${ROOT}/examples/opencode-container.sh"
+  HOME="${TMP}/mount-home" PATH="${TMP}/bin:${PATH}" "${ROOT}/bin/opencode-container"
 ) 2>"${TMP}/mount-overlap.log"; then
   printf 'launcher accepted a mount source containing protected host state\n' >&2
   exit 1
@@ -305,7 +305,7 @@ jq '.workspace = "." | .mounts = [{source: "/", target: "/mnt/host-root"}]' \
 mv "${TMP}/workspace/.opencode-sandbox.json.new" "${TMP}/workspace/.opencode-sandbox.json"
 if (
   cd "${TMP}/workspace"
-  HOME="${TMP}/root-home" PATH="${TMP}/bin:${PATH}" "${ROOT}/examples/opencode-container.sh"
+  HOME="${TMP}/root-home" PATH="${TMP}/bin:${PATH}" "${ROOT}/bin/opencode-container"
 ) 2>"${TMP}/root-overlap.log"; then
   printf 'launcher accepted the host root as a mount source\n' >&2
   exit 1
@@ -322,7 +322,7 @@ jq --arg source "${TMP}/sensitive-target" \
 mv "${TMP}/workspace/.opencode-sandbox.json.new" "${TMP}/workspace/.opencode-sandbox.json"
 if (
   cd "${TMP}/workspace"
-  HOME="${TMP}/symlink-home" PATH="${TMP}/bin:${PATH}" "${ROOT}/examples/opencode-container.sh"
+  HOME="${TMP}/symlink-home" PATH="${TMP}/bin:${PATH}" "${ROOT}/bin/opencode-container"
 ) 2>"${TMP}/symlink-overlap.log"; then
   printf 'launcher accepted the resolved target of symlinked host state\n' >&2
   exit 1
@@ -337,7 +337,7 @@ jq --arg workspace "${TMP}/missing-workspace-target" \
   "${TMP}/workspace/.opencode-sandbox.json" > "${TMP}/missing-workspace/.opencode-sandbox.json"
 if (
   cd "${TMP}/missing-workspace"
-  HOME="${TMP}/test-home" PATH="${TMP}/bin:${PATH}" "${ROOT}/examples/opencode-container.sh"
+  HOME="${TMP}/test-home" PATH="${TMP}/bin:${PATH}" "${ROOT}/bin/opencode-container"
 ) 2>"${TMP}/workspace-missing.log"; then
   printf 'launcher accepted a non-existent workspace\n' >&2
   exit 1
@@ -350,7 +350,7 @@ jq '.workspace = "." | .mounts = [{source: "no-such-dir", target: "/mnt/missing"
   "${TMP}/workspace/.opencode-sandbox.json" > "${TMP}/missing-mount-source/.opencode-sandbox.json"
 if (
   cd "${TMP}/missing-mount-source"
-  HOME="${TMP}/test-home" PATH="${TMP}/bin:${PATH}" "${ROOT}/examples/opencode-container.sh"
+  HOME="${TMP}/test-home" PATH="${TMP}/bin:${PATH}" "${ROOT}/bin/opencode-container"
 ) 2>"${TMP}/mount-source-missing.log"; then
   printf 'launcher accepted a non-existent mount source\n' >&2
   exit 1
@@ -371,7 +371,7 @@ GIT_LINKED_DIR="$(git -C "${TMP}/git-linked-worktree" rev-parse --git-dir)"
 GIT_LINKED_COMMON="$(git -C "${TMP}/git-linked-worktree" rev-parse --git-common-dir)"
 (
   cd "${TMP}/git-linked-worktree"
-  HOME="${TMP}/test-home" PATH="${TMP}/bin:${PATH}" "${ROOT}/examples/opencode-container.sh"
+  HOME="${TMP}/test-home" PATH="${TMP}/bin:${PATH}" "${ROOT}/bin/opencode-container"
 )
 grep -Fx -- "${GIT_LINKED_COMMON}:${GIT_LINKED_COMMON}" "${ARGV_LOG}" >/dev/null
 
@@ -379,7 +379,7 @@ GIT_LINKED_RELATIVE="$(realpath --relative-to="${TMP}/git-linked-worktree" "${GI
 printf 'gitdir: %s\n' "${GIT_LINKED_RELATIVE}" > "${TMP}/git-linked-worktree/.git"
 (
   cd "${TMP}/git-linked-worktree"
-  HOME="${TMP}/test-home" PATH="${TMP}/bin:${PATH}" "${ROOT}/examples/opencode-container.sh"
+  HOME="${TMP}/test-home" PATH="${TMP}/bin:${PATH}" "${ROOT}/bin/opencode-container"
 )
 grep -Fx -- "${GIT_LINKED_COMMON}:${GIT_LINKED_COMMON}" "${ARGV_LOG}" >/dev/null
 
@@ -387,7 +387,7 @@ grep -Fx -- "${GIT_LINKED_COMMON}:${GIT_LINKED_COMMON}" "${ARGV_LOG}" >/dev/null
 printf 'gitdir: ../missing-worktree-metadata\n' > "${TMP}/git-linked-worktree/.git"
 if (
   cd "${TMP}/git-linked-worktree"
-  HOME="${TMP}/test-home" PATH="${TMP}/bin:${PATH}" "${ROOT}/examples/opencode-container.sh"
+  HOME="${TMP}/test-home" PATH="${TMP}/bin:${PATH}" "${ROOT}/bin/opencode-container"
 ) 2>"${TMP}/git-stale-pointer.log"; then
   printf 'launcher accepted a stale linked-worktree gitdir pointer\n' >&2
   exit 1
@@ -406,7 +406,7 @@ jq '.workspace = "." | .mounts = []' \
   "${TMP}/workspace/.opencode-sandbox.json" > "${TMP}/git-worktree/.opencode-sandbox.json"
 if (
   cd "${TMP}/git-worktree"
-  HOME="${TMP}/git-home" PATH="${TMP}/bin:${PATH}" "${ROOT}/examples/opencode-container.sh"
+  HOME="${TMP}/git-home" PATH="${TMP}/bin:${PATH}" "${ROOT}/bin/opencode-container"
 ) 2>"${TMP}/git-common-overlap.log"; then
   printf 'launcher accepted a protected linked-worktree common directory\n' >&2
   exit 1
@@ -423,7 +423,7 @@ mv "${TMP}/workspace/.opencode-sandbox.json.new" "${TMP}/workspace/.opencode-san
 if (
   cd "${TMP}/workspace"
   HOME="${TMP}/xdg-home" XDG_DATA_HOME="${TMP}/custom-xdg-data" \
-    PATH="${TMP}/bin:${PATH}" "${ROOT}/examples/opencode-container.sh"
+    PATH="${TMP}/bin:${PATH}" "${ROOT}/bin/opencode-container"
 ) 2>"${TMP}/xdg-overlap.log"; then
   printf 'launcher accepted an ancestor of custom XDG OpenCode state\n' >&2
   exit 1
@@ -439,14 +439,14 @@ jq --arg workspace "${TMP}/relative-workspace" \
 mv "${TMP}/workspace/.opencode-sandbox.json.new" "${TMP}/workspace/.opencode-sandbox.json"
 (
   cd "${TMP}/workspace"
-  HOME="${TMP}/relative-home" PATH="${TMP}/bin:${PATH}" "${ROOT}/examples/opencode-container.sh"
+  HOME="${TMP}/relative-home" PATH="${TMP}/bin:${PATH}" "${ROOT}/bin/opencode-container"
 )
 grep -Fx -- "${TMP}/relative-workspace/data:/mnt/data" "${ARGV_LOG}" >/dev/null
 
 # With no sandbox config, warn and use only the launcher's baked defaults. The
 # absent control file must not be mounted or advertised to the router.
 mkdir -p "${TMP}/default-home" "${TMP}/default-workspace"
-ln -s "${ROOT}/examples/opencode-container.sh" "${TMP}/bin/opencode-container"
+ln -s "${ROOT}/bin/opencode-container" "${TMP}/bin/opencode-container"
 (
   cd "${TMP}/default-workspace"
   HOME="${TMP}/default-home" PATH="${TMP}/bin:${PATH}" opencode-container
@@ -639,7 +639,7 @@ rm -r "${TMP}/global-config-real/opencode2/model-router.json"
 printf '{}\n' > "${TMP}/default-workspace/.opencode-sandbox.json"
 (
   cd "${TMP}/default-workspace"
-  HOME="${TMP}/default-home" PATH="${TMP}/bin:${PATH}" "${ROOT}/examples/opencode-container.sh"
+  HOME="${TMP}/default-home" PATH="${TMP}/bin:${PATH}" "${ROOT}/bin/opencode-container"
 ) 2>"${TMP}/partial-config.log"
 if grep -Fq -- "no .opencode-sandbox.json found" "${TMP}/partial-config.log"; then
   printf 'launcher warned despite a present sandbox config\n' >&2
@@ -800,7 +800,7 @@ jq -n --arg containerfile "${TMP}/fqn-context/Containerfile" --arg context "${TM
 (
   cd "${TMP}/fqn-workspace"
   HOME="${TMP}/test-home" PODMAN_IMAGE_EXISTS=0 PATH="${TMP}/bin:${PATH}" \
-    "${ROOT}/examples/opencode-container.sh" --rebuild \
+    "${ROOT}/bin/opencode-container" --rebuild \
     --image "example.com/fqn-test/opencode2"
 )
 grep -Fx -- "-t" "${BUILD_ARGV_LOG}" >/dev/null
@@ -823,7 +823,7 @@ rm -f "${BUILD_ARGV_LOG}"
 (
   cd "${TMP}/fqn-workspace"
   HOME="${TMP}/test-home" PODMAN_IMAGE_EXISTS=1 PATH="${TMP}/bin:${PATH}" \
-    "${ROOT}/examples/opencode-container.sh" \
+    "${ROOT}/bin/opencode-container" \
     --image "example.com/fqn-test/opencode2"
 )
 if [[ -e "${BUILD_ARGV_LOG}" ]]; then
@@ -836,7 +836,7 @@ grep -Fx -- "example.com/fqn-test/opencode2:${FQN_SHA}" "${ARGV_LOG}" >/dev/null
 if (
   cd "${TMP}/fqn-workspace"
   HOME="${TMP}/test-home" PODMAN_IMAGE_EXISTS=0 PATH="${TMP}/bin:${PATH}" \
-    "${ROOT}/examples/opencode-container.sh" \
+    "${ROOT}/bin/opencode-container" \
     --image "example.com/fqn-test/opencode2:tagged"
 ) 2>"${TMP}/fqn-tagged.log"; then
   printf 'launcher accepted a tagged --image name\n' >&2
@@ -857,7 +857,7 @@ jq -n --arg containerfile "${TMP}/nongit-context/Containerfile" --arg context "$
 if (
   cd "${TMP}/fqn-workspace"
   HOME="${TMP}/test-home" PODMAN_IMAGE_EXISTS=0 PATH="${TMP}/bin:${PATH}" \
-    "${ROOT}/examples/opencode-container.sh" --image "example.com/fqn-test/opencode2"
+    "${ROOT}/bin/opencode-container" --image "example.com/fqn-test/opencode2"
 ) 2>"${TMP}/fqn-nongit.log"; then
   printf 'launcher accepted --image with a non-git build context\n' >&2
   exit 1

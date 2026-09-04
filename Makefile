@@ -5,4 +5,4 @@
 IMAGE ?=
 
 build:
-	./examples/opencode-container.sh --rebuild $(if $(strip $(IMAGE)),--image "$(strip $(IMAGE))") -- /bin/true
+	./bin/opencode-container --rebuild $(if $(strip $(IMAGE)),--image "$(strip $(IMAGE))") -- /bin/true

@@ -1,13 +1,13 @@
 ---
 name: opencode2-sandbox
-description: Set up or configure this repository's Podman OpenCode2 sandbox using .opencode-sandbox.json and opencode-container.sh. Use ONLY for this image's launcher, mounts, environment forwarding, model-router overrides, or container build settings.
+description: Set up or configure this repository's Podman OpenCode2 sandbox using .opencode-sandbox.json and opencode-container. Use ONLY for this image's launcher, mounts, environment forwarding, model-router overrides, or container build settings.
 ---
 
 # OpenCode2 sandbox setup
 
 Use the baked templates as the source of truth:
 
-- `/opt/opencode/sandbox/opencode-container.sh`
+- `/opt/opencode/sandbox/opencode-container`
 - `/opt/opencode/sandbox/.opencode-sandbox.json.example`
 
 The launcher runs on the host, not inside this container. Create or update the
@@ -25,12 +25,12 @@ the launcher from the host workspace root.
    `.opencode-sandbox.json` from the baked template only when the user needs
    build settings, mounts, environment forwarding, or routing overrides. If the
    launcher itself is absent, copy it into the workspace with file tools; a
-   convenient name is `opencode-container.sh`.
+   convenient name is `opencode-container`.
 3. Customize only fields the user needs. Keep `schema_version: 1`, use the
    `opencode2 --standalone` command, and retain the exact pinned
    `OPENCODE2_VERSION` unless the image source has been deliberately upgraded.
-4. Validate JSON with `jq empty .opencode-sandbox.json` and shell syntax with
-   `bash -n opencode-container.sh`. Build or run the image only when requested.
+4. Validate JSON with `jq empty .opencode-sandbox.json` and Python syntax with
+   `python3 -m py_compile opencode-container`. Build or run the image only when requested.
 5. For machine-wide local models, copy
    `/opt/opencode/sandbox/local-providers.json.example` to
    `${XDG_CONFIG_HOME:-$HOME/.config}/opencode2/local-providers.json` on the

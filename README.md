@@ -208,13 +208,13 @@ catalog with different permissions.
 The baked `opencode2-sandbox` skill configures this repository's host-side
 Podman launcher and `.opencode-sandbox.json`. Its source templates live under
 `/opt/opencode/sandbox/`; the baked config permits read-only access to that
-directory. The skill edits the mounted workspace, validates JSON and shell
+directory. The skill edits the mounted workspace, validates JSON and Python
 syntax, and tells the user to run the launcher from the host after leaving the
 container.
 
-## Launcher (`examples/opencode-container.sh`)
+## Launcher (`bin/opencode-container`)
 
-`PATH`-safe; requires Bash, `jq`, `podman`, `git`, and `sha256sum`. It detects
+`PATH`-safe; requires Python 3 (3.8+), `podman`, `git`, and `id`. It detects
 `$PWD/.opencode-sandbox.json`: when present it applies and mounts that file;
 when absent it warns and uses `opencode2:latest`, the current directory as the
 workspace, a stable CWD-derived workdir, and `opencode2 --standalone`. On every
@@ -225,11 +225,11 @@ anywhere on `PATH`; project discovery and session persistence are based on the
 invocation directory, not the script's installation directory.
 
 ```sh
-./examples/opencode-container.sh                 # build if needed, run opencode2 --standalone
-./examples/opencode-container.sh --rebuild       # force rebuild, then run
-./examples/opencode-container.sh --image FQN     # build as FQN:<git-sha8> + FQN:latest, run FQN:<git-sha8>
-./examples/opencode-container.sh shell           # bash instead
-./examples/opencode-container.sh -- <cmd...>     # arbitrary command
+./bin/opencode-container                 # build if needed, run opencode2 --standalone
+./bin/opencode-container --rebuild       # force rebuild, then run
+./bin/opencode-container --image FQN     # build as FQN:<git-sha8> + FQN:latest, run FQN:<git-sha8>
+./bin/opencode-container shell           # bash instead
+./bin/opencode-container -- <cmd...>     # arbitrary command
 ```
 
 Behavior:
@@ -504,9 +504,8 @@ cd plugins/model-router
 npm install        # generates the lockfile if needed
 npm test           # node:test, including a mock AgentDraft
 
-# shell + config syntax
-bash -n examples/opencode-container.sh
-shellcheck examples/opencode-container.sh
+# launcher + config syntax
+python3 -m py_compile bin/opencode-container
 tests/launcher-env.test.sh
 tests/local-provider-build.test.sh  # Podman integration; builds present/changed/absent catalogs
 jq empty container-config.json
