@@ -1,0 +1,1068 @@
+#!/usr/bin/env python3
+# opencode-container — run the OpenCode2 container for this workspace.
+#
+# Pure Python 3 standard library; no third-party dependencies.
+#
+# Uses $PWD/.opencode-sandbox.json (schema_version 1) when present, otherwise
+# warns and runs the baked image defaults against the current workspace. A
+# sandbox config is trusted repository input: it controls local image builds and
+# container run settings, so review it like executable project tooling. Secret
+# values are never echoed.
+#
+# Usage:
+#   opencode-container                # build if needed, then run the default command
+#   opencode-container --rebuild      # force-rebuild the image, then run
+#   opencode-container --image FQN    # build as FQN:<git-sha8> + FQN:latest, run FQN:<git-sha8>
+#   opencode-container shell          # drop into bash instead
+#   opencode-container -- <cmd...>    # run an arbitrary command
+#
+# --image takes a fully qualified name without a tag (registry:port/name is
+# fine). The build context must be a git repository with at least one commit.
+#
+# Requirements: python3 (3.8+), podman, git, id.
+
+import argparse
+import atexit
+import hashlib
+import json
+import os
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+import textwrap
+
+PROG = "opencode-container"
+
+DEFAULT_IMAGE = "opencode2:latest"
+DEFAULT_COMMAND = ["opencode2", "--standalone"]
+
+# Baked config/plugin paths and launcher control mounts; additional mounts may
+# not shadow these, including through lexical `..` path segments.
+BAKED_ROOTS = (
+    "/etc/opencode",
+    "/opt/opencode",
+    "/opt/mcp",
+    "/run/opencode",
+    "/src",
+    "/workspace",
+)
+# containers mode does not create the generated /workspace/<hash> mount, so a
+# host workspace that genuinely lives below /workspace can be mirrored safely.
+CONTAINERS_WORKSPACE_RESERVED_ROOTS = (
+    "/etc/opencode",
+    "/opt/opencode",
+    "/opt/mcp",
+    "/run/opencode",
+    "/run/opencode-container-engine.sock",
+    "/src",
+)
+
+GLOBAL_GIT_CONFIG_TARGET = "/run/opencode/gitconfig"
+ROUTER_GLOBAL_TARGET = "/run/opencode/model-router-global.json"
+SANDBOX_TARGET = "/run/opencode/sandbox.json"
+CONTAINER_SOCKET_TARGET = "/run/opencode-container-engine.sock"
+PROVIDERS_BUILD_TARGET = "/run/opencode2-build-config/local-providers.json"
+OPENCODE_DATA_MOUNT = "/var/lib/opencode-data"
+
+# Provider API keys auto-forwarded when set in the host environment. This is
+# the common multi-provider list plus AZURE_OPENAI_API_KEY. Unset variables are
+# skipped; nothing is synthesized.
+PROVIDER_ENV_VARS = (
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "GROQ_API_KEY",
+    "GOOGLE_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_GENERATIVE_AI_API_KEY",
+    "MISTRAL_API_KEY",
+    "XAI_API_KEY",
+    "OPENROUTER_API_KEY",
+    "PERPLEXITY_API_KEY",
+    "COHERE_API_KEY",
+    "TOGETHER_API_KEY",
+    "AZURE_OPENAI_API_KEY",
+)
+
+# Podman secret names mapped to the provider environment variables OpenCode2
+# expects. Projects explicitly select names; openapi-api-key is retained as a
+# compatibility alias for the canonical openai-api-key spelling.
+PROVIDER_SECRET_SPECS = (
+    ("OPENAI_API_KEY", "openai-api-key", "openapi-api-key"),
+    ("ANTHROPIC_API_KEY", "anthropic-api-key", None),
+    ("DEEPSEEK_API_KEY", "deepseek-api-key", None),
+    ("GROQ_API_KEY", "groq-api-key", None),
+    ("GOOGLE_API_KEY", "google-api-key", None),
+    ("GEMINI_API_KEY", "gemini-api-key", None),
+    ("GOOGLE_GENERATIVE_AI_API_KEY", "google-generative-ai-api-key", None),
+    ("MISTRAL_API_KEY", "mistral-api-key", None),
+    ("XAI_API_KEY", "xai-api-key", None),
+    ("OPENROUTER_API_KEY", "openrouter-api-key", None),
+    ("PERPLEXITY_API_KEY", "perplexity-api-key", None),
+    ("COHERE_API_KEY", "cohere-api-key", None),
+    ("TOGETHER_API_KEY", "together-api-key", None),
+    ("AZURE_OPENAI_API_KEY", "azure-openai-api-key", None),
+)
+
+ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+VOLUME_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
+CREDENTIAL_KEY_RE = re.compile(
+    r"^(api[-_]?key|authorization|headers|token|access[-_]?token|secret"
+    r"|client[-_]?secret|password|credential|credentials)$",
+    re.IGNORECASE,
+)
+ALLOWED_RUNTIME_ARG_PREFIXES = ("--add-host=", "--pids-limit=", "--ulimit=")
+
+TEMP_FILES = []
+PODMAN_PATH = None
+
+
+# --- Guardrails --------------------------------------------------------------
+def die(message):
+    print(f"{PROG}: {message}", file=sys.stderr)
+    sys.exit(1)
+
+
+def warn(message):
+    print(f"{PROG}: warning: {message}", file=sys.stderr)
+
+
+def cleanup_temp_files():
+    for path in TEMP_FILES:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    TEMP_FILES.clear()
+
+
+atexit.register(cleanup_temp_files)
+
+
+def ensure_requirements():
+    global PODMAN_PATH
+    for tool in ("podman", "git", "id"):
+        if shutil.which(tool) is None:
+            die(f"{tool} is required (install it and retry)")
+    PODMAN_PATH = shutil.which("podman")
+
+
+# --- Small helpers ------------------------------------------------------------
+def jq_or(value, default):
+    """jq's `//` operator: fall back when the value is null or false."""
+    if value is None or value is False:
+        return default
+    return value
+
+
+def jq_string(value):
+    """How `jq -r` renders a scalar (for legacy string comparisons)."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    if isinstance(value, str):
+        return value
+    return json.dumps(value)
+
+
+def parse_single_json_object(raw, label, path):
+    """Parse a file that must contain exactly one JSON object document."""
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        die(f"invalid {label}: {path}")
+    body = text.lstrip()
+    try:
+        value, end = json.JSONDecoder().raw_decode(body)
+    except json.JSONDecodeError:
+        die(f"invalid {label}: {path}")
+    if body[end:].strip():
+        die(f"invalid {label}: {path}")
+    if not isinstance(value, dict):
+        die(f"invalid {label}: {path}")
+    return value
+
+
+def paths_overlap(path, *roots):
+    """True if either side equals or contains the other."""
+    for root in roots:
+        # Root necessarily overlaps every absolute protected path.
+        if path == "/" or root == "/":
+            return True
+        if path == root or path.startswith(root + "/") or root.startswith(path + "/"):
+            return True
+    return False
+
+
+def id_output(flag):
+    # Invoked via PATH (like the shell launcher) so the host's own tooling
+    # identifies the user, not this interpreter.
+    try:
+        proc = subprocess.run(
+            ["id", flag], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
+        )
+    except OSError:
+        die(f"id is required (used to identify the host user)")
+    if proc.returncode != 0:
+        die(f"unable to run id {flag}")
+    return proc.stdout.strip()
+
+
+def git_output(cwd, *args):
+    """Run `git -C <cwd> <args>`; return stdout, or None on failure."""
+    proc = subprocess.run(
+        ["git", "-C", cwd, *args], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
+    )
+    if proc.returncode != 0:
+        return None
+    return proc.stdout
+
+
+def podman_quiet(*args):
+    """Run `podman <args>` with output suppressed; return True on success."""
+    proc = subprocess.run(
+        [PODMAN_PATH, *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+    return proc.returncode == 0
+
+
+# --- Host discovery -----------------------------------------------------------
+def find_global_router(config_home):
+    path = config_home + "/opencode2/model-router.json"
+    if not os.path.lexists(path):
+        return None
+    if not os.path.isfile(path):
+        die(f"global model-router config is not a regular file: {path}")
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read()
+    except OSError:
+        die(f"unable to read global model-router config: {path}")
+    parse_single_json_object(raw, "global model-router config", path)
+    return os.path.realpath(path)
+
+
+def find_global_git_config(home):
+    # Git's user-global config follows host HOME, independently of the workspace
+    # and the XDG paths used by OpenCode. Mount only the canonical file and point
+    # Git at a stable launcher-owned target so this also works with prebuilt
+    # images whose baked username differs from the host username.
+    path = home + "/.gitconfig"
+    if not os.path.lexists(path):
+        return None
+    if not os.path.isfile(path) or not os.access(path, os.R_OK):
+        die(f"user-global Git config is not a readable regular file: {path}")
+    return os.path.realpath(path)
+
+
+def host_state_roots(config_home, data_home, state_home, cache_home, home):
+    # Host agent state the container must never reach (by mount). The launcher
+    # deliberately does not forward OpenCode, .agents, .claude, or .mcp state.
+    # Canonicalize so a symlinked host-state directory cannot be exposed by
+    # mounting its resolved target.
+    candidates = (
+        config_home + "/opencode",
+        data_home + "/opencode",
+        state_home + "/opencode",
+        cache_home + "/opencode",
+        home + "/.agents",
+        home + "/.claude",
+        home + "/.mcp",
+    )
+    return [os.path.realpath(candidate) for candidate in candidates]
+
+
+def discover_container_socket(uid):
+    candidates = []
+    xdg_runtime = os.environ.get("XDG_RUNTIME_DIR", "")
+    if xdg_runtime.startswith("/"):
+        candidates.append(xdg_runtime + "/podman/podman.sock")
+    candidates.append("/run/user/" + uid + "/podman/podman.sock")
+    if xdg_runtime.startswith("/"):
+        candidates.append(xdg_runtime + "/docker.sock")
+    candidates.append("/run/user/" + uid + "/docker.sock")
+    candidates.append("/var/run/docker.sock")
+    candidates.append("/run/docker.sock")
+
+    seen = set()
+    for candidate in candidates:
+        try:
+            st = os.stat(candidate)
+        except OSError:
+            continue
+        if not stat.S_ISSOCK(st.st_mode):
+            continue
+        if not os.access(candidate, os.R_OK | os.W_OK):
+            continue
+        canonical = os.path.realpath(candidate)
+        if canonical in seen:
+            continue
+        seen.add(canonical)
+        return canonical
+    return None
+
+
+# --- Local provider catalog validation ----------------------------------------
+def iter_object_keys(node):
+    if isinstance(node, dict):
+        for key, value in node.items():
+            yield key
+            yield from iter_object_keys(value)
+    elif isinstance(node, list):
+        for item in node:
+            yield from iter_object_keys(item)
+
+
+def local_providers_valid(catalog):
+    """Validate the constrained provider-only catalog shape (build-time only)."""
+    if set(catalog) - {"$schema", "provider"}:
+        return False
+    provider = catalog.get("provider")
+    if not isinstance(provider, dict) or not provider:
+        return False
+    for name, spec in provider.items():
+        if not name or not isinstance(spec, dict):
+            return False
+        if spec.get("npm") != "@ai-sdk/openai-compatible":
+            return False
+        if "name" in spec and not (isinstance(spec["name"], str) and spec["name"]):
+            return False
+        options = spec.get("options")
+        if not isinstance(options, dict):
+            return False
+        base_url = options.get("baseURL")
+        if not isinstance(base_url, str) or not base_url:
+            return False
+        models = spec.get("models")
+        if not isinstance(models, dict) or not models:
+            return False
+        for model_name, model in models.items():
+            if not model_name or not isinstance(model, dict):
+                return False
+            if "name" in model and not (isinstance(model["name"], str) and model["name"]):
+                return False
+            if "limit" in model:
+                limit = model["limit"]
+                if not isinstance(limit, dict):
+                    return False
+                for key in ("context", "output"):
+                    if key in limit:
+                        value = limit[key]
+                        if (
+                            isinstance(value, bool)
+                            or not isinstance(value, (int, float))
+                            or value <= 0
+                        ):
+                            return False
+    # Obvious credential field names are rejected anywhere in the document.
+    return not any(CREDENTIAL_KEY_RE.match(key) for key in iter_object_keys(catalog))
+
+
+# --- CLI -----------------------------------------------------------------------
+LAUNCHER_OPTIONS = {"--rebuild", "--help", "-h"}
+
+
+def split_launcher_args(argv):
+    """Locate the container command, mirroring the legacy launcher boundary.
+
+    Leading --rebuild/--image/--help options belong to the launcher; the first
+    other argument starts the container command. A standalone -- before the
+    command marks it as an explicit override (so `-- shell` runs the shell
+    program rather than the `shell` -> bash -l shortcut).
+    """
+    index = 0
+    explicit = False
+    while index < len(argv):
+        arg = argv[index]
+        if arg == "--image":
+            # Consume the value as well; a dangling --image is left for argparse.
+            index += 2 if index + 1 < len(argv) else 1
+            continue
+        if arg in LAUNCHER_OPTIONS or arg.startswith("--image="):
+            index += 1
+            continue
+        if arg == "--":
+            # The separator marks an explicit command but belongs to neither
+            # the launcher options nor the command itself.
+            explicit = True
+            index += 1
+        break
+    options = argv[: index - 1] if explicit else argv[:index]
+    return options, explicit, argv[index:]
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog=PROG,
+        description="Run the OpenCode2 sandbox container for this workspace.",
+        epilog=textwrap.dedent(
+            """\
+            command:
+              With no command, the configured command (or the default
+              "opencode2 --standalone") is run. "shell" drops into "bash -l".
+              Any other arguments are the command to run; use "--" to pass a
+              command that begins with a dash:
+
+                opencode-container                build if needed, run the default command
+                opencode-container --rebuild      force-rebuild the image, then run
+                opencode-container --image FQN    build FQN:<git-sha8> + FQN:latest, run FQN:<git-sha8>
+                opencode-container shell          drop into bash instead
+                opencode-container -- <cmd...>    run an arbitrary command
+
+            The launcher runs from any directory on PATH: project behavior is
+            derived from the invocation directory, which supplies the workspace,
+            the CWD-derived workdir and data volume, and
+            $PWD/.opencode-sandbox.json (schema_version 1) when present. Without
+            that config it warns and uses the baked defaults: image
+            opencode2:latest, the current directory as the workspace, and
+            "opencode2 --standalone".
+            """
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="force-rebuild the image before running",
+    )
+    parser.add_argument(
+        "--image",
+        metavar="FQN",
+        help=(
+            "fully qualified image name (no tag) to build from the configured "
+            "build block; tagged FQN:<git-sha8> and FQN:latest, and the "
+            "hash-pinned reference is run"
+        ),
+    )
+    return parser
+
+
+# --- Main ------------------------------------------------------------------------
+def main():
+    argv = sys.argv[1:]
+    options, explicit_command, command = split_launcher_args(argv)
+    args = build_parser().parse_args(options)
+
+    ensure_requirements()
+
+    invocation_root = os.path.realpath(os.getcwd())
+
+    home = os.environ.get("HOME", "")
+
+    def xdg_path(name, default):
+        return os.environ.get(name) or default
+
+    config_home = xdg_path("XDG_CONFIG_HOME", home + "/.config")
+    data_home = xdg_path("XDG_DATA_HOME", home + "/.local/share")
+    state_home = xdg_path("XDG_STATE_HOME", home + "/.local/state")
+    cache_home = xdg_path("XDG_CACHE_HOME", home + "/.cache")
+
+    global_router = find_global_router(config_home)
+    global_git_config = find_global_git_config(home)
+    host_state = host_state_roots(config_home, data_home, state_home, cache_home, home)
+
+    # --- Config loading + validation ------------------------------------------
+    config_path = invocation_root + "/.opencode-sandbox.json"
+    config_present = os.path.lexists(config_path)
+    if config_present and not os.path.isfile(config_path):
+        die(f"sandbox config is not a regular file: {config_path}")
+    if config_present:
+        try:
+            with open(config_path, "rb") as handle:
+                raw = handle.read()
+        except OSError:
+            die(f"unable to read sandbox config: {config_path}")
+        try:
+            config = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            die(f"invalid sandbox config {config_path}: {exc}")
+        if not isinstance(config, dict):
+            die(f"sandbox config must be a JSON object: {config_path}")
+    else:
+        config = {}
+        if global_router is not None:
+            warn(
+                f"no .opencode-sandbox.json found; using image {DEFAULT_IMAGE}, "
+                f"workspace {invocation_root}, and user-global routing config"
+            )
+        else:
+            warn(
+                f"no .opencode-sandbox.json found; using image {DEFAULT_IMAGE}, "
+                f"workspace {invocation_root}, and baked routing defaults"
+            )
+
+    schema_version = jq_or(config.get("schema_version"), 1)
+    if jq_string(schema_version) != "1":
+        die(f"unsupported schema_version: {jq_string(schema_version)}")
+
+    containers_enabled = False
+    if "containers" in config and config["containers"] is not None:
+        if not isinstance(config["containers"], bool):
+            die("containers must be a boolean")
+        containers_enabled = config["containers"]
+
+    image = jq_or(config.get("image"), DEFAULT_IMAGE)
+    if not isinstance(image, str):
+        die("image must be a string")
+
+    # Optional build block.
+    build_config = config.get("build")
+    has_build_config = build_config is not None and build_config is not False
+    if has_build_config and not isinstance(build_config, dict):
+        die("build must be an object")
+    build_config = build_config if has_build_config else {}
+    containerfile = jq_or(build_config.get("containerfile"), "Containerfile")
+    if not isinstance(containerfile, str):
+        die("build.containerfile must be a string")
+    context = jq_or(build_config.get("context"), "")
+    if not isinstance(context, str):
+        die("build.context must be a string")
+    if context == "":
+        context = os.path.dirname(containerfile) or "."
+    # Resolve build paths against the workspace (CWD).
+    if not containerfile.startswith("/"):
+        containerfile = invocation_root + "/" + containerfile
+    if not context.startswith("/"):
+        context = invocation_root + "/" + context
+
+    # Workspace is mounted at /src for compatibility and normally at a stable,
+    # CWD-derived path for OpenCode2's project/session identity. containers mode
+    # uses the canonical host path instead so nested bind mounts remain meaningful.
+    workspace = jq_or(config.get("workspace"), "")
+    if not isinstance(workspace, str):
+        die("workspace must be a string")
+    if workspace == "":
+        workspace = invocation_root
+    if not workspace.startswith("/"):
+        workspace = invocation_root + "/" + workspace
+    # realpath -e semantics: a missing workspace fails closed.
+    if not os.path.exists(workspace):
+        die(f"workspace does not exist: {workspace}")
+    workspace = os.path.realpath(workspace)
+    if paths_overlap(workspace, *host_state):
+        die(f"workspace {workspace} overlaps host OpenCode/.agents/.claude/.mcp state")
+    if global_router is not None and paths_overlap(workspace, global_router):
+        die(f"workspace {workspace} overlaps the user-global model-router config")
+    if global_git_config is not None and paths_overlap(workspace, global_git_config):
+        die(f"workspace {workspace} overlaps the user-global Git config")
+
+    # The CWD-derived project identity stays stable even when the launcher
+    # itself lives elsewhere on PATH.
+    project_key = hashlib.sha256(invocation_root.encode("utf-8")).hexdigest()[:16]
+    if containers_enabled:
+        # Bind paths sent through a mounted host container-engine socket are
+        # resolved by the host daemon. Mirror the workspace's canonical host
+        # path so $PWD-based nested mounts name a path that exists on that host.
+        if paths_overlap(workspace, *CONTAINERS_WORKSPACE_RESERVED_ROOTS):
+            die(f"containers workspace target {workspace} shadows a baked config/plugin path")
+        container_workspace = workspace
+    else:
+        container_workspace = "/workspace/" + project_key
+
+    workdir = jq_or(config.get("workdir"), "")
+    if not isinstance(workdir, str):
+        die("workdir must be a string")
+    if workdir == "":
+        workdir = container_workspace
+    elif workdir == "/src":
+        workdir = container_workspace
+    elif workdir.startswith("/src/"):
+        workdir = container_workspace + "/" + workdir[len("/src/"):]
+    elif workdir.startswith("/"):
+        pass  # other absolute workdirs are used as-is
+    else:
+        workdir = container_workspace + "/" + workdir
+    if containers_enabled:
+        workdir = os.path.realpath(workdir)
+        if workdir != container_workspace and not workdir.startswith(container_workspace + "/"):
+            die(f"containers workdir {workdir} must stay within workspace {container_workspace}")
+
+    # --- podman run flag assembly ----------------------------------------------
+    run_flags = [
+        "--pull=never",
+        "--rm",
+        "--init",
+        "--userns=keep-id",
+        "--security-opt",
+        "label=disable",
+    ]
+
+    if containers_enabled:
+        uid = id_output("-u")
+        gid = id_output("-g")
+        socket_source = discover_container_socket(uid)
+        if socket_source is None:
+            die("containers is enabled, but no accessible Podman user or Docker socket was found")
+        run_flags += ["-v", f"{socket_source}:{CONTAINER_SOCKET_TARGET}"]
+
+        # Either engine can grant socket access through a supplementary host
+        # group. Preserve memberships only when owner, primary-group, and world
+        # permissions do not already explain this host user's read/write access.
+        try:
+            socket_stat = os.stat(socket_source)
+        except OSError:
+            die(f"unable to inspect container-engine socket: {socket_source}")
+        if (
+            str(socket_stat.st_uid) != uid
+            and str(socket_stat.st_gid) != gid
+            and (stat.S_IMODE(socket_stat.st_mode) & 6) != 6
+            and str(socket_stat.st_gid) in id_output("-G").split()
+        ):
+            run_flags += ["--group-add", "keep-groups"]
+
+    # The pinned preview stores credentials and sessions under XDG data and UI
+    # preferences under XDG state. Keep both isolated in one reusable named
+    # volume.
+    persistence = config.get("persistence")
+    if persistence is not None and persistence is not False:
+        if not isinstance(persistence, dict):
+            die("persistence must be an object")
+    else:
+        persistence = {}
+    data_volume = jq_or(persistence.get("data_volume"), f"opencode2-data-{project_key}")
+    if not isinstance(data_volume, str):
+        die("persistence.data_volume must be a string")
+    if data_volume:
+        if not VOLUME_NAME_RE.fullmatch(data_volume):
+            die(f"invalid persistence.data_volume: {data_volume}")
+        if containers_enabled and paths_overlap(container_workspace, OPENCODE_DATA_MOUNT):
+            die(f"containers workspace {container_workspace} overlaps the OpenCode data mount")
+        run_flags += [
+            "-v",
+            f"{data_volume}:{OPENCODE_DATA_MOUNT}:U",
+            "-e",
+            f"XDG_DATA_HOME={OPENCODE_DATA_MOUNT}",
+            "-e",
+            f"XDG_STATE_HOME={OPENCODE_DATA_MOUNT}/state",
+        ]
+
+    # TTY only when interactive (stdin and stdout are both a terminal).
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        run_flags.append("-it")
+
+    # Keep /src as a compatibility alias while running OpenCode2 from the
+    # selected generated or host-identical project path.
+    run_flags += [
+        "-v",
+        f"{workspace}:/src",
+        "-v",
+        f"{workspace}:{container_workspace}",
+        "-w",
+        workdir,
+    ]
+    if global_git_config is not None:
+        run_flags += [
+            "-v",
+            f"{global_git_config}:{GLOBAL_GIT_CONFIG_TARGET}:ro",
+            "-e",
+            f"GIT_CONFIG_GLOBAL={GLOBAL_GIT_CONFIG_TARGET}",
+        ]
+    if global_router is not None:
+        run_flags += [
+            "-v",
+            f"{global_router}:{ROUTER_GLOBAL_TARGET}:ro",
+            "-e",
+            f"OPENCODE_MODEL_ROUTER_GLOBAL_CONFIG={ROUTER_GLOBAL_TARGET}",
+        ]
+    if config_present:
+        run_flags += [
+            "-v",
+            f"{config_path}:{SANDBOX_TARGET}:ro",
+            "-e",
+            f"OPENCODE_MODEL_ROUTER_CONFIG={SANDBOX_TARGET}",
+        ]
+
+    # Network mode.
+    network = jq_or(config.get("network"), "")
+    if not isinstance(network, str):
+        die("network must be a string")
+    if network:
+        run_flags += ["--network", network]
+
+    # Capabilities.
+    capabilities = config.get("capabilities")
+    if capabilities is None or capabilities is False:
+        capabilities = []
+    if not isinstance(capabilities, list):
+        die("capabilities must be an array")
+    for capability in capabilities:
+        if not isinstance(capability, str):
+            die("capabilities entries must be strings")
+        if capability:
+            run_flags += ["--cap-add", capability]
+
+    # Restricted runtime arguments: only a small allow-list of passthrough flags.
+    runtime_args = config.get("runtime_args")
+    if runtime_args is None or runtime_args is False:
+        runtime_args = []
+    if not isinstance(runtime_args, list):
+        die("runtime_args must be an array")
+    for arg in runtime_args:
+        if not isinstance(arg, str):
+            die("runtime_args entries must be strings")
+        if not arg:
+            continue
+        if not arg.startswith(ALLOWED_RUNTIME_ARG_PREFIXES):
+            die(f"runtime_args entry is not allowed: {arg}")
+        run_flags.append(arg)
+
+    # Additional mounts. Relative host sources resolve against the workspace; an
+    # omitted target mirrors the resolved absolute source path.
+    mounts = config.get("mounts")
+    if mounts is None or mounts is False:
+        mounts = []
+    if not isinstance(mounts, list):
+        die("mounts must be an array")
+    for entry in mounts:
+        if not isinstance(entry, dict):
+            die("mount entries must be objects")
+        source = entry.get("source")
+        if not isinstance(source, str) or not source:
+            die('mount entry missing "source"')
+        if source.startswith("/"):
+            source_path = source
+        else:
+            source_path = workspace + "/" + source
+        if not os.path.exists(source_path):
+            die(f"mount source does not exist: {source}")
+        abs_source = os.path.realpath(source_path)
+        if paths_overlap(abs_source, *host_state):
+            die(f"mount source {abs_source} overlaps host OpenCode/.agents/.claude/.mcp state")
+        if global_router is not None and paths_overlap(abs_source, global_router):
+            die(f"mount source {abs_source} overlaps the user-global model-router config")
+        if global_git_config is not None and paths_overlap(abs_source, global_git_config):
+            die(f"mount source {abs_source} overlaps the user-global Git config")
+
+        target = entry.get("target")
+        if target is None or target is False:
+            target = abs_source
+        elif not isinstance(target, str):
+            target = jq_string(target)
+        if not target.startswith("/"):
+            die(f"mount target must be absolute: {target}")
+        target = os.path.realpath(target)
+        if paths_overlap(target, *BAKED_ROOTS):
+            die(f"mount target {target} shadows a baked config/plugin path")
+        if containers_enabled and paths_overlap(target, container_workspace):
+            die(
+                f"mount target {target} overlaps the containers workspace mirror "
+                f"{container_workspace}"
+            )
+        if containers_enabled and paths_overlap(target, CONTAINER_SOCKET_TARGET):
+            die(f"mount target {target} shadows the managed container-engine socket")
+
+        flag = f"{abs_source}:{target}"
+        if jq_string(jq_or(entry.get("read_only"), False)) == "true":
+            flag += ":ro"
+        run_flags += ["-v", flag]
+
+    # --- Environment -------------------------------------------------------------
+    # Only provider vars that are actually set are forwarded, plus any
+    # explicitly passed/set vars. Reserved names are rejected.
+    def is_reserved_env_name(name):
+        return (
+            name in ("HOME", "PATH", "GIT_CONFIG_GLOBAL")
+            or name.startswith("XDG_")
+            or name.startswith("OPENCODE_")
+        )
+
+    secret_name_targets = {}
+    for target_env, primary_secret, alternate_secret in PROVIDER_SECRET_SPECS:
+        secret_name_targets[primary_secret] = target_env
+        if alternate_secret:
+            secret_name_targets[alternate_secret] = target_env
+
+    # User-global Podman secrets are never injected into arbitrary projects merely
+    # because they exist. A sandbox config must opt in by known secret name.
+    secret_targets = {}
+    provider_secrets = config.get("provider_secrets")
+    if provider_secrets is None or provider_secrets is False:
+        provider_secrets = []
+    if not isinstance(provider_secrets, list):
+        die("provider_secrets must be an array")
+    for requested_secret in provider_secrets:
+        if not isinstance(requested_secret, str):
+            requested_secret = jq_string(requested_secret)
+        if not requested_secret:
+            continue
+        target_env = secret_name_targets.get(requested_secret)
+        if target_env is None:
+            die(f"unknown provider_secrets entry: {requested_secret}")
+        if target_env in secret_targets:
+            die(f"multiple provider secrets target {target_env}")
+        if not podman_quiet("secret", "exists", requested_secret):
+            die(f"configured Podman secret does not exist: {requested_secret}")
+        run_flags += ["--secret", f"{requested_secret},type=env,target={target_env}"]
+        secret_targets[target_env] = requested_secret
+
+    env_map = {}
+    env_mode = {}
+
+    def add_env(name, value, mode):
+        if not ENV_NAME_RE.fullmatch(name):
+            die(f"invalid environment variable name: {name}")
+        if is_reserved_env_name(name):
+            die(f"reserved environment variable: {name}")
+        # A Podman secret is the less-exposed source and wins over inherited or
+        # literal values targeting the same provider variable.
+        if name in secret_targets:
+            return
+        env_map[name] = value
+        env_mode[name] = mode
+
+    for name in PROVIDER_ENV_VARS:
+        if name in os.environ:
+            add_env(name, "", "pass")
+
+    env_config = config.get("env")
+    if env_config is None or env_config is False:
+        env_config = {}
+    if not isinstance(env_config, dict):
+        die("env must be an object")
+    env_pass = env_config.get("pass")
+    if env_pass is None or env_pass is False:
+        env_pass = []
+    if not isinstance(env_pass, list):
+        die("env.pass must be an array")
+    for name in env_pass:
+        if not isinstance(name, str):
+            die("env.pass entries must be strings")
+        if not name:
+            continue
+        if is_reserved_env_name(name):
+            die(f"reserved environment variable in env.pass: {name}")
+        if name in os.environ:
+            add_env(name, "", "pass")
+
+    env_set = env_config.get("set")
+    if env_set is None or env_set is False:
+        env_set = {}
+    if not isinstance(env_set, dict):
+        die("env.set must be an object")
+    for name, value in env_set.items():
+        if not isinstance(value, str):
+            die(f"env.set value for {name} must be a string")
+        add_env(name, value, "set")
+
+    if containers_enabled:
+        # These values describe the launcher-managed socket and deliberately
+        # override conflicting env.pass/env.set entries when container-engine
+        # access is opted in.
+        container_socket_uri = "unix://" + CONTAINER_SOCKET_TARGET
+        add_env("CONTAINER_HOST", container_socket_uri, "set")
+        add_env("DOCKER_HOST", container_socket_uri, "set")
+
+    for name, mode in env_mode.items():
+        if mode == "pass":
+            # Let Podman inherit the value from this process without embedding a
+            # secret in the visible command-line arguments.
+            run_flags += ["-e", name]
+        else:
+            run_flags += ["-e", f"{name}={env_map[name]}"]
+
+    # --- Linked worktree metadata --------------------------------------------------
+    # Linked worktrees and submodules store a gitdir pointer in .git. Validate it
+    # explicitly so stale metadata fails clearly instead of silently suppressing
+    # the existing common-directory mount.
+    git_file = workspace + "/.git"
+    git_file_present = os.path.isfile(git_file)
+    if git_file_present:
+        try:
+            with open(git_file, "rb") as handle:
+                entry = handle.read().decode("utf-8", "replace")
+        except OSError:
+            die(f"unable to read linked-worktree git file: {git_file}")
+        entry = entry.rstrip("\n")
+        if entry.endswith("\r"):
+            entry = entry[:-1]
+        if "\n" in entry or not entry.startswith("gitdir: "):
+            die(f"malformed linked-worktree git file: {git_file}")
+        git_dir_ref = entry[len("gitdir: "):]
+        if not git_dir_ref:
+            die(f"linked-worktree git file has an empty gitdir: {git_file}")
+        if git_dir_ref.startswith("/"):
+            git_dir_path = git_dir_ref
+        else:
+            git_dir_path = workspace + "/" + git_dir_ref
+        if not os.path.exists(git_dir_path):
+            die(f"linked-worktree gitdir does not exist: {git_dir_ref}")
+        git_dir_path = os.path.realpath(git_dir_path)
+        if not os.path.isdir(git_dir_path):
+            die(f"linked-worktree gitdir is not a directory: {git_dir_ref}")
+
+    git_common_dir = ""
+    git_common_ref = git_output(workspace, "rev-parse", "--git-common-dir")
+    if git_common_ref is not None:
+        git_common_ref = git_common_ref.rstrip("\n")
+        if git_common_ref.startswith("/"):
+            git_common_path = git_common_ref
+        else:
+            git_common_path = workspace + "/" + git_common_ref
+        if os.path.exists(git_common_path):
+            git_common_dir = os.path.realpath(git_common_path)
+    elif git_file_present:
+        die(f"unable to resolve linked-worktree common directory from {git_file}")
+
+    if git_common_dir and not (
+        git_common_dir == workspace or git_common_dir.startswith(workspace + "/")
+    ):
+        if paths_overlap(git_common_dir, *host_state):
+            die(f"git metadata directory {git_common_dir} overlaps host OpenCode/.agents/.claude/.mcp state")
+        if global_router is not None and paths_overlap(git_common_dir, global_router):
+            die(f"git metadata directory {git_common_dir} overlaps the user-global model-router config")
+        if global_git_config is not None and paths_overlap(git_common_dir, global_git_config):
+            die(f"git metadata directory {git_common_dir} overlaps the user-global Git config")
+        if paths_overlap(git_common_dir, *BAKED_ROOTS):
+            die(f"git metadata directory {git_common_dir} shadows a baked config/plugin path")
+        if containers_enabled and paths_overlap(git_common_dir, container_workspace):
+            die(f"git metadata directory {git_common_dir} overlaps the containers workspace mirror")
+        if data_volume and paths_overlap(git_common_dir, OPENCODE_DATA_MOUNT):
+            die(f"git metadata directory {git_common_dir} overlaps the OpenCode data mount")
+        if containers_enabled and paths_overlap(git_common_dir, CONTAINER_SOCKET_TARGET):
+            die(f"git metadata directory {git_common_dir} shadows the managed container-engine socket")
+        run_flags += ["-v", f"{git_common_dir}:{git_common_dir}"]
+
+    # --- Build (only when needed, only from configured local build) ---------------
+    image_tags = [image]
+    if args.image:
+        # --image selects a fully qualified name (no tag) to build from this
+        # repository. The image is tagged both with the first 8 characters of
+        # the build context's HEAD commit and with latest, and the hash-pinned
+        # reference is what gets run.
+        if any(ch.isspace() for ch in args.image):
+            die(f"--image contains whitespace: {args.image}")
+        if ":" in args.image.rsplit("/", 1)[-1]:
+            die(
+                f"--image must be a fully qualified name without a tag "
+                f"(got {args.image}); the launcher tags <name>:<git-sha> and <name>:latest"
+            )
+        git_sha = git_output(context, "rev-parse", "--verify", "HEAD")
+        if git_sha is None:
+            die(
+                f"--image requires the build context to be a git repository with at "
+                f"least one commit: {context}"
+            )
+        git_sha = git_sha.strip()[:8]
+        image = args.image + ":" + git_sha
+        image_tags = [image, args.image + ":latest"]
+
+    image_exists = podman_quiet("image", "exists", image)
+
+    if args.rebuild or not image_exists:
+        if not has_build_config:
+            die(f"image {image} is missing and no build block is configured")
+        if not os.path.isfile(containerfile):
+            die(f"containerfile not found: {containerfile}")
+
+        uid = id_output("-u")
+        gid = id_output("-g")
+        username = id_output("-un")
+        build_flags = [
+            "--build-arg",
+            f"USER_UID={uid}",
+            "--build-arg",
+            f"USER_GID={gid}",
+            "--build-arg",
+            f"USERNAME={username}",
+        ]
+        build_args = build_config.get("args")
+        if build_args is None or build_args is False:
+            build_args = {}
+        if not isinstance(build_args, dict):
+            die("build.args must be an object")
+        for key, value in build_args.items():
+            if not isinstance(value, str):
+                die(f"build.arg {key} must be a string")
+            build_flags += ["--build-arg", f"{key}={value}"]
+
+        # A user-wide local-provider catalog is optional and build-time only. Keep
+        # it outside both this repository and the runtime mounts, validate its
+        # constrained provider-only shape, and expose only that one file to the
+        # image build. The digest is also a cache key and is verified again by
+        # the Containerfile.
+        providers_path = config_home + "/opencode2/local-providers.json"
+        providers_sha = "absent"
+        if os.path.lexists(providers_path):
+            if not os.path.isfile(providers_path):
+                die(f"local provider catalog is not a regular file: {providers_path}")
+            try:
+                with open(providers_path, "rb") as handle:
+                    raw = handle.read()
+            except OSError:
+                die(f"unable to read local provider catalog: {providers_path}")
+            catalog = parse_single_json_object(raw, "local provider catalog", providers_path)
+            if not local_providers_valid(catalog):
+                die(f"invalid local provider catalog: {providers_path}")
+            providers_path = os.path.realpath(providers_path)
+            # Mount only a canonical serialization of the validated object. Besides
+            # making formatting-only edits cache-neutral, this ensures duplicate
+            # keys or other discarded parser input cannot survive as hidden
+            # image-layer data.
+            tmp_dir = os.environ.get("TMPDIR") or "/tmp"
+            fd, providers_build_path = tempfile.mkstemp(
+                prefix="opencode2-local-providers.", suffix=".json", dir=tmp_dir
+            )
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(catalog, sort_keys=True, indent=2, ensure_ascii=False))
+                handle.write("\n")
+            os.chmod(providers_build_path, 0o600)
+            TEMP_FILES.append(providers_build_path)
+            with open(providers_build_path, "rb") as handle:
+                providers_sha = hashlib.sha256(handle.read()).hexdigest()
+            build_flags += [
+                "--security-opt",
+                "label=disable",
+                "--volume",
+                f"{providers_build_path}:{PROVIDERS_BUILD_TARGET}:ro",
+            ]
+        build_flags += ["--build-arg", f"LOCAL_PROVIDERS_SHA256={providers_sha}"]
+
+        tag_flags = []
+        for tag in image_tags:
+            tag_flags += ["-t", tag]
+
+        print(
+            f"{PROG}: building {' '.join(image_tags)} "
+            f"(containerfile {containerfile}, context {context})"
+        )
+        proc = subprocess.run(
+            [PODMAN_PATH, "build", *build_flags, *tag_flags, "-f", containerfile, context]
+        )
+        if proc.returncode != 0:
+            sys.exit(proc.returncode)
+
+    # --- Command selection ---------------------------------------------------------
+    default_command = None
+    config_command = config.get("command")
+    if config_command is None or config_command is False:
+        config_command = []
+    if not isinstance(config_command, list) or not all(
+        isinstance(item, str) for item in config_command
+    ):
+        die("command must be an array of strings")
+    if config_command:
+        default_command = list(config_command)
+
+    if command:
+        # "shell" drops into bash; an explicit -- keeps "shell" literal.
+        if not explicit_command and command == ["shell"]:
+            cmd = ["bash", "-l"]
+        else:
+            cmd = list(command)
+    else:
+        cmd = default_command or list(DEFAULT_COMMAND)
+
+    # --- Run ------------------------------------------------------------------------
+    cleanup_temp_files()
+    os.execv(PODMAN_PATH, [PODMAN_PATH, "run", *run_flags, image, *cmd])
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(130)
