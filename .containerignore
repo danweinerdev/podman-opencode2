@@ -6,6 +6,8 @@
 # Local cache / index state (not needed by the image build)
 .code-graph
 .cache
+.mypy_cache
+.ruff_cache
 
 # Dependencies are regenerated in-container (npm install)
 node_modules
@@ -13,4 +15,5 @@ node_modules
 
 # Tests and lockfiles are not runtime inputs
 plugins/model-router/test
+tests/
 **/package-lock.json

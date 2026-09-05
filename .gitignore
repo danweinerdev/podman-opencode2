@@ -5,6 +5,7 @@ node_modules/
 # Local caches and index state
 .code-graph/
 .cache/
+.testtmp/
 
 __pycache__/
 *.__pycache__
