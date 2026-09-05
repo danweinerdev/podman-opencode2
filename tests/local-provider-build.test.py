@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Local-provider catalog build integration test.
 
-Python port of local-provider-build.test.sh (the shell original is kept
-alongside during the migration). Builds the real image with present,
-changed, and absent provider catalogs and checks what ends up baked in.
+Python port of the retired local-provider-build.test.sh. Builds the real
+image with present, changed, and absent provider catalogs and checks what
+ends up baked in.
 """
 
 import hashlib

@@ -114,6 +114,18 @@ def children_for(parent: str) -> list:
     return data.get("data", [])
 
 
+def dump_request_log(path: Path) -> None:
+    # Mirror the shell test's failure trap: surface the mock provider's
+    # recorded requests so a routing regression is diagnosable from output
+    # alone (the scratch dir is removed during cleanup).
+    if not path.exists() or path.stat().st_size == 0:
+        return
+    records = [json.loads(line) for line in
+               path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    print("mock provider requests:", file=sys.stderr)
+    print(json.dumps(records, indent=2), file=sys.stderr)
+
+
 def main() -> None:
     global BASE_URL, AUTH, MOCK
     parser = argparse.ArgumentParser()
@@ -207,6 +219,9 @@ def main() -> None:
 
         print("model-router foreground/background dispatch integration test passed "
               "(sandbox model_router block overrides global routing)")
+    except BaseException:  # last-resort guard mirroring the shell trap
+        dump_request_log(tmp / "requests.jsonl")
+        raise
     finally:
         if MOCK is not None:
             MOCK.terminate()

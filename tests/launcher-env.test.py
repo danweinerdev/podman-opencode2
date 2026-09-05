@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Launcher contract tests against a mocked podman.
 
-Python port of launcher-env.test.sh (the shell original is kept alongside
-during the migration). The launcher runs under a fake `podman` and `id` on
-PATH; the tests assert on the exact argv and environment the mock recorded.
+Python port of the retired launcher-env.test.sh. The launcher runs under a
+fake `podman` and `id` on PATH; the tests assert on the exact argv and
+environment the mock recorded.
 """
 
 import hashlib

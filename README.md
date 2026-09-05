@@ -506,12 +506,9 @@ npm test           # node:test, including a mock AgentDraft
 
 # launcher + config syntax
 python3 -m py_compile bin/opencode-container
-tests/launcher-env.test.sh    # bash; tests/launcher-env.test.py is an equivalent port
-tests/launcher-env.test.py
-tests/local-provider-build.test.sh  # Podman integration; builds present/changed/absent catalogs
-tests/local-provider-build.test.py
-tests/model-router-dispatch.test.sh  # Podman integration; router override + dispatch
-tests/model-router-dispatch.test.py
+tests/launcher-env.test.py    # launcher contract suite against a mocked podman
+tests/local-provider-build.test.py  # Podman integration; builds present/changed/absent catalogs
+tests/model-router-dispatch.test.py  # Podman integration; router override + dispatch
 jq empty container-config.json
 jq empty container-config.schema.json
 jq empty examples/opencode-sandbox.json.example

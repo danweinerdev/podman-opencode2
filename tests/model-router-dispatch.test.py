@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Model-router foreground/background dispatch integration test.
 
-Python port of model-router-dispatch.test.sh (the shell original is kept
-alongside during the migration). Builds the real image, serves it with a
+Python port of the retired model-router-dispatch.test.sh. Builds the real
+image, serves it with a
 workspace model_router block that must override a user-global routing layer,
 and asserts both dispatch modes reach the worker provider.
 
