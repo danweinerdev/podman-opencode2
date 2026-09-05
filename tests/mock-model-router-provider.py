@@ -120,12 +120,14 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--log", required=True)
     parser.add_argument("--ready", required=True)
+    parser.add_argument("--parent-port", type=int, default=0)
+    parser.add_argument("--worker-port", type=int, default=0)
     args = parser.parse_args()
 
     state = State(args.log)
     servers = [
-        ThreadingHTTPServer(("127.0.0.1", 0), handler_for("parent", state)),
-        ThreadingHTTPServer(("127.0.0.1", 0), handler_for("worker", state)),
+        ThreadingHTTPServer(("127.0.0.1", args.parent_port), handler_for("parent", state)),
+        ThreadingHTTPServer(("127.0.0.1", args.worker_port), handler_for("worker", state)),
     ]
     threads = [threading.Thread(target=server.serve_forever, daemon=True) for server in servers]
     for thread in threads:
