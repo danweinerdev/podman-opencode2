@@ -1,25 +1,26 @@
 #!/usr/bin/env python3
-# opencode-container — run the OpenCode2 container for this workspace.
-#
-# Pure Python 3 standard library; no third-party dependencies.
-#
-# Uses $PWD/.opencode-sandbox.json (schema_version 1) when present, otherwise
-# warns and runs the baked image defaults against the current workspace. A
-# sandbox config is trusted repository input: it controls local image builds and
-# container run settings, so review it like executable project tooling. Secret
-# values are never echoed.
-#
-# Usage:
-#   opencode-container                # build if needed, then run the default command
-#   opencode-container --rebuild      # force-rebuild the image, then run
-#   opencode-container --image FQN    # build as FQN:<git-sha8> + FQN:latest, run FQN:<git-sha8>
-#   opencode-container shell          # drop into bash instead
-#   opencode-container -- <cmd...>    # run an arbitrary command
-#
-# --image takes a fully qualified name without a tag (registry:port/name is
-# fine). The build context must be a git repository with at least one commit.
-#
-# Requirements: python3 (3.8+), podman, git, id.
+"""opencode-container — run the OpenCode2 container for this workspace.
+
+Pure Python 3 standard library; no third-party dependencies.
+
+Uses $PWD/.opencode-sandbox.json (schema_version 1) when present, otherwise
+warns and runs the baked image defaults against the current workspace. A
+sandbox config is trusted repository input: it controls local image builds and
+container run settings, so review it like executable project tooling. Secret
+values are never echoed.
+
+Usage:
+    opencode-container                build if needed, then run the default command
+    opencode-container --rebuild      force-rebuild the image, then run
+    opencode-container --image FQN    build as FQN:<git-sha8> + FQN:latest, run FQN:<git-sha8>
+    opencode-container shell          drop into bash instead
+    opencode-container -- <cmd...>    run an arbitrary command
+
+--image takes a fully qualified name without a tag (registry:port/name is
+fine). The build context must be a git repository with at least one commit.
+
+Requirements: python3 (3.10+), podman, git, id.
+"""
 
 import argparse
 import atexit
@@ -33,15 +34,25 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+from collections.abc import Iterator, Sequence
+from typing import Any, Final, Literal, NoReturn
 
-PROG = "opencode-container"
+if sys.version_info < (3, 10):
+    print(
+        "opencode-container: python3 (3.10+) is required "
+        f"(found {sys.version_info[0]}.{sys.version_info[1]})",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
-DEFAULT_IMAGE = "opencode2:latest"
-DEFAULT_COMMAND = ["opencode2", "--standalone"]
+PROG: Final[str] = "opencode-container"
+
+DEFAULT_IMAGE: Final[str] = "opencode2:latest"
+DEFAULT_COMMAND: Final[tuple[str, ...]] = ("opencode2", "--standalone")
 
 # Baked config/plugin paths and launcher control mounts; additional mounts may
 # not shadow these, including through lexical `..` path segments.
-BAKED_ROOTS = (
+BAKED_ROOTS: Final[tuple[str, ...]] = (
     "/etc/opencode",
     "/opt/opencode",
     "/opt/mcp",
@@ -51,7 +62,7 @@ BAKED_ROOTS = (
 )
 # containers mode does not create the generated /workspace/<hash> mount, so a
 # host workspace that genuinely lives below /workspace can be mirrored safely.
-CONTAINERS_WORKSPACE_RESERVED_ROOTS = (
+CONTAINERS_WORKSPACE_RESERVED_ROOTS: Final[tuple[str, ...]] = (
     "/etc/opencode",
     "/opt/opencode",
     "/opt/mcp",
@@ -60,17 +71,17 @@ CONTAINERS_WORKSPACE_RESERVED_ROOTS = (
     "/src",
 )
 
-GLOBAL_GIT_CONFIG_TARGET = "/run/opencode/gitconfig"
-ROUTER_GLOBAL_TARGET = "/run/opencode/model-router-global.json"
-SANDBOX_TARGET = "/run/opencode/sandbox.json"
-CONTAINER_SOCKET_TARGET = "/run/opencode-container-engine.sock"
-PROVIDERS_BUILD_TARGET = "/run/opencode2-build-config/local-providers.json"
-OPENCODE_DATA_MOUNT = "/var/lib/opencode-data"
+GLOBAL_GIT_CONFIG_TARGET: Final[str] = "/run/opencode/gitconfig"
+ROUTER_GLOBAL_TARGET: Final[str] = "/run/opencode/model-router-global.json"
+SANDBOX_TARGET: Final[str] = "/run/opencode/sandbox.json"
+CONTAINER_SOCKET_TARGET: Final[str] = "/run/opencode-container-engine.sock"
+PROVIDERS_BUILD_TARGET: Final[str] = "/run/opencode2-build-config/local-providers.json"
+OPENCODE_DATA_MOUNT: Final[str] = "/var/lib/opencode-data"
 
 # Provider API keys auto-forwarded when set in the host environment. This is
 # the common multi-provider list plus AZURE_OPENAI_API_KEY. Unset variables are
 # skipped; nothing is synthesized.
-PROVIDER_ENV_VARS = (
+PROVIDER_ENV_VARS: Final[tuple[str, ...]] = (
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
     "DEEPSEEK_API_KEY",
@@ -90,7 +101,7 @@ PROVIDER_ENV_VARS = (
 # Podman secret names mapped to the provider environment variables OpenCode2
 # expects. Projects explicitly select names; openapi-api-key is retained as a
 # compatibility alias for the canonical openai-api-key spelling.
-PROVIDER_SECRET_SPECS = (
+PROVIDER_SECRET_SPECS: Final[tuple[tuple[str, str, str | None], ...]] = (
     ("OPENAI_API_KEY", "openai-api-key", "openapi-api-key"),
     ("ANTHROPIC_API_KEY", "anthropic-api-key", None),
     ("DEEPSEEK_API_KEY", "deepseek-api-key", None),
@@ -107,30 +118,39 @@ PROVIDER_SECRET_SPECS = (
     ("AZURE_OPENAI_API_KEY", "azure-openai-api-key", None),
 )
 
-ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
-VOLUME_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
-CREDENTIAL_KEY_RE = re.compile(
+ENV_NAME_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+VOLUME_NAME_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
+CREDENTIAL_KEY_RE: Final[re.Pattern[str]] = re.compile(
     r"^(api[-_]?key|authorization|headers|token|access[-_]?token|secret"
     r"|client[-_]?secret|password|credential|credentials)$",
     re.IGNORECASE,
 )
-ALLOWED_RUNTIME_ARG_PREFIXES = ("--add-host=", "--pids-limit=", "--ulimit=")
+ALLOWED_RUNTIME_ARG_PREFIXES: Final[tuple[str, ...]] = (
+    "--add-host=",
+    "--pids-limit=",
+    "--ulimit=",
+)
+LAUNCHER_OPTIONS: Final[frozenset[str]] = frozenset({"--rebuild", "--help", "-h"})
 
-TEMP_FILES = []
-PODMAN_PATH = None
+# How an environment variable reaches the container: "pass" forwards the
+# process value by name (secrets stay out of argv), "set" carries a literal.
+EnvMode = Literal["pass", "set"]
+
+TEMP_FILES: list[str] = []
+PODMAN_PATH: str | None = None
 
 
 # --- Guardrails --------------------------------------------------------------
-def die(message):
+def die(message: str) -> NoReturn:
     print(f"{PROG}: {message}", file=sys.stderr)
     sys.exit(1)
 
 
-def warn(message):
+def warn(message: str) -> None:
     print(f"{PROG}: warning: {message}", file=sys.stderr)
 
 
-def cleanup_temp_files():
+def cleanup_temp_files() -> None:
     for path in TEMP_FILES:
         try:
             os.unlink(path)
@@ -142,23 +162,33 @@ def cleanup_temp_files():
 atexit.register(cleanup_temp_files)
 
 
-def ensure_requirements():
+def ensure_requirements() -> None:
     global PODMAN_PATH
-    for tool in ("podman", "git", "id"):
+    for tool in ("git", "id"):
         if shutil.which(tool) is None:
             die(f"{tool} is required (install it and retry)")
-    PODMAN_PATH = shutil.which("podman")
+    podman = shutil.which("podman")
+    if podman is None:
+        die("podman is required (install it and retry)")
+    PODMAN_PATH = podman
+
+
+def podman_executable() -> str:
+    """The podman executable resolved by ensure_requirements()."""
+    if PODMAN_PATH is None:
+        die("podman is required (install it and retry)")
+    return PODMAN_PATH
 
 
 # --- Small helpers ------------------------------------------------------------
-def jq_or(value, default):
+def jq_or(value: Any, default: Any) -> Any:
     """jq's `//` operator: fall back when the value is null or false."""
     if value is None or value is False:
         return default
     return value
 
 
-def jq_string(value):
+def jq_string(value: Any) -> str:
     """How `jq -r` renders a scalar (for legacy string comparisons)."""
     if isinstance(value, bool):
         return "true" if value else "false"
@@ -169,7 +199,7 @@ def jq_string(value):
     return json.dumps(value)
 
 
-def parse_single_json_object(raw, label, path):
+def parse_single_json_object(raw: bytes, label: str, path: str) -> dict[str, Any]:
     """Parse a file that must contain exactly one JSON object document."""
     try:
         text = raw.decode("utf-8")
@@ -187,7 +217,7 @@ def parse_single_json_object(raw, label, path):
     return value
 
 
-def paths_overlap(path, *roots):
+def paths_overlap(path: str, *roots: str) -> bool:
     """True if either side equals or contains the other."""
     for root in roots:
         # Root necessarily overlaps every absolute protected path.
@@ -198,40 +228,68 @@ def paths_overlap(path, *roots):
     return False
 
 
-def id_output(flag):
-    # Invoked via PATH (like the shell launcher) so the host's own tooling
-    # identifies the user, not this interpreter.
+def id_output(flag: str) -> str:
+    """Run `id <flag>` via PATH; return stdout stripped.
+
+    Invoked via PATH (like the shell launcher) so the host's own tooling
+    identifies the user, not this interpreter.
+    """
     try:
         proc = subprocess.run(
-            ["id", flag], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
+            ["id", flag],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            errors="replace",
+            check=False,
         )
     except OSError:
-        die(f"id is required (used to identify the host user)")
+        die("id is required (used to identify the host user)")
     if proc.returncode != 0:
         die(f"unable to run id {flag}")
     return proc.stdout.strip()
 
 
-def git_output(cwd, *args):
+def git_output(cwd: str, *args: str) -> str | None:
     """Run `git -C <cwd> <args>`; return stdout, or None on failure."""
     proc = subprocess.run(
-        ["git", "-C", cwd, *args], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
+        ["git", "-C", cwd, *args],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        errors="replace",
+        check=False,
     )
     if proc.returncode != 0:
         return None
     return proc.stdout
 
 
-def podman_quiet(*args):
+def podman_quiet(*args: str) -> bool:
     """Run `podman <args>` with output suppressed; return True on success."""
     proc = subprocess.run(
-        [PODMAN_PATH, *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        [podman_executable(), *args],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
     )
     return proc.returncode == 0
 
 
+def xdg_path(name: str, default: str) -> str:
+    """The effective XDG directory: a set (non-empty) value, else the default."""
+    return os.environ.get(name) or default
+
+
+def is_reserved_env_name(name: str) -> bool:
+    return (
+        name in ("HOME", "PATH", "GIT_CONFIG_GLOBAL")
+        or name.startswith(("XDG_", "OPENCODE_"))
+    )
+
+
 # --- Host discovery -----------------------------------------------------------
-def find_global_router(config_home):
+def find_global_router(config_home: str) -> str | None:
     path = config_home + "/opencode2/model-router.json"
     if not os.path.lexists(path):
         return None
@@ -246,7 +304,7 @@ def find_global_router(config_home):
     return os.path.realpath(path)
 
 
-def find_global_git_config(home):
+def find_global_git_config(home: str) -> str | None:
     # Git's user-global config follows host HOME, independently of the workspace
     # and the XDG paths used by OpenCode. Mount only the canonical file and point
     # Git at a stable launcher-owned target so this also works with prebuilt
@@ -259,11 +317,15 @@ def find_global_git_config(home):
     return os.path.realpath(path)
 
 
-def host_state_roots(config_home, data_home, state_home, cache_home, home):
-    # Host agent state the container must never reach (by mount). The launcher
-    # deliberately does not forward OpenCode, .agents, .claude, or .mcp state.
-    # Canonicalize so a symlinked host-state directory cannot be exposed by
-    # mounting its resolved target.
+def host_state_roots(
+    config_home: str, data_home: str, state_home: str, cache_home: str, home: str
+) -> list[str]:
+    """Canonical host agent-state roots the container must never reach by mount.
+
+    The launcher deliberately does not forward OpenCode, .agents, .claude, or
+    .mcp state. Canonicalize so a symlinked host-state directory cannot be
+    exposed by mounting its resolved target.
+    """
     candidates = (
         config_home + "/opencode",
         data_home + "/opencode",
@@ -276,8 +338,13 @@ def host_state_roots(config_home, data_home, state_home, cache_home, home):
     return [os.path.realpath(candidate) for candidate in candidates]
 
 
-def discover_container_socket(uid):
-    candidates = []
+def discover_container_socket(uid: str) -> str | None:
+    """First accessible container-engine socket, canonicalized.
+
+    Prefers the user Podman socket over a rootless or system Docker socket;
+    checks the node and host-user permissions, not API liveness.
+    """
+    candidates: list[str] = []
     xdg_runtime = os.environ.get("XDG_RUNTIME_DIR", "")
     if xdg_runtime.startswith("/"):
         candidates.append(xdg_runtime + "/podman/podman.sock")
@@ -288,7 +355,7 @@ def discover_container_socket(uid):
     candidates.append("/var/run/docker.sock")
     candidates.append("/run/docker.sock")
 
-    seen = set()
+    seen: set[str] = set()
     for candidate in candidates:
         try:
             st = os.stat(candidate)
@@ -307,7 +374,16 @@ def discover_container_socket(uid):
 
 
 # --- Local provider catalog validation ----------------------------------------
-def iter_object_keys(node):
+def _nonempty_string(value: Any) -> bool:
+    return isinstance(value, str) and bool(value)
+
+
+def _positive_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+
+
+def iter_object_keys(node: Any) -> Iterator[str]:
+    """Every object key in the document, at every nesting level."""
     if isinstance(node, dict):
         for key, value in node.items():
             yield key
@@ -317,7 +393,7 @@ def iter_object_keys(node):
             yield from iter_object_keys(item)
 
 
-def local_providers_valid(catalog):
+def local_providers_valid(catalog: dict[str, Any]) -> bool:
     """Validate the constrained provider-only catalog shape (build-time only)."""
     if set(catalog) - {"$schema", "provider"}:
         return False
@@ -329,7 +405,7 @@ def local_providers_valid(catalog):
             return False
         if spec.get("npm") != "@ai-sdk/openai-compatible":
             return False
-        if "name" in spec and not (isinstance(spec["name"], str) and spec["name"]):
+        if "name" in spec and not _nonempty_string(spec["name"]):
             return False
         options = spec.get("options")
         if not isinstance(options, dict):
@@ -343,44 +419,38 @@ def local_providers_valid(catalog):
         for model_name, model in models.items():
             if not model_name or not isinstance(model, dict):
                 return False
-            if "name" in model and not (isinstance(model["name"], str) and model["name"]):
+            if "name" in model and not _nonempty_string(model["name"]):
                 return False
             if "limit" in model:
                 limit = model["limit"]
                 if not isinstance(limit, dict):
                     return False
                 for key in ("context", "output"):
-                    if key in limit:
-                        value = limit[key]
-                        if (
-                            isinstance(value, bool)
-                            or not isinstance(value, (int, float))
-                            or value <= 0
-                        ):
-                            return False
+                    if key in limit and not _positive_number(limit[key]):
+                        return False
     # Obvious credential field names are rejected anywhere in the document.
     return not any(CREDENTIAL_KEY_RE.match(key) for key in iter_object_keys(catalog))
 
 
 # --- CLI -----------------------------------------------------------------------
-LAUNCHER_OPTIONS = {"--rebuild", "--help", "-h"}
+def split_launcher_args(argv: Sequence[str]) -> tuple[Sequence[str], bool, Sequence[str]]:
+    """Split argv into (launcher options, explicit flag, container command).
 
-
-def split_launcher_args(argv):
-    """Locate the container command, mirroring the legacy launcher boundary.
-
-    Leading --rebuild/--image/--help options belong to the launcher; the first
-    other argument starts the container command. A standalone -- before the
-    command marks it as an explicit override (so `-- shell` runs the shell
-    program rather than the `shell` -> bash -l shortcut).
+    Mirrors the legacy launcher boundary: leading --rebuild/--image/--help
+    options belong to the launcher; the first other argument starts the
+    container command. A standalone -- before the command marks it as an
+    explicit override (so `-- shell` runs the shell program rather than the
+    `shell` -> bash -l shortcut).
     """
     index = 0
     explicit = False
     while index < len(argv):
         arg = argv[index]
         if arg == "--image":
-            # Consume the value as well; a dangling --image is left for argparse.
-            index += 2 if index + 1 < len(argv) else 1
+            if index + 1 >= len(argv):
+                die("--image requires a value")
+            # Consume the value as well.
+            index += 2
             continue
         if arg in LAUNCHER_OPTIONS or arg.startswith("--image="):
             index += 1
@@ -395,7 +465,7 @@ def split_launcher_args(argv):
     return options, explicit, argv[index:]
 
 
-def build_parser():
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=PROG,
         description="Run the OpenCode2 sandbox container for this workspace.",
@@ -442,20 +512,20 @@ def build_parser():
 
 
 # --- Main ------------------------------------------------------------------------
-def main():
-    argv = sys.argv[1:]
-    options, explicit_command, command = split_launcher_args(argv)
-    args = build_parser().parse_args(options)
+def main(argv: Sequence[str] | None = None) -> NoReturn:
+    options, explicit_command, command = split_launcher_args(
+        sys.argv[1:] if argv is None else argv
+    )
+    args: argparse.Namespace = build_parser().parse_args(options)
 
     ensure_requirements()
 
-    invocation_root = os.path.realpath(os.getcwd())
+    try:
+        invocation_root = os.path.realpath(os.getcwd())
+    except OSError:
+        die("unable to resolve the current working directory")
 
     home = os.environ.get("HOME", "")
-
-    def xdg_path(name, default):
-        return os.environ.get(name) or default
-
     config_home = xdg_path("XDG_CONFIG_HOME", home + "/.config")
     data_home = xdg_path("XDG_DATA_HOME", home + "/.local/share")
     state_home = xdg_path("XDG_STATE_HOME", home + "/.local/state")
@@ -477,8 +547,8 @@ def main():
         except OSError:
             die(f"unable to read sandbox config: {config_path}")
         try:
-            config = json.loads(raw)
-        except json.JSONDecodeError as exc:
+            config: dict[str, Any] = json.loads(raw)
+        except ValueError as exc:  # JSONDecodeError or UnicodeDecodeError
             die(f"invalid sandbox config {config_path}: {exc}")
         if not isinstance(config, dict):
             die(f"sandbox config must be a JSON object: {config_path}")
@@ -500,10 +570,11 @@ def main():
         die(f"unsupported schema_version: {jq_string(schema_version)}")
 
     containers_enabled = False
-    if "containers" in config and config["containers"] is not None:
-        if not isinstance(config["containers"], bool):
+    if "containers" in config:
+        containers = config["containers"]
+        if not isinstance(containers, bool):
             die("containers must be a boolean")
-        containers_enabled = config["containers"]
+        containers_enabled = containers
 
     image = jq_or(config.get("image"), DEFAULT_IMAGE)
     if not isinstance(image, str):
@@ -511,10 +582,13 @@ def main():
 
     # Optional build block.
     build_config = config.get("build")
-    has_build_config = build_config is not None and build_config is not False
-    if has_build_config and not isinstance(build_config, dict):
-        die("build must be an object")
-    build_config = build_config if has_build_config else {}
+    if build_config is None or build_config is False:
+        has_build_config = False
+        build_config = {}
+    else:
+        if not isinstance(build_config, dict):
+            die("build must be an object")
+        has_build_config = True
     containerfile = jq_or(build_config.get("containerfile"), "Containerfile")
     if not isinstance(containerfile, str):
         die("build.containerfile must be a string")
@@ -566,12 +640,10 @@ def main():
     workdir = jq_or(config.get("workdir"), "")
     if not isinstance(workdir, str):
         die("workdir must be a string")
-    if workdir == "":
-        workdir = container_workspace
-    elif workdir == "/src":
+    if workdir == "" or workdir == "/src":
         workdir = container_workspace
     elif workdir.startswith("/src/"):
-        workdir = container_workspace + "/" + workdir[len("/src/"):]
+        workdir = container_workspace + "/" + workdir.removeprefix("/src/")
     elif workdir.startswith("/"):
         pass  # other absolute workdirs are used as-is
     else:
@@ -582,7 +654,7 @@ def main():
             die(f"containers workdir {workdir} must stay within workspace {container_workspace}")
 
     # --- podman run flag assembly ----------------------------------------------
-    run_flags = [
+    run_flags: list[str] = [
         "--pull=never",
         "--rm",
         "--init",
@@ -603,7 +675,7 @@ def main():
         # group. Preserve memberships only when owner, primary-group, and world
         # permissions do not already explain this host user's read/write access.
         try:
-            socket_stat = os.stat(socket_source)
+            socket_stat: os.stat_result = os.stat(socket_source)
         except OSError:
             die(f"unable to inspect container-engine socket: {socket_source}")
         if (
@@ -763,14 +835,7 @@ def main():
     # --- Environment -------------------------------------------------------------
     # Only provider vars that are actually set are forwarded, plus any
     # explicitly passed/set vars. Reserved names are rejected.
-    def is_reserved_env_name(name):
-        return (
-            name in ("HOME", "PATH", "GIT_CONFIG_GLOBAL")
-            or name.startswith("XDG_")
-            or name.startswith("OPENCODE_")
-        )
-
-    secret_name_targets = {}
+    secret_name_targets: dict[str, str] = {}
     for target_env, primary_secret, alternate_secret in PROVIDER_SECRET_SPECS:
         secret_name_targets[primary_secret] = target_env
         if alternate_secret:
@@ -778,7 +843,7 @@ def main():
 
     # User-global Podman secrets are never injected into arbitrary projects merely
     # because they exist. A sandbox config must opt in by known secret name.
-    secret_targets = {}
+    secret_targets: dict[str, str] = {}
     provider_secrets = config.get("provider_secrets")
     if provider_secrets is None or provider_secrets is False:
         provider_secrets = []
@@ -789,20 +854,20 @@ def main():
             requested_secret = jq_string(requested_secret)
         if not requested_secret:
             continue
-        target_env = secret_name_targets.get(requested_secret)
-        if target_env is None:
+        env_target = secret_name_targets.get(requested_secret)
+        if env_target is None:
             die(f"unknown provider_secrets entry: {requested_secret}")
-        if target_env in secret_targets:
-            die(f"multiple provider secrets target {target_env}")
+        if env_target in secret_targets:
+            die(f"multiple provider secrets target {env_target}")
         if not podman_quiet("secret", "exists", requested_secret):
             die(f"configured Podman secret does not exist: {requested_secret}")
-        run_flags += ["--secret", f"{requested_secret},type=env,target={target_env}"]
-        secret_targets[target_env] = requested_secret
+        run_flags += ["--secret", f"{requested_secret},type=env,target={env_target}"]
+        secret_targets[env_target] = requested_secret
 
-    env_map = {}
-    env_mode = {}
+    env_map: dict[str, str] = {}
+    env_mode: dict[str, EnvMode] = {}
 
-    def add_env(name, value, mode):
+    def add_env(name: str, value: str, mode: EnvMode) -> None:
         if not ENV_NAME_RE.fullmatch(name):
             die(f"invalid environment variable name: {name}")
         if is_reserved_env_name(name):
@@ -877,11 +942,10 @@ def main():
         except OSError:
             die(f"unable to read linked-worktree git file: {git_file}")
         entry = entry.rstrip("\n")
-        if entry.endswith("\r"):
-            entry = entry[:-1]
+        entry = entry.removesuffix("\r")
         if "\n" in entry or not entry.startswith("gitdir: "):
             die(f"malformed linked-worktree git file: {git_file}")
-        git_dir_ref = entry[len("gitdir: "):]
+        git_dir_ref = entry.removeprefix("gitdir: ")
         if not git_dir_ref:
             die(f"linked-worktree git file has an empty gitdir: {git_file}")
         if git_dir_ref.startswith("/"):
@@ -927,7 +991,7 @@ def main():
         run_flags += ["-v", f"{git_common_dir}:{git_common_dir}"]
 
     # --- Build (only when needed, only from configured local build) ---------------
-    image_tags = [image]
+    image_tags: list[str] = [image]
     if args.image:
         # --image selects a fully qualified name (no tag) to build from this
         # repository. The image is tagged both with the first 8 characters of
@@ -961,7 +1025,7 @@ def main():
         uid = id_output("-u")
         gid = id_output("-g")
         username = id_output("-un")
-        build_flags = [
+        build_flags: list[str] = [
             "--build-arg",
             f"USER_UID={uid}",
             "--build-arg",
@@ -1003,14 +1067,22 @@ def main():
             # keys or other discarded parser input cannot survive as hidden
             # image-layer data.
             tmp_dir = os.environ.get("TMPDIR") or "/tmp"
-            fd, providers_build_path = tempfile.mkstemp(
-                prefix="opencode2-local-providers.", suffix=".json", dir=tmp_dir
-            )
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(json.dumps(catalog, sort_keys=True, indent=2, ensure_ascii=False))
-                handle.write("\n")
-            os.chmod(providers_build_path, 0o600)
+            try:
+                fd, providers_build_path = tempfile.mkstemp(
+                    prefix="opencode2-local-providers.", suffix=".json", dir=tmp_dir
+                )
+            except OSError:
+                die(f"unable to create temporary file in {tmp_dir} for the local provider catalog")
             TEMP_FILES.append(providers_build_path)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as writer:
+                    writer.write(
+                        json.dumps(catalog, sort_keys=True, indent=2, ensure_ascii=False)
+                    )
+                    writer.write("\n")
+                os.chmod(providers_build_path, 0o600)
+            except OSError:
+                die(f"unable to write canonical local provider catalog: {providers_build_path}")
             with open(providers_build_path, "rb") as handle:
                 providers_sha = hashlib.sha256(handle.read()).hexdigest()
             build_flags += [
@@ -1021,22 +1093,25 @@ def main():
             ]
         build_flags += ["--build-arg", f"LOCAL_PROVIDERS_SHA256={providers_sha}"]
 
-        tag_flags = []
+        tag_flags: list[str] = []
         for tag in image_tags:
             tag_flags += ["-t", tag]
 
+        # flush=True: with a piped stdout this line must lead the build output.
         print(
             f"{PROG}: building {' '.join(image_tags)} "
-            f"(containerfile {containerfile}, context {context})"
+            f"(containerfile {containerfile}, context {context})",
+            flush=True,
         )
         proc = subprocess.run(
-            [PODMAN_PATH, "build", *build_flags, *tag_flags, "-f", containerfile, context]
+            [podman_executable(), "build", *build_flags, *tag_flags, "-f", containerfile, context],
+            check=False,
         )
         if proc.returncode != 0:
             sys.exit(proc.returncode)
 
     # --- Command selection ---------------------------------------------------------
-    default_command = None
+    default_command: list[str] | None = None
     config_command = config.get("command")
     if config_command is None or config_command is False:
         config_command = []
@@ -1047,18 +1122,24 @@ def main():
     if config_command:
         default_command = list(config_command)
 
+    cmd: list[str]
     if command:
         # "shell" drops into bash; an explicit -- keeps "shell" literal.
         if not explicit_command and command == ["shell"]:
             cmd = ["bash", "-l"]
         else:
             cmd = list(command)
+    elif explicit_command:
+        # A bare -- passes through to the image's own default command, mirroring
+        # the legacy launcher.
+        cmd = []
     else:
-        cmd = default_command or list(DEFAULT_COMMAND)
+        cmd = default_command if default_command is not None else list(DEFAULT_COMMAND)
 
     # --- Run ------------------------------------------------------------------------
     cleanup_temp_files()
-    os.execv(PODMAN_PATH, [PODMAN_PATH, "run", *run_flags, image, *cmd])
+    podman = podman_executable()
+    os.execv(podman, [podman, "run", *run_flags, image, *cmd])
 
 
 if __name__ == "__main__":

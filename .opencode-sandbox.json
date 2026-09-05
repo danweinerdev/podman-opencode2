@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
-  "image": "opencode2:latest",
+  "image": "opencode2-dev:latest",
   "build": {
-    "containerfile": "Containerfile",
+    "containerfile": "Containerfile.dev",
     "context": ".",
     "args": {
-      "OPENCODE2_VERSION": "0.0.0-beta-17823"
+      "BASE_IMAGE": "opencode2:latest"
     }
   },
   "workspace": ".",

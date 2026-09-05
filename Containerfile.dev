@@ -1,0 +1,73 @@
+# Containerfile.dev — Development & test image for the OpenCode2 base image.
+#
+# Built on top of the base runtime image (Containerfile). Adds the tooling
+# needed to develop and test the base:
+#
+#   - podman-remote  : container-engine client so `containers: true` in
+#                      .opencode-sandbox.json works (talks to the host's
+#                      rootless Podman socket mounted at
+#                      /run/opencode-container-engine.sock).
+#   - Python tooling : a venv at /opt/dev/venv with ruff and mypy pinned to
+#                      the versions used in this repository (Fedora 44 ships
+#                      the venv module in python3-libs, already in the base).
+#                      The venv's bin is prepended to PATH and the venv is
+#                      owned by the image user so extra packages can be
+#                      pip-installed during a session.
+#   - make           : for the repository's Makefile targets.
+#
+# The base image must already exist locally before building this one.
+# Typical flow:
+#
+#   make base   # build (or rebuild) opencode2:latest from Containerfile
+#   make dev    # build opencode2-dev:latest on top of the base
+#
+# or simply: make build   # does both, in order
+#
+# .opencode-sandbox.json points the launcher at this image, so
+# `./bin/opencode-container` will build it automatically on first use
+# (as long as the base image is present).
+
+ARG BASE_IMAGE=opencode2:latest
+FROM ${BASE_IMAGE}
+
+# The launcher always passes these build-args to every build. The base
+# Containerfile uses them to create the image user; here we only declare
+# them so (a) the build does not warn about unused build-args and (b) the
+# venv can be chowned to the inherited user. Restoring the user numerically
+# (UID:GID) avoids depending on the username the base image was built with.
+ARG USER_UID=1000
+ARG USER_GID=1000
+ARG USERNAME=dev
+
+# The launcher also always passes this; declare it to suppress the unused
+# build-arg warning. Not used in this Containerfile.
+ARG LOCAL_PROVIDERS_SHA256=absent
+
+# The base image ends as its unprivileged image user; package installs run
+# as root and the user is restored before the smoke check below.
+USER root
+
+COPY ./requirements.txt /opt/dev/
+RUN set -ex; \
+    dnf install -y --setopt=install_weak_deps=False \
+        python3-pip podman-remote make; \
+    \
+    command -v podman >/dev/null 2>&1 \
+        || ln -s "$(command -v podman-remote)" /usr/local/bin/podman; \
+    python3 -m pip install --no-cache-dir --root-user-action ignore \
+        podman-compose==1.6.0; \
+    \
+    dnf clean all; \
+    python3 -m pip install --no-cache-dir --root-user-action ignore \
+        -r /opt/dev/requirements.txt; \
+    \
+    chown -R "${USER_UID}:${USER_GID}" /opt/dev
+
+# containers=true support: the launcher mounts the host's Podman socket at
+# /run/opencode-container-engine.sock and sets CONTAINER_HOST / DOCKER_HOST.
+# Baking the same defaults here means `podman` also works in manually
+# started containers that mount the socket, without extra -e flags.
+ENV CONTAINER_HOST=unix:///run/opencode-container-engine.sock \
+    DOCKER_HOST=unix:///run/opencode-container-engine.sock
+
+USER ${USERNAME}

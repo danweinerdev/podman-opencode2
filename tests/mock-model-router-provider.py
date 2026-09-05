@@ -13,9 +13,8 @@ class State:
         self.lock = threading.Lock()
 
     def log(self, record):
-        with self.lock:
-            with self.log_path.open("a", encoding="utf-8") as stream:
-                stream.write(json.dumps(record, separators=(",", ":")) + "\n")
+        with self.lock, self.log_path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, separators=(",", ":")) + "\n")
 
 
 def completion_chunk(model, delta, finish_reason=None):

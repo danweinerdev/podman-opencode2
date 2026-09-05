@@ -214,7 +214,7 @@ container.
 
 ## Launcher (`bin/opencode-container`)
 
-`PATH`-safe; requires Python 3 (3.8+), `podman`, `git`, and `id`. It detects
+`PATH`-safe; requires Python 3 (3.10+), `podman`, `git`, and `id`. It detects
 `$PWD/.opencode-sandbox.json`: when present it applies and mounts that file;
 when absent it warns and uses `opencode2:latest`, the current directory as the
 workspace, a stable CWD-derived workdir, and `opencode2 --standalone`. On every

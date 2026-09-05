@@ -1,0 +1,20 @@
+# Ruff configuration for this repository.
+#
+# Pinned alongside ruff==0.16.6 in requirements.txt; revisit this file when
+# the pin is bumped, because ruff's default rule selection changes between
+# versions.
+
+# The launcher (bin/opencode-container) declares Python 3.10+ as its minimum
+# runtime (see the version guard at the top of the file), and the test
+# helpers run under the same interpreter.
+target-version = "py310"
+
+# bin/opencode-container is an executable with no .py extension, so the
+# default include patterns miss it on a plain `ruff check .`
+extend-include = ["bin/opencode-container"]
+
+[lint.per-file-ignores]
+# The launcher deliberately keeps a `sys.version_info < (3, 10)` runtime
+# guard so it exits with a clear message on hosts with older interpreters.
+# UP036 treats that block as obsolete once target-version is >= 3.10.
+"bin/opencode-container" = ["UP036"]

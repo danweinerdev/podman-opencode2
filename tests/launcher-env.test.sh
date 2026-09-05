@@ -778,6 +778,88 @@ if (
 fi
 grep -F -- "invalid local provider catalog" "${TMP}/provider-model.log" >/dev/null
 
+# --- CLI argument-handling edge cases ----------------------------------------
+# These pin down launcher-argument semantics that are easy to regress when the
+# launcher is reworked (e.g. a rewrite to a different language or CLI parser).
+
+# A bare `--` separator (no following arguments) passes through to the image's
+# own default command: no project default, no "shell" shortcut, nothing extra.
+mkdir -p "${TMP}/bare-separator"
+cat > "${TMP}/bare-separator/.opencode-sandbox.json" <<'EOF'
+{ "image": "opencode2:test", "workspace": ".", "command": ["/bin/true"] }
+EOF
+(
+  cd "${TMP}/bare-separator"
+  PATH="${TMP}/bin:${PATH}" "${ROOT}/bin/opencode-container" --
+)
+BARE_WS_KEY="$(printf '%s' "${TMP}/bare-separator" | sha256sum | cut -c1-16)"
+grep -Fx -- "opencode2:test" "${ARGV_LOG}" >/dev/null
+# Every argument after the image reference would be a command; there must be none.
+[[ -z "$(awk -v img="opencode2:test" '$0==img { found=1; next } found { print }' "${ARGV_LOG}")" ]] \
+  || { printf 'bare -- should not pass any command to the container\n' >&2; exit 1; }
+grep -Fx -- "${TMP}/bare-separator:/workspace/${BARE_WS_KEY}" "${ARGV_LOG}" >/dev/null
+
+# A dangling --image (no value) must fail cleanly, before Podman is ever called.
+rm -f "${ARGV_LOG}" "${BUILD_ARGV_LOG}"
+if (
+  cd "${TMP}/bare-separator"
+  PATH="${TMP}/bin:${PATH}" "${ROOT}/bin/opencode-container" --image
+) 2>"${TMP}/dangling-image.log"; then
+  printf 'launcher accepted a dangling --image\n' >&2
+  exit 1
+fi
+grep -F -- "--image requires a value" "${TMP}/dangling-image.log" >/dev/null
+[[ ! -e "${ARGV_LOG}" && ! -e "${BUILD_ARGV_LOG}" ]]
+
+# A non-UTF-8 sandbox config must fail with a clean error, not a traceback,
+# and must not reach Podman.
+mkdir -p "${TMP}/bad-utf8"
+printf '\377\376{"command": ["/bin/true"]}' > "${TMP}/bad-utf8/.opencode-sandbox.json"
+rm -f "${ARGV_LOG}"
+if (
+  cd "${TMP}/bad-utf8"
+  HOME="${TMP}/test-home" PATH="${TMP}/bin:${PATH}" "${ROOT}/bin/opencode-container"
+) 2>"${TMP}/bad-utf8.log"; then
+  printf 'launcher accepted a non-UTF-8 sandbox config\n' >&2
+  exit 1
+fi
+grep -F -- "invalid sandbox config" "${TMP}/bad-utf8.log" >/dev/null
+if grep -q "Traceback" "${TMP}/bad-utf8.log"; then
+  printf 'launcher crashed with a traceback on a non-UTF-8 sandbox config\n' >&2
+  exit 1
+fi
+[[ ! -e "${ARGV_LOG}" ]]
+
+# command must be an array of strings; a bare string is a config error, not
+# silently treated as absent (the legacy shell launcher silently fell through
+# to the default command here).
+mkdir -p "${TMP}/command-string"
+printf '%s\n' '{"command": "not-an-array"}' > "${TMP}/command-string/.opencode-sandbox.json"
+rm -f "${ARGV_LOG}"
+if (
+  cd "${TMP}/command-string"
+  HOME="${TMP}/test-home" PATH="${TMP}/bin:${PATH}" "${ROOT}/bin/opencode-container"
+) 2>"${TMP}/command-string.log"; then
+  printf 'launcher accepted a non-array command value\n' >&2
+  exit 1
+fi
+grep -F -- "command must be an array of strings" "${TMP}/command-string.log" >/dev/null
+[[ ! -e "${ARGV_LOG}" ]]
+
+# `-- shell` runs the literal `shell` program; only the unseparated `shell`
+# argument takes the bash -l shortcut.
+mkdir -p "${TMP}/shell-alias"
+cp "${TMP}/bare-separator/.opencode-sandbox.json" "${TMP}/shell-alias/.opencode-sandbox.json"
+(
+  cd "${TMP}/shell-alias"
+  PATH="${TMP}/bin:${PATH}" "${ROOT}/bin/opencode-container" -- shell
+)
+grep -Fx -- "shell" "${ARGV_LOG}" >/dev/null
+if grep -Fx -- "bash" "${ARGV_LOG}" >/dev/null; then
+  printf 'launcher applied the bash -l shortcut to an explicit `-- shell`\n' >&2
+  exit 1
+fi
+
 # --image selects a fully qualified name to build from the context repository.
 # The build is tagged with the first 8 characters of the context HEAD plus
 # latest, and the run uses the hash-pinned reference.
