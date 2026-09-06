@@ -39,9 +39,11 @@ Rebuild the repository's configured sandbox image without starting OpenCode:
 make build
 ```
 
-This delegates to the launcher, so `.opencode-sandbox.json`, host UID/GID,
-optional local providers, and the launcher's build validation remain the single
-source of truth.
+This runs plain `podman build` for the base and dev images without the
+workspace sandbox config or the local provider catalog. To build the
+configured image from the `.opencode-sandbox.json` `build` block — host
+UID/GID, optional local providers, and the launcher's build validation — use
+`./bin/opencode-container build` (add `--force` to rebuild an existing image).
 
 To build a fully qualified image name, pass `IMAGE` (a name without a tag;
 `registry:port/name` is fine):
@@ -225,11 +227,14 @@ anywhere on `PATH`; project discovery and session persistence are based on the
 invocation directory, not the script's installation directory.
 
 ```sh
-./bin/opencode-container                 # build if needed, run opencode2 --standalone
-./bin/opencode-container --rebuild       # force rebuild, then run
-./bin/opencode-container --image FQN     # build as FQN:<git-sha8> + FQN:latest, run FQN:<git-sha8>
-./bin/opencode-container shell           # bash instead
-./bin/opencode-container -- <cmd...>     # arbitrary command
+./bin/opencode-container                          # build if needed, run opencode2 --standalone
+./bin/opencode-container run [CMD...]              # run a command instead of the default
+./bin/opencode-container shell                     # bash instead
+./bin/opencode-container build [--force]           # build the image without running
+./bin/opencode-container build --image FQN         # build as FQN:<git-sha8> + FQN:latest
+./bin/opencode-container run --image FQN           # build the FQN if needed, run FQN:<git-sha8>
+./bin/opencode-container secrets add NAME [--in FILE|-]  # create provider secret + opt in
+./bin/opencode-container secrets remove NAME             # remove secret + opt out
 ```
 
 Behavior:
@@ -275,15 +280,18 @@ Behavior:
   `.gitconfig` become readable inside the container; relative includes resolve
   from `/run/opencode`, and other includes or credential helpers work only when
   their paths or programs are separately available in the container.
-- Builds only when the image is absent or `--rebuild` is passed, and only from
-  a configured local `build` block; always passes host `USER_UID`/`USER_GID`/
+- Builds only when the image is absent, and only from a configured local
+  `build` block; the `build` subcommand runs that step without starting a
+  container, and `build --force` rebuilds even when the image already exists.
+  Builds always pass host `USER_UID`/`USER_GID`/
   `USERNAME` build args. Therefore config-free operation expects the default
   `opencode2:latest` image to exist locally.
-- `--image <FQN>` (or `--image=<FQN>`) overrides the configured image name for
-  the build and the run. The build context must be a git repository with at
+- `--image <FQN>` (or `--image=<FQN>`) on `run`, `shell`, or `build` overrides
+  the configured image name for the build and/or the run. The build context
+  must be a git repository with at
   least one commit: the image is tagged `<FQN>:<first 8 chars of the context
-  HEAD>` and `<FQN>:latest`, and the hash-pinned reference is what gets run.
-  A name that already carries a tag is rejected.
+  HEAD>` and `<FQN>:latest`, and the hash-pinned reference is what gets built
+  and run. A name that already carries a tag is rejected.
 - When a build occurs, optionally validates and imports the user-wide local
   provider catalog at
   `${XDG_CONFIG_HOME:-$HOME/.config}/opencode2/local-providers.json`. Only that
@@ -304,6 +312,15 @@ Behavior:
   `--secret ...,type=env,target=...`. Merely creating a user-global secret does
   not expose it to every project. A selected secret takes precedence over a
   same-named host environment variable or `env.set` value.
+- `secrets add NAME` / `secrets remove NAME` manage those Podman secrets from
+  the host without launching a container. `add` creates the secret (value from
+  `--in FILE`, `--in -` stdin, or a password-style prompt that is never echoed
+  and never appears in process arguments) and lists `NAME` in the current
+  workspace's `provider_secrets`, creating `.opencode-sandbox.json` with
+  `schema_version: 1` when absent; `remove` deletes the secret and drops the
+  entry, removing the emptied key. Both accept only known provider secret
+  names, and `remove` is a no-op success when the secret exists in neither the
+  store nor the config.
 - Persists OpenCode2's data and state directories in a CWD-derived per-project
   named volume (`opencode2-data-<cwd-hash>`). The pinned preview stores provider
   logins and sessions in the data SQLite database and UI preferences under its
@@ -460,7 +477,7 @@ reachable through `host.containers.internal`; unlike a container-loopback URL,
 this does not require `network: "host"` for the tested llama.cpp setup.
 
 The launcher consumes the shared catalog only when it builds the image. Run
-`opencode-container --rebuild` after adding, changing, or removing it. The
+`opencode-container build --force` after adding, changing, or removing it. The
 catalog is installed in the image as
 `/opt/opencode/config/opencode/opencode.json`, where OpenCode merges it with the
 baked `/etc/opencode/container-config.json`. Canonicalization also prevents
@@ -484,12 +501,22 @@ Known `provider_secrets` names are `openai-api-key` (`openapi-api-key` is accept
 compatibility alias), `anthropic-api-key`, `deepseek-api-key`, `groq-api-key`,
 `google-api-key`, `gemini-api-key`, `google-generative-ai-api-key`,
 `mistral-api-key`, `xai-api-key`, `openrouter-api-key`, `perplexity-api-key`,
-`cohere-api-key`, `together-api-key`, and `azure-openai-api-key`. Create one
-with, for example:
+`cohere-api-key`, `together-api-key`, and `azure-openai-api-key`. Manage them
+with the launcher from the workspace root:
 
 ```sh
-printf '%s' "$OPENAI_API_KEY" | podman secret create openai-api-key -
+opencode-container secrets add openai-api-key              # password-style prompt
+opencode-container secrets add openai-api-key --in key.txt # from a file
+printf '%s' "$OPENAI_API_KEY" \
+    | opencode-container secrets add openai-api-key --in - # from stdin
+opencode-container secrets remove openai-api-key           # remove both
 ```
+
+`secrets add` creates the Podman secret and lists the name in the workspace's
+`provider_secrets`; the secret is injected only while it is listed there.
+Plain `podman secret create NAME -` still works for creating a secret without
+opting a project in; remove the matching `provider_secrets` entry (or run
+`secrets remove`) to stop injecting it.
 
 The secret is exposed to OpenCode2 as the corresponding uppercase provider
 variable only when the current sandbox config lists its name. Any process

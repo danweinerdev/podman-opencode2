@@ -10,20 +10,36 @@ container run settings, so review it like executable project tooling. Secret
 values are never echoed.
 
 Usage:
-    opencode-container                build if needed, then run the default command
-    opencode-container --rebuild      force-rebuild the image, then run
-    opencode-container --image FQN    build as FQN:<git-sha8> + FQN:latest, run FQN:<git-sha8>
-    opencode-container shell          drop into bash instead
-    opencode-container -- <cmd...>    run an arbitrary command
+    opencode-container                    build if needed, run the default command
+    opencode-container run [CMD...]       run a command in the container (default action)
+    opencode-container shell              drop into bash instead
+    opencode-container build [--force]    build the image without running a container
+    opencode-container secrets add NAME [--in FILE|-]
+                                          create a provider secret and opt the
+                                          workspace's .opencode-sandbox.json into it
+    opencode-container secrets remove NAME
+                                          remove the provider secret and its opt-in
 
---image takes a fully qualified name without a tag (registry:port/name is
-fine). The build context must be a git repository with at least one commit.
+run, shell, and build accept --image FQN: a fully qualified name without a tag
+(registry:port/name is fine). The build context must be a git repository with
+at least one commit; the image is tagged <FQN>:<git-sha8> and <FQN>:latest,
+and the hash-pinned reference is what gets built or run. build --force rebuilds
+even when the image already exists.
+
+The secrets subcommand manages the Podman provider secrets the launcher can
+inject. "secrets add" creates the secret and lists NAME in the current
+workspace's .opencode-sandbox.json provider_secrets array (creating the file
+when absent); "secrets remove" deletes the secret and drops the entry. Only
+known provider secret names are accepted. The value is taken from --in FILE,
+stdin (--in -), or a password-style prompt, and never appears in the process
+argument list.
 
 Requirements: python3 (3.10+), podman, git, id.
 """
 
 import argparse
 import atexit
+import getpass
 import hashlib
 import json
 import os
@@ -130,7 +146,6 @@ ALLOWED_RUNTIME_ARG_PREFIXES: Final[tuple[str, ...]] = (
     "--pids-limit=",
     "--ulimit=",
 )
-LAUNCHER_OPTIONS: Final[frozenset[str]] = frozenset({"--rebuild", "--help", "-h"})
 
 # How an environment variable reaches the container: "pass" forwards the
 # process value by name (secrets stay out of argv), "set" carries a literal.
@@ -433,36 +448,15 @@ def local_providers_valid(catalog: dict[str, Any]) -> bool:
 
 
 # --- CLI -----------------------------------------------------------------------
-def split_launcher_args(argv: Sequence[str]) -> tuple[Sequence[str], bool, Sequence[str]]:
-    """Split argv into (launcher options, explicit flag, container command).
+IMAGE_HELP: Final[str] = (
+    "fully qualified image name (no tag) to build from the configured "
+    "build block; tagged <FQN>:<git-sha8> and <FQN>:latest, and the "
+    "hash-pinned reference is built and run"
+)
 
-    Mirrors the legacy launcher boundary: leading --rebuild/--image/--help
-    options belong to the launcher; the first other argument starts the
-    container command. A standalone -- before the command marks it as an
-    explicit override (so `-- shell` runs the shell program rather than the
-    `shell` -> bash -l shortcut).
-    """
-    index = 0
-    explicit = False
-    while index < len(argv):
-        arg = argv[index]
-        if arg == "--image":
-            if index + 1 >= len(argv):
-                die("--image requires a value")
-            # Consume the value as well.
-            index += 2
-            continue
-        if arg in LAUNCHER_OPTIONS or arg.startswith("--image="):
-            index += 1
-            continue
-        if arg == "--":
-            # The separator marks an explicit command but belongs to neither
-            # the launcher options nor the command itself.
-            explicit = True
-            index += 1
-        break
-    options = argv[: index - 1] if explicit else argv[:index]
-    return options, explicit, argv[index:]
+
+def _add_image_flag(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--image", metavar="FQN", help=IMAGE_HELP)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -471,17 +465,27 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run the OpenCode2 sandbox container for this workspace.",
         epilog=textwrap.dedent(
             """\
-            command:
-              With no command, the configured command (or the default
-              "opencode2 --standalone") is run. "shell" drops into "bash -l".
-              Any other arguments are the command to run; use "--" to pass a
-              command that begins with a dash:
+            commands:
+              With no command, "run" is the default action: the configured
+              command (or the default "opencode2 --standalone") runs.
 
-                opencode-container                build if needed, run the default command
-                opencode-container --rebuild      force-rebuild the image, then run
-                opencode-container --image FQN    build FQN:<git-sha8> + FQN:latest, run FQN:<git-sha8>
-                opencode-container shell          drop into bash instead
-                opencode-container -- <cmd...>    run an arbitrary command
+                opencode-container                    build if needed, run the default command
+                opencode-container run [CMD...]       run CMD in the container
+                opencode-container shell              drop into bash instead
+                opencode-container build [--force]    build the image, do not run
+                opencode-container secrets add NAME   create a provider secret and opt in
+                opencode-container secrets remove NAME
+                                                      remove the secret and its opt-in
+
+              Arguments after "run" are passed to the container verbatim:
+              "opencode-container run ls -la". A "--" directly before the
+              command is treated as the option separator and dropped.
+
+              secrets manages the Podman provider secrets this launcher
+              injects. Only known provider secret names are accepted. The
+              value comes from --in FILE, from stdin with --in -, or, by
+              default, from a password-style prompt that is not echoed. It is
+              never passed on the command line.
 
             The launcher runs from any directory on PATH: project behavior is
             derived from the invocation directory, which supplies the workspace,
@@ -494,31 +498,329 @@ def build_parser() -> argparse.ArgumentParser:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument(
-        "--rebuild",
-        action="store_true",
-        help="force-rebuild the image before running",
+    # Every namespace carries the same keys regardless of the sub-command.
+    parser.set_defaults(
+        image=None,
+        force=False,
+        command_args=None,
+        action=None,
+        name=None,
+        input=None,
     )
-    parser.add_argument(
-        "--image",
-        metavar="FQN",
+    sub = parser.add_subparsers(dest="subcommand", metavar="COMMAND")
+
+    run_parser = sub.add_parser(
+        "run",
+        help="build if needed, then run the container (the default action)",
+    )
+    _add_image_flag(run_parser)
+    run_parser.add_argument(
+        "command_args",
+        nargs=argparse.REMAINDER,
+        metavar="CMD",
         help=(
-            "fully qualified image name (no tag) to build from the configured "
-            "build block; tagged FQN:<git-sha8> and FQN:latest, and the "
-            "hash-pinned reference is run"
+            "command to run in the container, passed through verbatim; "
+            "defaults to the configured command or opencode2 --standalone"
         ),
     )
+
+    shell_parser = sub.add_parser(
+        "shell",
+        help="build if needed, then drop into bash instead",
+    )
+    _add_image_flag(shell_parser)
+
+    build_parser = sub.add_parser(
+        "build",
+        help="build the image without running a container",
+    )
+    _add_image_flag(build_parser)
+    build_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="build even if the image already exists",
+    )
+
+    secrets_parser = sub.add_parser(
+        "secrets",
+        help="manage the Podman provider secrets the launcher injects",
+        description=(
+            "Manage the Podman provider secrets this launcher injects. "
+            "'add' creates the secret and lists it in the current workspace's "
+            ".opencode-sandbox.json provider_secrets (creating the file when "
+            "absent); 'remove' deletes the secret and drops the entry."
+        ),
+        epilog=textwrap.dedent(
+            f"""\
+            The value is never echoed and never appears in the process argument
+            list. With no --in, it is prompted for like a password (a terminal
+            is required); --in FILE reads it from a file and --in - reads it
+            from stdin. A single trailing newline is dropped.
+
+            Valid names: {", ".join(primary for _env, primary, _alt in PROVIDER_SECRET_SPECS)}
+            (openapi-api-key is accepted as an alias for openai-api-key)
+            """
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    secrets_sub = secrets_parser.add_subparsers(
+        dest="action", required=True, metavar="add|remove"
+    )
+    add_parser = secrets_sub.add_parser(
+        "add",
+        help="create the Podman secret and add it to provider_secrets",
+    )
+    add_parser.add_argument("name", help="known provider secret name")
+    add_parser.add_argument(
+        "--in",
+        dest="input",
+        metavar="FILE",
+        help=(
+            "read the secret value from FILE, or from stdin with - "
+            "(default: prompt without echoing)"
+        ),
+    )
+    remove_parser = secrets_sub.add_parser(
+        "remove",
+        help="remove the Podman secret and its provider_secrets entry",
+    )
+    remove_parser.add_argument("name", help="known provider secret name")
     return parser
+
+
+# --- Provider secrets ------------------------------------------------------------
+def canonical_secret_name(name: str) -> str:
+    """Resolve a requested secret name to its canonical provider secret name."""
+    for _env_target, primary, alternate in PROVIDER_SECRET_SPECS:
+        if name in (primary, alternate):
+            return primary
+    valid = ", ".join(primary for _env, primary, _alternate in PROVIDER_SECRET_SPECS)
+    die(f"unknown provider secret name: {name} (valid names: {valid})")
+
+
+def sandbox_config_path() -> str:
+    # Secrets are workspace-scoped, like every other launcher behavior: the
+    # current workspace's sandbox config is the one edited.
+    return os.getcwd() + "/.opencode-sandbox.json"
+
+
+def load_sandbox_config(path: str) -> tuple[dict[str, Any], bool]:
+    """Parse the workspace sandbox config; return (config, present)."""
+    if not os.path.lexists(path):
+        return {}, False
+    if not os.path.isfile(path):
+        die(f"sandbox config is not a regular file: {path}")
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read()
+    except OSError:
+        die(f"unable to read sandbox config: {path}")
+    try:
+        config: Any = json.loads(raw)
+    except ValueError as exc:  # JSONDecodeError or UnicodeDecodeError
+        die(f"invalid sandbox config {path}: {exc}")
+    if not isinstance(config, dict):
+        die(f"sandbox config must be a JSON object: {path}")
+    return config, True
+
+
+def write_sandbox_config(path: str, config: dict[str, Any]) -> None:
+    """Atomically rewrite the workspace sandbox config, preserving its mode."""
+    try:
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+    except OSError:
+        mode = 0o644
+    try:
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=".opencode-sandbox.json.", dir=os.path.dirname(path)
+        )
+    except OSError:
+        die(f"unable to write sandbox config: {path}")
+    TEMP_FILES.append(tmp_path)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(config, indent=2, ensure_ascii=False) + "\n")
+        os.chmod(tmp_path, mode)
+        os.replace(tmp_path, path)
+    except OSError:
+        die(f"unable to write sandbox config: {path}")
+    finally:
+        if os.path.lexists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+    TEMP_FILES.remove(tmp_path)
+
+
+def config_upsert_provider_secret(config: dict[str, Any], name: str) -> bool:
+    """Append name to provider_secrets (creating the key); report a change."""
+    entry = config.get("provider_secrets")
+    if entry is None or entry is False:
+        entry = []
+        config["provider_secrets"] = entry
+    if not isinstance(entry, list):
+        die("provider_secrets must be an array in .opencode-sandbox.json")
+    if name not in entry:
+        entry.append(name)
+        return True
+    return False
+
+
+def config_remove_provider_secret(config: dict[str, Any], name: str) -> bool:
+    """Drop name from provider_secrets; drop an emptied key; report a change."""
+    entry = config.get("provider_secrets")
+    if entry is None or entry is False:
+        return False
+    if not isinstance(entry, list):
+        die("provider_secrets must be an array in .opencode-sandbox.json")
+    if name not in entry:
+        return False
+    entry.remove(name)
+    if not entry:
+        del config["provider_secrets"]
+    return True
+
+
+def read_secret_value(name: str, input_spec: str | None) -> str:
+    """Read the secret value from --in, or prompt for it without echoing."""
+    if input_spec is None:
+        if not sys.stdin.isatty():
+            die(
+                "no terminal is available for the interactive secret prompt; "
+                "pass the value with --in FILE or pipe it with --in -"
+            )
+        try:
+            value = getpass.getpass(f"Secret value for {name}: ")
+        except EOFError:
+            die("secret input was cancelled")
+        except getpass.GetPassWarning as exc:
+            die(f"unable to prompt for the secret: {exc}")
+        raw = value.encode("utf-8")
+    elif input_spec == "-":
+        if sys.stdin.isatty():
+            die(
+                "--in - reads the value from stdin, but stdin is a terminal; "
+                "pass a file or omit --in to type the value"
+            )
+        raw = sys.stdin.buffer.read()
+    else:
+        if not os.path.isabs(input_spec):
+            input_spec = os.getcwd() + "/" + input_spec
+        if not os.path.isfile(input_spec):
+            die(f"--in path is not a regular file: {input_spec}")
+        try:
+            with open(input_spec, "rb") as handle:
+                raw = handle.read()
+        except OSError:
+            die(f"unable to read --in file: {input_spec}")
+    try:
+        value = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        die("the secret value must be valid UTF-8")
+    # A single trailing newline (from echo, a shell, or an editor) is not part
+    # of a key; any other byte is preserved verbatim.
+    value = value.removesuffix("\r\n").removesuffix("\n")
+    if not value:
+        die(f"the secret value for {name} must not be empty")
+    return value
+
+
+def podman_secret_create(name: str, value: str) -> None:
+    # The value goes over stdin so it never appears in a process argument list.
+    proc = subprocess.run(
+        [podman_executable(), "secret", "create", name, "-"],
+        input=value.encode("utf-8"),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if proc.returncode != 0:
+        detail = proc.stderr.decode("utf-8", "replace").strip()
+        die(f"podman secret create failed: {detail or name}")
+
+
+def podman_secret_remove(name: str) -> None:
+    proc = subprocess.run(
+        [podman_executable(), "secret", "rm", name],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if proc.returncode != 0:
+        detail = proc.stderr.decode("utf-8", "replace").strip()
+        die(f"podman secret rm failed: {detail or name}")
+
+
+def secret_add(name: str, input_spec: str | None) -> NoReturn:
+    # Fail before prompting when the name is taken, so a re-entry attempt does
+    # not ask for a value that would be rejected.
+    if podman_quiet("secret", "exists", name):
+        die(
+            f"Podman secret {name} already exists; run "
+            f"'{PROG} secrets remove {name}' first to replace it"
+        )
+    value = read_secret_value(name, input_spec)
+    # The workspace opt-in is written before the secret is created, so a
+    # failed create leaves a config that names a missing secret (the launcher
+    # reports that clearly) and a plain re-run of secrets add retries cleanly.
+    config_path = sandbox_config_path()
+    config, present = load_sandbox_config(config_path)
+    if not present:
+        config = {"schema_version": 1}
+    hooked = config_upsert_provider_secret(config, name)
+    if hooked:
+        write_sandbox_config(config_path, config)
+    podman_secret_create(name, value)
+    print(f"{PROG}: created Podman secret {name}")
+    if hooked:
+        print(f"{PROG}: added {name} to provider_secrets in {config_path}")
+    else:
+        print(f"{PROG}: {name} was already listed in provider_secrets")
+    sys.exit(0)
+
+
+def secret_remove(name: str) -> NoReturn:
+    existed = podman_quiet("secret", "exists", name)
+    # Drop the workspace opt-in first: if the podman removal then fails, the
+    # secret is simply not injected, and re-running secrets remove finishes it.
+    config_path = sandbox_config_path()
+    config, _present = load_sandbox_config(config_path)
+    unhooked = config_remove_provider_secret(config, name)
+    if unhooked:
+        write_sandbox_config(config_path, config)
+    if existed:
+        podman_secret_remove(name)
+    if not existed and not unhooked:
+        print(f"{PROG}: nothing to remove for {name} (no Podman secret, no provider_secrets entry)")
+    else:
+        if unhooked:
+            print(f"{PROG}: removed {name} from provider_secrets in {config_path}")
+        if existed:
+            print(f"{PROG}: removed Podman secret {name}")
+    sys.exit(0)
+
+
+def handle_secrets(args: argparse.Namespace) -> NoReturn:
+    name = canonical_secret_name(args.name)
+    if args.action == "add":
+        secret_add(name, args.input)
+    else:
+        secret_remove(name)
 
 
 # --- Main ------------------------------------------------------------------------
 def main(argv: Sequence[str] | None = None) -> NoReturn:
-    options, explicit_command, command = split_launcher_args(
+    args: argparse.Namespace = build_parser().parse_args(
         sys.argv[1:] if argv is None else argv
     )
-    args: argparse.Namespace = build_parser().parse_args(options)
 
     ensure_requirements()
+
+    # The secrets subcommand is host-side only: it never builds or runs a
+    # container, and needs none of the workspace run configuration.
+    if args.subcommand == "secrets":
+        handle_secrets(args)
 
     try:
         invocation_root = os.path.realpath(os.getcwd())
@@ -652,6 +954,137 @@ def main(argv: Sequence[str] | None = None) -> NoReturn:
         workdir = os.path.realpath(workdir)
         if workdir != container_workspace and not workdir.startswith(container_workspace + "/"):
             die(f"containers workdir {workdir} must stay within workspace {container_workspace}")
+
+    # --- Build ------------------------------------------------------------------
+    # Runs before run-flag assembly so `build` never depends on container run
+    # state (engine socket, mounts, environment, worktree metadata).
+    image_tags: list[str] = [image]
+    if args.image:
+        # --image selects a fully qualified name (no tag) to build from this
+        # repository. The image is tagged both with the first 8 characters of
+        # the build context's HEAD commit and with latest, and the hash-pinned
+        # reference is what gets built and run.
+        if any(ch.isspace() for ch in args.image):
+            die(f"--image contains whitespace: {args.image}")
+        if ":" in args.image.rsplit("/", 1)[-1]:
+            die(
+                f"--image must be a fully qualified name without a tag "
+                f"(got {args.image}); the launcher tags <name>:<git-sha> and <name>:latest"
+            )
+        git_sha = git_output(context, "rev-parse", "--verify", "HEAD")
+        if git_sha is None:
+            die(
+                f"--image requires the build context to be a git repository with at "
+                f"least one commit: {context}"
+            )
+        git_sha = git_sha.strip()[:8]
+        image = args.image + ":" + git_sha
+        image_tags = [image, args.image + ":latest"]
+
+    image_exists = podman_quiet("image", "exists", image)
+
+    if args.force or not image_exists:
+        if not has_build_config:
+            if image_exists:
+                die(f"no build block is configured to rebuild image {image}")
+            die(f"image {image} is missing and no build block is configured")
+        if not os.path.isfile(containerfile):
+            die(f"containerfile not found: {containerfile}")
+
+        uid = id_output("-u")
+        gid = id_output("-g")
+        username = id_output("-un")
+        build_flags: list[str] = [
+            "--build-arg",
+            f"USER_UID={uid}",
+            "--build-arg",
+            f"USER_GID={gid}",
+            "--build-arg",
+            f"USERNAME={username}",
+        ]
+        build_args = build_config.get("args")
+        if build_args is None or build_args is False:
+            build_args = {}
+        if not isinstance(build_args, dict):
+            die("build.args must be an object")
+        for key, value in build_args.items():
+            if not isinstance(value, str):
+                die(f"build.arg {key} must be a string")
+            build_flags += ["--build-arg", f"{key}={value}"]
+
+        # A user-wide local-provider catalog is optional and build-time only. Keep
+        # it outside both this repository and the runtime mounts, validate its
+        # constrained provider-only shape, and expose only that one file to the
+        # image build. The digest is also a cache key and is verified again by
+        # the Containerfile.
+        providers_path = config_home + "/opencode2/local-providers.json"
+        providers_sha = "absent"
+        if os.path.lexists(providers_path):
+            if not os.path.isfile(providers_path):
+                die(f"local provider catalog is not a regular file: {providers_path}")
+            try:
+                with open(providers_path, "rb") as handle:
+                    raw = handle.read()
+            except OSError:
+                die(f"unable to read local provider catalog: {providers_path}")
+            catalog = parse_single_json_object(raw, "local provider catalog", providers_path)
+            if not local_providers_valid(catalog):
+                die(f"invalid local provider catalog: {providers_path}")
+            providers_path = os.path.realpath(providers_path)
+            # Mount only a canonical serialization of the validated object. Besides
+            # making formatting-only edits cache-neutral, this ensures duplicate
+            # keys or other discarded parser input cannot survive as hidden
+            # image-layer data.
+            tmp_dir = os.environ.get("TMPDIR") or "/tmp"
+            try:
+                fd, providers_build_path = tempfile.mkstemp(
+                    prefix="opencode2-local-providers.", suffix=".json", dir=tmp_dir
+                )
+            except OSError:
+                die(f"unable to create temporary file in {tmp_dir} for the local provider catalog")
+            TEMP_FILES.append(providers_build_path)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as writer:
+                    writer.write(
+                        json.dumps(catalog, sort_keys=True, indent=2, ensure_ascii=False)
+                    )
+                    writer.write("\n")
+                os.chmod(providers_build_path, 0o600)
+            except OSError:
+                die(f"unable to write canonical local provider catalog: {providers_build_path}")
+            with open(providers_build_path, "rb") as handle:
+                providers_sha = hashlib.sha256(handle.read()).hexdigest()
+            build_flags += [
+                "--security-opt",
+                "label=disable",
+                "--volume",
+                f"{providers_build_path}:{PROVIDERS_BUILD_TARGET}:ro",
+            ]
+        build_flags += ["--build-arg", f"LOCAL_PROVIDERS_SHA256={providers_sha}"]
+
+        tag_flags: list[str] = []
+        for tag in image_tags:
+            tag_flags += ["-t", tag]
+
+        # flush=True: with a piped stdout this line must lead the build output.
+        print(
+            f"{PROG}: building {' '.join(image_tags)} "
+            f"(containerfile {containerfile}, context {context})",
+            flush=True,
+        )
+        proc = subprocess.run(
+            [podman_executable(), "build", *build_flags, *tag_flags, "-f", containerfile, context],
+            check=False,
+        )
+        if proc.returncode != 0:
+            sys.exit(proc.returncode)
+
+    if args.subcommand == "build":
+        if args.force or not image_exists:
+            print(f"{PROG}: built {' '.join(image_tags)}")
+        else:
+            print(f"{PROG}: image {image} already exists; pass --force to rebuild")
+        sys.exit(0)
 
     # --- podman run flag assembly ----------------------------------------------
     run_flags: list[str] = [
@@ -990,126 +1423,6 @@ def main(argv: Sequence[str] | None = None) -> NoReturn:
             die(f"git metadata directory {git_common_dir} shadows the managed container-engine socket")
         run_flags += ["-v", f"{git_common_dir}:{git_common_dir}"]
 
-    # --- Build (only when needed, only from configured local build) ---------------
-    image_tags: list[str] = [image]
-    if args.image:
-        # --image selects a fully qualified name (no tag) to build from this
-        # repository. The image is tagged both with the first 8 characters of
-        # the build context's HEAD commit and with latest, and the hash-pinned
-        # reference is what gets run.
-        if any(ch.isspace() for ch in args.image):
-            die(f"--image contains whitespace: {args.image}")
-        if ":" in args.image.rsplit("/", 1)[-1]:
-            die(
-                f"--image must be a fully qualified name without a tag "
-                f"(got {args.image}); the launcher tags <name>:<git-sha> and <name>:latest"
-            )
-        git_sha = git_output(context, "rev-parse", "--verify", "HEAD")
-        if git_sha is None:
-            die(
-                f"--image requires the build context to be a git repository with at "
-                f"least one commit: {context}"
-            )
-        git_sha = git_sha.strip()[:8]
-        image = args.image + ":" + git_sha
-        image_tags = [image, args.image + ":latest"]
-
-    image_exists = podman_quiet("image", "exists", image)
-
-    if args.rebuild or not image_exists:
-        if not has_build_config:
-            die(f"image {image} is missing and no build block is configured")
-        if not os.path.isfile(containerfile):
-            die(f"containerfile not found: {containerfile}")
-
-        uid = id_output("-u")
-        gid = id_output("-g")
-        username = id_output("-un")
-        build_flags: list[str] = [
-            "--build-arg",
-            f"USER_UID={uid}",
-            "--build-arg",
-            f"USER_GID={gid}",
-            "--build-arg",
-            f"USERNAME={username}",
-        ]
-        build_args = build_config.get("args")
-        if build_args is None or build_args is False:
-            build_args = {}
-        if not isinstance(build_args, dict):
-            die("build.args must be an object")
-        for key, value in build_args.items():
-            if not isinstance(value, str):
-                die(f"build.arg {key} must be a string")
-            build_flags += ["--build-arg", f"{key}={value}"]
-
-        # A user-wide local-provider catalog is optional and build-time only. Keep
-        # it outside both this repository and the runtime mounts, validate its
-        # constrained provider-only shape, and expose only that one file to the
-        # image build. The digest is also a cache key and is verified again by
-        # the Containerfile.
-        providers_path = config_home + "/opencode2/local-providers.json"
-        providers_sha = "absent"
-        if os.path.lexists(providers_path):
-            if not os.path.isfile(providers_path):
-                die(f"local provider catalog is not a regular file: {providers_path}")
-            try:
-                with open(providers_path, "rb") as handle:
-                    raw = handle.read()
-            except OSError:
-                die(f"unable to read local provider catalog: {providers_path}")
-            catalog = parse_single_json_object(raw, "local provider catalog", providers_path)
-            if not local_providers_valid(catalog):
-                die(f"invalid local provider catalog: {providers_path}")
-            providers_path = os.path.realpath(providers_path)
-            # Mount only a canonical serialization of the validated object. Besides
-            # making formatting-only edits cache-neutral, this ensures duplicate
-            # keys or other discarded parser input cannot survive as hidden
-            # image-layer data.
-            tmp_dir = os.environ.get("TMPDIR") or "/tmp"
-            try:
-                fd, providers_build_path = tempfile.mkstemp(
-                    prefix="opencode2-local-providers.", suffix=".json", dir=tmp_dir
-                )
-            except OSError:
-                die(f"unable to create temporary file in {tmp_dir} for the local provider catalog")
-            TEMP_FILES.append(providers_build_path)
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as writer:
-                    writer.write(
-                        json.dumps(catalog, sort_keys=True, indent=2, ensure_ascii=False)
-                    )
-                    writer.write("\n")
-                os.chmod(providers_build_path, 0o600)
-            except OSError:
-                die(f"unable to write canonical local provider catalog: {providers_build_path}")
-            with open(providers_build_path, "rb") as handle:
-                providers_sha = hashlib.sha256(handle.read()).hexdigest()
-            build_flags += [
-                "--security-opt",
-                "label=disable",
-                "--volume",
-                f"{providers_build_path}:{PROVIDERS_BUILD_TARGET}:ro",
-            ]
-        build_flags += ["--build-arg", f"LOCAL_PROVIDERS_SHA256={providers_sha}"]
-
-        tag_flags: list[str] = []
-        for tag in image_tags:
-            tag_flags += ["-t", tag]
-
-        # flush=True: with a piped stdout this line must lead the build output.
-        print(
-            f"{PROG}: building {' '.join(image_tags)} "
-            f"(containerfile {containerfile}, context {context})",
-            flush=True,
-        )
-        proc = subprocess.run(
-            [podman_executable(), "build", *build_flags, *tag_flags, "-f", containerfile, context],
-            check=False,
-        )
-        if proc.returncode != 0:
-            sys.exit(proc.returncode)
-
     # --- Command selection ---------------------------------------------------------
     default_command: list[str] | None = None
     config_command = config.get("command")
@@ -1123,18 +1436,18 @@ def main(argv: Sequence[str] | None = None) -> NoReturn:
         default_command = list(config_command)
 
     cmd: list[str]
-    if command:
-        # "shell" drops into bash; an explicit -- keeps "shell" literal.
-        if not explicit_command and command == ["shell"]:
-            cmd = ["bash", "-l"]
-        else:
-            cmd = list(command)
-    elif explicit_command:
-        # A bare -- passes through to the image's own default command, mirroring
-        # the legacy launcher.
-        cmd = []
+    if args.subcommand == "shell":
+        cmd = ["bash", "-l"]
     else:
-        cmd = default_command if default_command is not None else list(DEFAULT_COMMAND)
+        command_args = list(args.command_args or [])
+        # A "--" directly before the command is the option separator, not part
+        # of it.
+        if command_args and command_args[0] == "--":
+            command_args = command_args[1:]
+        if command_args:
+            cmd = command_args
+        else:
+            cmd = default_command if default_command is not None else list(DEFAULT_COMMAND)
 
     # --- Run ------------------------------------------------------------------------
     cleanup_temp_files()

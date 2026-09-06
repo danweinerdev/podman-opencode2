@@ -87,7 +87,11 @@ the launcher from the host workspace root.
   literal value. Never place provider secrets in `env.set`; supported provider
   API keys use a configured `provider_secrets` entry when selected, then fall
   back to set host variables. Never opt a project into secrets it does not
-  require.
+  require. Manage the Podman secrets themselves from the host with
+  `opencode-container secrets add NAME [--in FILE|-]` and `secrets remove
+  NAME`, which create/delete the secret and add/drop the name in the current
+  workspace's `provider_secrets` in one step (known provider names only; the
+  value is never echoed or placed on a command line).
 - `persistence.data_volume` defaults to a CWD-derived per-project named volume,
   `opencode2-data-<cwd-hash>`. The pinned preview stores provider logins and
   sessions in one SQLite database and UI preferences under `XDG_STATE_HOME`, so
@@ -115,9 +119,9 @@ the launcher from the host workspace root.
 - During an image build, the launcher optionally validates the host's shared
   `opencode2/local-providers.json`, mounts only that file into the build, and
   bakes its canonical JSON as `/opt/opencode/config/opencode/opencode.json`.
-  Its SHA-256 invalidates the relevant build layer. Changes require `--rebuild`;
-  absent catalogs remain absent, and secrets belong in Podman secrets rather
-  than this image layer.
+  Its SHA-256 invalidates the relevant build layer. Changes require
+  `opencode-container build --force`; absent catalogs remain absent, and
+  secrets belong in Podman secrets rather than this image layer.
 - `network`, `capabilities`, and the restricted `runtime_args` list control the
   Podman sandbox. Allowed runtime arguments are `--add-host=`, `--pids-limit=`,
   and `--ulimit=` forms only.

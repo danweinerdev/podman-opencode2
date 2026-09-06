@@ -35,6 +35,21 @@ if argv[:2] == ["secret", "exists"]:
     name = argv[2] if len(argv) > 2 else ""
     sys.exit(0 if f",{name}," in f",{available}," else 1)
 
+if argv[:2] == ["secret", "create"]:
+    if len(argv) < 4 or argv[3] != "-":
+        print(f"unexpected podman invocation: {' '.join(argv)}", file=sys.stderr)
+        sys.exit(1)
+    with open(os.environ["SECRET_LOG"], "a", encoding="utf-8") as stream:
+        stream.write(f"create {argv[2]}\\n")
+    with open(os.environ["SECRET_VALUE_LOG"], "wb") as stream:
+        stream.write(sys.stdin.buffer.read())
+    sys.exit(0)
+
+if argv[:2] == ["secret", "rm"]:
+    with open(os.environ["SECRET_LOG"], "a", encoding="utf-8") as stream:
+        stream.write(f"rm {argv[2]}\\n")
+    sys.exit(0)
+
 if argv and argv[0] == "run":
     with open(os.environ["ARGV_LOG"], "w", encoding="utf-8") as stream:
         for arg in argv:
@@ -111,6 +126,8 @@ class Suite:
         self.argv_log = tmp / "argv.log"
         self.env_log = tmp / "env.log"
         self.build_argv_log = tmp / "build-argv.log"
+        self.secret_log = tmp / "secret.log"
+        self.secret_value_log = tmp / "secret-value"
         for path in (self.bin, self.workspace, self.test_home):
             path.mkdir()
         self._write_mocks()
@@ -148,6 +165,8 @@ class Suite:
         env["ARGV_LOG"] = str(self.argv_log)
         env["ENV_LOG"] = str(self.env_log)
         env["BUILD_ARGV_LOG"] = str(self.build_argv_log)
+        env["SECRET_LOG"] = str(self.secret_log)
+        env["SECRET_VALUE_LOG"] = str(self.secret_value_log)
         if extra:
             env.update(extra)
         return env
@@ -158,9 +177,16 @@ class Suite:
         args: tuple[str, ...] = (),
         via_path: bool = False,
         extra_env: dict[str, str] | None = None,
+        stdin: int | None = None,
+        input_text: str | None = None,
     ) -> subprocess.CompletedProcess:
         cmd = ["opencode-container", *args] if via_path else [str(LAUNCHER), *args]
+        if input_text is not None:
+            return subprocess.run(cmd, cwd=cwd, env=self.base_env(extra_env),
+                                  input=input_text,
+                                  capture_output=True, text=True, check=False)
         return subprocess.run(cmd, cwd=cwd, env=self.base_env(extra_env),
+                              stdin=stdin,
                               capture_output=True, text=True, check=False)
 
     def run_ok(
@@ -169,8 +195,10 @@ class Suite:
         args: tuple[str, ...] = (),
         via_path: bool = False,
         extra_env: dict[str, str] | None = None,
+        stdin: int | None = None,
+        input_text: str | None = None,
     ) -> subprocess.CompletedProcess:
-        proc = self.run(cwd, args, via_path, extra_env)
+        proc = self.run(cwd, args, via_path, extra_env, stdin, input_text)
         if proc.returncode != 0:
             sys.stderr.write(proc.stdout)
             sys.stderr.write(proc.stderr)
@@ -184,9 +212,11 @@ class Suite:
         args: tuple[str, ...] = (),
         via_path: bool = False,
         extra_env: dict[str, str] | None = None,
+        stdin: int | None = None,
+        input_text: str | None = None,
         stderr_contains: tuple[str, ...] = (),
     ) -> subprocess.CompletedProcess:
-        proc = self.run(cwd, args, via_path, extra_env)
+        proc = self.run(cwd, args, via_path, extra_env, stdin, input_text)
         if proc.returncode == 0:
             fail(reject)
         for needle in stderr_contains:
@@ -208,6 +238,14 @@ class Suite:
 
     def env_lines(self) -> list[str]:
         return self._lines(self.env_log)
+
+    def secret_lines(self) -> list[str]:
+        if not self.secret_log.exists():
+            return []
+        return self.secret_log.read_text(encoding="utf-8").splitlines()
+
+    def secret_value(self) -> bytes:
+        return self.secret_value_log.read_bytes()
 
     def has_line(self, lines: list[str], needle: str) -> None:
         if needle not in lines:
@@ -700,6 +738,176 @@ class Suite:
         self.no_line(argv, "OPENAI_API_KEY")
         self.no_substring(argv, "must-not-be-forwarded")
 
+    def _secrets_subcommand(self, default_home: Path, default_workspace: Path) -> None:
+        # The secrets subcommand manages Podman provider secrets and the
+        # workspace provider_secrets opt-in from the host, without launching a
+        # container. Only known provider names are accepted.
+        self.argv_log.unlink(missing_ok=True)
+        self.secret_log.unlink(missing_ok=True)
+        self.secret_value_log.unlink(missing_ok=True)
+        workspace = self.tmp / "secrets-workspace"
+        workspace.mkdir()
+        key_file = self.tmp / "api-key.txt"
+        key_file.write_text("sk-test-key\n", encoding="utf-8")
+        env = {"HOME": str(default_home)}
+
+        # add from a file: creates the secret over stdin (one trailing newline
+        # dropped) and creates the workspace config with the opt-in.
+        self.run_ok(workspace, args=("secrets", "add", "openai-api-key", "--in", str(key_file)),
+                    extra_env=env, stdin=subprocess.DEVNULL)
+        self.has_line(self.secret_lines(), "create openai-api-key")
+        if self.secret_value() != b"sk-test-key":
+            fail("file secret value was not passed to podman verbatim (newline dropped)")
+        if self.argv_log.exists():
+            fail("secrets add launched a container")
+        cfg = load_json(workspace / ".opencode-sandbox.json")
+        if cfg != {"schema_version": 1, "provider_secrets": ["openai-api-key"]}:
+            fail(f"secrets add did not hook up the workspace config: {cfg}")
+
+        # An existing secret is rejected before prompting, without touching
+        # the config.
+        before = (workspace / ".opencode-sandbox.json").read_text(encoding="utf-8")
+        self.run_fail(workspace, "launcher accepted secrets add for an existing secret",
+                      args=("secrets", "add", "openai-api-key", "--in", str(key_file)),
+                      extra_env={**env, "AVAILABLE_SECRETS": "openai-api-key"},
+                      stdin=subprocess.DEVNULL,
+                      stderr_contains=("already exists",))
+        if (workspace / ".opencode-sandbox.json").read_text(encoding="utf-8") != before:
+            fail("secrets add rewrote the config for an existing secret")
+
+        # Without --in and without a terminal the prompt is refused, not
+        # silently read from stdin.
+        self.run_fail(workspace, "launcher read a secret from non-tty stdin without --in",
+                      args=("secrets", "add", "deepseek-api-key"),
+                      extra_env=env, stdin=subprocess.DEVNULL,
+                      stderr_contains=("--in",))
+        if "create deepseek-api-key" in self.secret_lines():
+            fail("secrets add created a secret with no usable value source")
+
+        # --in - reads the value from stdin; a newline-less file is verbatim.
+        self.run_ok(workspace, args=("secrets", "add", "deepseek-api-key", "--in", "-"),
+                    extra_env=env, input_text="sk-piped-key\n")
+        self.has_line(self.secret_lines(), "create deepseek-api-key")
+        if self.secret_value() != b"sk-piped-key":
+            fail("stdin secret value was not passed through")
+        raw_file = self.tmp / "raw-key.txt"
+        raw_file.write_bytes(b"sk-no-newline")
+        self.run_ok(workspace, args=("secrets", "add", "groq-api-key", "--in", str(raw_file)),
+                    extra_env=env, stdin=subprocess.DEVNULL)
+        if self.secret_value() != b"sk-no-newline":
+            fail("newline-less file value was mangled")
+        cfg = load_json(workspace / ".opencode-sandbox.json")
+        if cfg["provider_secrets"] != ["openai-api-key", "deepseek-api-key", "groq-api-key"]:
+            fail(f"provider_secrets order/content wrong after adds: {cfg}")
+
+        # Empty values and unknown names are rejected before any podman call.
+        empty_file = self.tmp / "empty-key.txt"
+        empty_file.write_bytes(b"")
+        self.run_fail(workspace, "launcher accepted an empty secret value",
+                      args=("secrets", "add", "anthropic-api-key", "--in", str(empty_file)),
+                      extra_env=env, stdin=subprocess.DEVNULL,
+                      stderr_contains=("must not be empty",))
+        self.run_fail(workspace, "launcher accepted an unknown secret name",
+                      args=("secrets", "add", "not-a-provider-key", "--in", str(key_file)),
+                      extra_env=env, stdin=subprocess.DEVNULL,
+                      stderr_contains=("unknown provider secret name",))
+        for name in ("anthropic-api-key", "not-a-provider-key"):
+            if f"create {name}" in self.secret_lines():
+                fail(f"secrets add created a secret for a rejected input: {name}")
+
+        # The openapi-api-key alias normalizes to openai-api-key without
+        # duplicating the config entry.
+        self.run_ok(workspace, args=("secrets", "add", "openapi-api-key", "--in", str(key_file)),
+                    extra_env=env, stdin=subprocess.DEVNULL)
+        if self.count(self.secret_lines(), "create openai-api-key") != 2:
+            fail("alias add did not create the canonical podman secret")
+        cfg = load_json(workspace / ".opencode-sandbox.json")
+        if cfg["provider_secrets"] != ["openai-api-key", "deepseek-api-key", "groq-api-key"]:
+            fail(f"alias add duplicated or misnamed the config entry: {cfg}")
+
+        # remove: podman rm plus config cleanup; the last entry drops the key.
+        self.run_ok(workspace, args=("secrets", "remove", "openai-api-key"),
+                    extra_env={**env, "AVAILABLE_SECRETS": "openai-api-key"},
+                    stdin=subprocess.DEVNULL)
+        self.has_line(self.secret_lines(), "rm openai-api-key")
+        cfg = load_json(workspace / ".opencode-sandbox.json")
+        if cfg != {"schema_version": 1,
+                   "provider_secrets": ["deepseek-api-key", "groq-api-key"]}:
+            fail(f"unexpected config after secrets remove: {cfg}")
+        self.run_ok(workspace, args=("secrets", "remove", "deepseek-api-key"),
+                    extra_env={**env, "AVAILABLE_SECRETS": "deepseek-api-key"},
+                    stdin=subprocess.DEVNULL)
+        self.run_ok(workspace, args=("secrets", "remove", "groq-api-key"),
+                    extra_env={**env, "AVAILABLE_SECRETS": "groq-api-key"},
+                    stdin=subprocess.DEVNULL)
+        self.has_line(self.secret_lines(), "rm groq-api-key")
+        cfg = load_json(workspace / ".opencode-sandbox.json")
+        if cfg != {"schema_version": 1}:
+            fail(f"removing the last secret should drop the provider_secrets key: {cfg}")
+
+        # Removing a secret present in neither store is a clean no-op.
+        self.run_ok(workspace, args=("secrets", "remove", "cohere-api-key"),
+                    extra_env=env, stdin=subprocess.DEVNULL)
+        cfg = load_json(workspace / ".opencode-sandbox.json")
+        if cfg != {"schema_version": 1}:
+            fail(f"no-op remove modified the workspace config: {cfg}")
+        if "rm cohere-api-key" in self.secret_lines():
+            fail("secrets remove called podman rm for an absent secret")
+
+        # An existing config keeps every other key; the opt-in is the only edit.
+        rich = {
+            "schema_version": 1,
+            "image": "opencode2:test",
+            "workspace": ".",
+            "provider_secrets": ["perplexity-api-key"],
+            "env": {"set": {"TZ": "UTC"}},
+            "network": "none",
+        }
+        write_json(workspace / ".opencode-sandbox.json", rich)
+        self.run_ok(workspace, args=("secrets", "add", "together-api-key", "--in", str(key_file)),
+                    extra_env=env, stdin=subprocess.DEVNULL)
+        cfg = load_json(workspace / ".opencode-sandbox.json")
+        expected = dict(rich)
+        expected["provider_secrets"] = ["perplexity-api-key", "together-api-key"]
+        if cfg != expected:
+            fail(f"secrets add clobbered existing config keys: {cfg}")
+        self.run_ok(workspace, args=("secrets", "remove", "together-api-key"),
+                    extra_env={**env, "AVAILABLE_SECRETS": "together-api-key"},
+                    stdin=subprocess.DEVNULL)
+        cfg = load_json(workspace / ".opencode-sandbox.json")
+        if cfg != rich:
+            fail(f"secrets remove did not restore the config: {cfg}")
+
+        # A stale config entry (secret already gone) still gets cleaned up.
+        before_log = self.secret_lines()
+        self.run_ok(workspace, args=("secrets", "remove", "perplexity-api-key"),
+                    extra_env=env, stdin=subprocess.DEVNULL)
+        cfg = load_json(workspace / ".opencode-sandbox.json")
+        if cfg != {k: v for k, v in rich.items() if k != "provider_secrets"}:
+            fail(f"stale entry removal did not drop the emptied key: {cfg}")
+        if self.secret_lines() != before_log:
+            fail("stale entry removal called podman rm")
+
+        # "run --" keeps "secrets" a literal container command.
+        self.run_ok(workspace, args=("run", "--", "secrets", "add", "openai-api-key"),
+                    extra_env=env, stdin=subprocess.DEVNULL)
+        self.has_line(self.argv(), "secrets")
+        self.has_line(self.argv(), "add")
+        if "create openai-api-key" not in self.secret_lines() or \
+                self.count(self.secret_lines(), "create openai-api-key") != 2:
+            fail("run -- secrets must not invoke the secrets subcommand")
+
+        # The removed top-level launcher options are rejected by the parser.
+        self.run_fail(workspace, "launcher accepted a removed top-level launcher option",
+                      args=("--rebuild", "secrets", "add", "openai-api-key", "--in", str(key_file)),
+                      extra_env=env, stdin=subprocess.DEVNULL,
+                      stderr_contains=("unrecognized arguments: --rebuild",))
+
+        # A bare secrets argument is a usage error.
+        self.run_fail(workspace, "launcher accepted a bare secrets subcommand",
+                      args=("secrets",), extra_env=env, stdin=subprocess.DEVNULL,
+                      stderr_contains=("required",))
+
     def _data_volume_override(self, default_home: Path, default_workspace: Path) -> None:
         # The central data volume can be overridden without depending on the
         # launcher's own installation directory.
@@ -788,25 +996,39 @@ class Suite:
                       via_path=True, extra_env=env,
                       stderr_contains="invalid local provider catalog")
 
-    def _bare_separator(self) -> Path:
-        # A bare `--` separator (no following arguments) passes through to the
-        # image's own default command: no project default, no "shell" shortcut,
-        # nothing extra.
+    def _run_command_passthrough(self) -> Path:
+        # "run" is the default action: a bare invocation, "run", and a bare
+        # trailing "--" all pass the configured command. Extra arguments after
+        # "run" override the configured command.
         workspace = self.tmp / "bare-separator"
         workspace.mkdir()
         write_json(workspace / ".opencode-sandbox.json",
                    {"image": "opencode2:test", "workspace": ".", "command": ["/bin/true"]})
-        self.run_ok(workspace, args=("--",))
+        for args in ((), ("run",), ("run", "--")):
+            self.run_ok(workspace, args=args)
+            argv = self.argv()
+            self.has_line(argv, "opencode2:test")
+            self.has_line(argv, "/bin/true")
+        # A bare top-level -- is not an invocation; it is a usage error.
+        self.run_fail(workspace, "launcher accepted a bare top-level --",
+                      args=("--",),
+                      stderr_contains=("unrecognized arguments",))
+        # Extra arguments after run override the configured command.
+        self.run_ok(workspace, args=("run", "ls", "-la"))
         argv = self.argv()
-        self.has_line(argv, "opencode2:test")
-        # Every argument after the image reference would be a command; there
-        # must be none.
         index = argv.index("opencode2:test")
         tail = [line for line in argv[index + 1:] if line != "opencode2:test"]
-        if any(tail):
-            fail("bare -- should not pass any command to the container")
+        if tail != ["ls", "-la"]:
+            fail(f"run command override was mangled: {tail}")
+        # The argparse separator passes dash-leading commands through.
+        self.run_ok(workspace, args=("run", "--", "-dash-cmd"))
+        argv = self.argv()
+        index = argv.index("opencode2:test")
+        tail = [line for line in argv[index + 1:] if line != "opencode2:test"]
+        if tail != ["-dash-cmd"]:
+            fail(f"run -- -dash-cmd was mangled: {tail}")
         key = sha256_16(str(workspace))
-        self.has_line(argv, f"{workspace}:/workspace/{key}")
+        self.has_line(self.argv(), f"{workspace}:/workspace/{key}")
         return workspace
 
     def _dangling_image(self, workspace: Path) -> None:
@@ -815,8 +1037,8 @@ class Suite:
         self.argv_log.unlink(missing_ok=True)
         self.build_argv_log.unlink(missing_ok=True)
         self.run_fail(workspace, "launcher accepted a dangling --image",
-                      args=("--image",),
-                      stderr_contains="--image requires a value")
+                      args=("run", "--image"),
+                      stderr_contains="expected one argument")
         if self.argv_log.exists() or self.build_argv_log.exists():
             fail("launcher reached podman with a dangling --image")
 
@@ -847,17 +1069,21 @@ class Suite:
         if self.argv_log.exists():
             fail("launcher reached podman with a non-array command")
 
-    def _explicit_shell_argument(self, workspace: Path) -> None:
-        # `-- shell` runs the literal `shell` program; only the unseparated
-        # `shell` argument takes the bash -l shortcut.
+    def _shell_subcommand(self, workspace: Path) -> None:
+        # The "shell" subcommand drops into a login bash; "run -- shell" runs
+        # the literal "shell" program instead.
         alias_workspace = self.tmp / "shell-alias"
         alias_workspace.mkdir()
         shutil.copyfile(workspace / ".opencode-sandbox.json",
                         alias_workspace / ".opencode-sandbox.json")
-        self.run_ok(alias_workspace, args=("--", "shell"))
+        self.run_ok(alias_workspace, args=("run", "--", "shell"))
         argv = self.argv()
         self.has_line(argv, "shell")
         self.no_line(argv, "bash")
+        self.run_ok(alias_workspace, args=("shell",))
+        argv = self.argv()
+        self.has_line(argv, "bash")
+        self.has_line(argv, "-l")
 
     def _image_fqn_build(self) -> None:
         # --image selects a fully qualified name to build from the context
@@ -879,7 +1105,7 @@ class Suite:
                       "context": str(context)},
             "command": ["/bin/true"],
         })
-        self.run_ok(workspace, args=("--rebuild", "--image", image),
+        self.run_ok(workspace, args=("run", "--image", image),
                     extra_env={"PODMAN_IMAGE_EXISTS": "0"})
         build_argv = self.build_argv()
         self.has_line(build_argv, "-t")
@@ -893,17 +1119,39 @@ class Suite:
         self.no_substring(argv, f"{image}:latest")
 
         # A missing image is not rebuilt when the hash-pinned reference already
-        # exists and --rebuild is not passed.
+        # exists.
         self.build_argv_log.unlink(missing_ok=True)
-        self.run_ok(workspace, args=("--image", image),
+        self.run_ok(workspace, args=("run", "--image", image),
                     extra_env={"PODMAN_IMAGE_EXISTS": "1"})
         if self.build_argv_log.exists():
             fail("launcher rebuilt despite an existing hash-pinned image")
         self.has_line(self.argv(), f"{image}:{sha}")
 
+        # The build subcommand never runs a container, and without --force it
+        # skips an existing image.
+        self.argv_log.unlink(missing_ok=True)
+        self.run_ok(workspace, args=("build", "--image", image),
+                    extra_env={"PODMAN_IMAGE_EXISTS": "1"})
+        if self.argv_log.exists():
+            fail("build subcommand ran a container")
+        if self.build_argv_log.exists():
+            fail("build without --force rebuilt an existing image")
+
+        # build --force rebuilds even when the image exists, without running.
+        self.run_ok(workspace, args=("build", "--force", "--image", image),
+                    extra_env={"PODMAN_IMAGE_EXISTS": "1"})
+        build_argv = self.build_argv()
+        self.has_line(build_argv, "-t")
+        if self.count(build_argv, "-t") != 2:
+            fail("expected two -t tags on the forced build")
+        self.has_line(build_argv, f"{image}:{sha}")
+        self.has_line(build_argv, f"{image}:latest")
+        if self.argv_log.exists():
+            fail("build --force ran a container")
+
         # A tag on the --image name is rejected rather than silently mangled.
         self.run_fail(workspace, "launcher accepted a tagged --image name",
-                      args=("--image", f"{image}:tagged"),
+                      args=("run", "--image", f"{image}:tagged"),
                       extra_env={"PODMAN_IMAGE_EXISTS": "0"},
                       stderr_contains="without a tag")
 
@@ -915,9 +1163,25 @@ class Suite:
                         build={"containerfile": str(nongit / "Containerfile"),
                                "context": str(nongit)})
         self.run_fail(workspace, "launcher accepted --image with a non-git build context",
-                      args=("--image", image),
+                      args=("build", "--image", image),
                       extra_env={"PODMAN_IMAGE_EXISTS": "0"},
                       stderr_contains="git repository")
+
+    def _build_requires_build_config(self) -> None:
+        # build --force with no build block fails cleanly and never runs a
+        # container.
+        workspace = self.tmp / "build-no-block"
+        workspace.mkdir()
+        self.argv_log.unlink(missing_ok=True)
+        self.build_argv_log.unlink(missing_ok=True)
+        self.run_fail(workspace, "build succeeded without a build block",
+                      args=("build", "--force"),
+                      extra_env={"PODMAN_IMAGE_EXISTS": "1"},
+                      stderr_contains="no build block is configured to rebuild")
+        if self.argv_log.exists():
+            fail("build ran a container despite a missing build block")
+        if self.build_argv_log.exists():
+            fail("build reached podman build without a build block")
 
 
 def main() -> None:
@@ -949,14 +1213,16 @@ def main() -> None:
         suite._malformed_global_router(default_home, default_workspace, global_link, router)
         suite._partial_config(default_home, default_workspace)
         suite._podman_secrets(default_home, default_workspace)
+        suite._secrets_subcommand(default_home, default_workspace)
         suite._data_volume_override(default_home, default_workspace)
         suite._provider_catalog_build()
-        bare_workspace = suite._bare_separator()
+        bare_workspace = suite._run_command_passthrough()
         suite._dangling_image(bare_workspace)
         suite._non_utf8_config()
         suite._command_must_be_array()
-        suite._explicit_shell_argument(bare_workspace)
+        suite._shell_subcommand(bare_workspace)
         suite._image_fqn_build()
+        suite._build_requires_build_config()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
