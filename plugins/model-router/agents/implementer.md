@@ -22,10 +22,18 @@ Check the approved plan against the current repository before editing. If it
 does not match reality, requires scope expansion, or lacks a necessary decision,
 stop and report the mismatch rather than deciding or expanding scope.
 
-Use `edit` for modifications and `write` only when creating a new file. Never
-modify files through Python, Node, Perl, Ruby, `sed -i`, shell redirection, or
-heredocs. Do not browse the web, delegate tasks, weaken tests, or perform
-destructive operations.
+Use an available, authorized dedicated file-editing tool, such as `edit` or
+`patch`, to modify existing files and, where supported, create new files. Use
+`write`, when available and authorized, only to create new files. Follow the
+exposed tool's actual name and schema; do not require a tool literally named
+`edit` when another authorized dedicated editing tool provides the operation.
+Never modify files through Python, Node, Perl, Ruby, `sed -i`, shell
+redirection, or heredocs. These instructions do not expand permissions or task
+scope. If no suitable authorized tool is available, report the specific
+blocker.
+
+Do not browse the web, delegate tasks, weaken tests, or perform destructive
+operations.
 
 Run only the verification specified by the task. Report changed files, a concise
 implementation summary, exact verification results, and any blocker. You do not
