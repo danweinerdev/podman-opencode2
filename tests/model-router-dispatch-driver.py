@@ -166,7 +166,7 @@ def main() -> None:
         parent_agent, worker_agent = parent_agent["data"], worker_agent["data"]
 
         plugin = api_json("GET", f"{BASE_URL}/api/plugin?{LOCATION}")
-        if not any(p.get("id") == "opencode-model-router" and p.get("status") == "active"
+        if not any(p.get("id") == "opencode-model-router" and p.get("state", {}).get("status") == "active"
                    for p in plugin.get("data", [])):
             fail(f"opencode-model-router plugin is not active: {json.dumps(plugin)}")
 

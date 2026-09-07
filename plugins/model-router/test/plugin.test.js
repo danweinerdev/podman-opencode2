@@ -119,9 +119,9 @@ test("container config registers the router through the native v2 loader", async
   assert.equal(Array.isArray(config.permissions), true)
   assert.equal(Array.isArray(config.plugins), true)
   const entry = config.plugins.find(
-    (item) => item?.package === "file:///opt/opencode/plugins/model-router/index.js",
+    (item) => item?.package === "file:///opt/opencode/plugins/model-router",
   )
-  assert.ok(entry, "native v2 model-router entry is present")
+  assert.ok(entry, "pinned runtime rejects configured plugin files; register model-router by directory URL")
   assert.equal(typeof entry.options, "object")
   assert.equal(entry.options.schema_version, 1)
   assert.equal(entry.options.pin_default_agent_model, false)

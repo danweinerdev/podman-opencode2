@@ -34,7 +34,7 @@
   },
   "plugins": [
     {
-      "package": "file:///opt/opencode/plugins/model-router/index.js",
+      "package": "file:///opt/opencode/plugins/model-router",
       "options": {
         "schema_version": 1,
         "pin_default_agent_model": false,
