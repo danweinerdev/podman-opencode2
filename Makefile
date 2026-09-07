@@ -25,6 +25,9 @@ base:
 dev:
 	podman build --pull=never \
 		--build-arg "BASE_IMAGE=$(BASE_IMAGE)" \
+		--build-arg "USER_UID=$$(id -u)" \
+		--build-arg "USER_GID=$$(id -g)" \
+		--build-arg "USERNAME=$$(id -un)" \
 		-t $(DEV_IMAGE) -f Containerfile.dev .
 
 # Full rebuild: base, then dev.

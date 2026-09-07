@@ -31,7 +31,7 @@ ENV GOFLAGS=-buildvcs=false
 # portable .opencode-plugin tree (plugin.json + skills/ + shared/) alongside it.
 # Its collaboration prompts are rendered by the skills into the restricted
 # native workers, so the separate Claude-oriented agent catalog is not copied.
-ARG SDD_PLANNER_REF=cce260a596fc9b3dc78bd273699a3f3617460aaa
+ARG SDD_PLANNER_REF=103abe038d896d40adeeaa9d900cdda2fb6c2ae0
 RUN set -eux; \
     git clone --filter=blob:none --no-tags \
         https://github.com/danweinerdev/claude-sdd-planner.git /tmp/claude-sdd-planner; \
@@ -109,7 +109,7 @@ FROM docker.io/library/fedora:44
 ARG USER_UID=1000
 ARG USER_GID=1000
 ARG USERNAME=dev
-ARG OPENCODE2_VERSION=0.0.0-beta-17823
+ARG OPENCODE2_VERSION=0.0.0-beta-19234
 
 # Runtime + debug utilities. Node 24 powers the OpenCode2 CLI npm package and the
 # model-router plugin; lldb ships the lldb-dap provider the debug MCP server
