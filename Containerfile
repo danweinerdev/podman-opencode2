@@ -120,14 +120,16 @@ RUN dnf install -y --setopt=install_weak_deps=False \
         jq ripgrep fd-find less vim nano ShellCheck \
         gdb lldb strace ltrace \
         procps-ng file unzip xz tar diffutils \
-        python3 \
+        python3 python3-pip \
         shadow-utils \
         openssl-libs zlib \
     && command -v git >/dev/null \
     && command -v shellcheck >/dev/null \
     && git --version \
     && shellcheck --version \
-    && dnf clean all
+    && dnf clean all; \
+    python3 -m pip install --no-cache-dir --root-user-action ignore \
+        PyYAML;
 
 # OpenCode2 CLI, pinned via the @opencode-ai/cli npm package. Its postinstall
 # script materializes the platform binary from the platform-specific optional
