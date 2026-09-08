@@ -11,7 +11,7 @@
 #   /opt/opencode/plugins/<code-graph|debug|sdd>  OpenCode skills/plugin assets
 #   /opt/opencode/plugins/model-router            native v2 model-router plugin
 #   /opt/opencode/sandbox/                         launcher + config templates
-#   /opt/opencode/config/opencode/opencode.json    optional local providers
+#   /opt/opencode/config/opencode/opencode.json    optional runtime-mounted local providers
 #   /opt/opencode/config/opencode/agent/*.md      baked agent definitions
 #   /opt/opencode/config/opencode/command/*.md    baked slash commands
 #   /etc/opencode/container-config.json           baked OPENCODE_CONFIG
@@ -110,6 +110,9 @@ ARG USER_UID=1000
 ARG USER_GID=1000
 ARG USERNAME=dev
 ARG OPENCODE2_VERSION=0.0.0-beta-19234
+# This opaque cache key records only the launcher-validated host catalog's
+# digest. The catalog bytes are never available to the image build.
+ARG LOCAL_PROVIDERS_SHA256=absent
 
 # Runtime + debug utilities. Node 24 powers the OpenCode2 CLI npm package and the
 # model-router plugin; lldb ships the lldb-dap provider the debug MCP server
@@ -189,42 +192,10 @@ RUN chmod 0755 /opt/opencode/sandbox/opencode-container \
 # second, less-restricted agent catalog.
 RUN mkdir -p /opt/opencode/config/opencode/agent /opt/opencode/config/opencode/command
 COPY plugins/model-router/agents/*.md /opt/opencode/config/opencode/agent/
-
-# The host catalog is deliberately optional and is never part of the build
-# context. The launcher exposes only that file at build time and supplies its
-# digest above. Verify the mounted bytes before baking them into OpenCode's
-# exact global-config filename. A digest without a mount (or vice versa) fails
-# closed instead of silently producing an unexpected image.
-ARG LOCAL_PROVIDERS_SHA256=absent
-RUN set -eux; \
-    case "${LOCAL_PROVIDERS_SHA256}" in \
-        absent) \
-            [ ! -e /run/opencode2-build-config/local-providers.json ]; \
-            ;; \
-        ''|*[!0-9a-f]*) \
-            printf 'invalid LOCAL_PROVIDERS_SHA256: %s\n' "${LOCAL_PROVIDERS_SHA256}" >&2; \
-            exit 1; \
-            ;; \
-        *) \
-            [ "${#LOCAL_PROVIDERS_SHA256}" -eq 64 ]; \
-            [ -f /run/opencode2-build-config/local-providers.json ]; \
-            printf '%s  %s\n' "${LOCAL_PROVIDERS_SHA256}" \
-                /run/opencode2-build-config/local-providers.json | sha256sum -c -; \
-            jq -e -s 'length == 1 and (.[0] | \
-                type == "object" and ((keys - ["$schema", "provider"]) | length == 0) and \
-                (.provider | type == "object" and length > 0 and all(.[]; \
-                    type == "object" and .npm == "@ai-sdk/openai-compatible" and \
-                    (.options.baseURL | type == "string" and length > 0) and \
-                    (.models | type == "object" and length > 0 and \
-                        all(.[]; type == "object")))) and \
-                ([.. | objects | keys[]] | all(.[]; \
-                    test("^(api[-_]?key|authorization|headers|token|access[-_]?token|secret|client[-_]?secret|password|credential|credentials)$"; "i") | not)))' \
-                /run/opencode2-build-config/local-providers.json >/dev/null; \
-            jq -S . /run/opencode2-build-config/local-providers.json \
-                > /opt/opencode/config/opencode/opencode.json; \
-            chmod 0644 /opt/opencode/config/opencode/opencode.json; \
-            ;; \
-    esac
+# Keep the runtime bind-mount destination a file even when no local catalog is
+# present. This contains no provider configuration.
+RUN touch /opt/opencode/config/opencode/opencode.json \
+    && chmod 0644 /opt/opencode/config/opencode/opencode.json
 
 # code-graph slash commands become OpenCode commands.
 COPY --from=mcp-builder /opt/build/code-graph-plugin/opencode-plugin/commands/*.md /opt/opencode/config/opencode/command/
@@ -251,6 +222,10 @@ ENV OPENCODE_CONFIG=/etc/opencode/container-config.json \
     OPENCODE_DISABLE_CLAUDE_CODE_SKILLS=1 \
     OPENCODE_DISABLE_AUTOUPDATE=1 \
     PATH=/opt/mcp/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Changing the host catalog changes this metadata layer when a sandbox image is
+# rebuilt, without copying the catalog's contents into the image.
+LABEL io.opencode.local-providers-sha256="${LOCAL_PROVIDERS_SHA256}"
 
 USER ${USERNAME}
 WORKDIR /home/${USERNAME}

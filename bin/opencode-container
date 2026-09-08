@@ -91,7 +91,8 @@ GLOBAL_GIT_CONFIG_TARGET: Final[str] = "/run/opencode/gitconfig"
 ROUTER_GLOBAL_TARGET: Final[str] = "/run/opencode/model-router-global.json"
 SANDBOX_TARGET: Final[str] = "/run/opencode/sandbox.json"
 CONTAINER_SOCKET_TARGET: Final[str] = "/run/opencode-container-engine.sock"
-PROVIDERS_BUILD_TARGET: Final[str] = "/run/opencode2-build-config/local-providers.json"
+LOCAL_PROVIDERS_TARGET: Final[str] = "/opt/opencode/config/opencode/opencode.json"
+LOCAL_PROVIDERS_LABEL: Final[str] = "io.opencode.local-providers-sha256"
 OPENCODE_DATA_MOUNT: Final[str] = "/var/lib/opencode-data"
 
 # Provider API keys auto-forwarded when set in the host environment. This is
@@ -215,15 +216,26 @@ def jq_string(value: Any) -> str:
 
 
 def parse_single_json_object(raw: bytes, label: str, path: str) -> dict[str, Any]:
-    """Parse a file that must contain exactly one JSON object document."""
+    """Parse one JSON object document, rejecting duplicate object keys."""
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
         die(f"invalid {label}: {path}")
+
+    def object_without_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate object key")
+            result[key] = value
+        return result
+
     body = text.lstrip()
     try:
-        value, end = json.JSONDecoder().raw_decode(body)
-    except json.JSONDecodeError:
+        value, end = json.JSONDecoder(
+            object_pairs_hook=object_without_duplicates
+        ).raw_decode(body)
+    except ValueError:
         die(f"invalid {label}: {path}")
     if body[end:].strip():
         die(f"invalid {label}: {path}")
@@ -289,6 +301,29 @@ def podman_quiet(*args: str) -> bool:
         check=False,
     )
     return proc.returncode == 0
+
+
+def podman_image_label(image: str, label: str) -> str | None:
+    """Return one image label, or None when the image has no readable value."""
+    proc = subprocess.run(
+        [
+            podman_executable(),
+            "image",
+            "inspect",
+            "--format",
+            "{{index .Labels \"" + label + "\"}}",
+            image,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        errors="replace",
+        check=False,
+    )
+    if proc.returncode != 0:
+        return None
+    value = proc.stdout.rstrip("\n")
+    return value or None
 
 
 def xdg_path(name: str, default: str) -> str:
@@ -409,7 +444,7 @@ def iter_object_keys(node: Any) -> Iterator[str]:
 
 
 def local_providers_valid(catalog: dict[str, Any]) -> bool:
-    """Validate the constrained provider-only catalog shape (build-time only)."""
+    """Validate the constrained provider-only catalog shape."""
     if set(catalog) - {"$schema", "provider"}:
         return False
     provider = catalog.get("provider")
@@ -445,6 +480,24 @@ def local_providers_valid(catalog: dict[str, Any]) -> bool:
                         return False
     # Obvious credential field names are rejected anywhere in the document.
     return not any(CREDENTIAL_KEY_RE.match(key) for key in iter_object_keys(catalog))
+
+
+def find_local_providers(config_home: str) -> tuple[str, str] | None:
+    """Validate and return the catalog's canonical path and content digest."""
+    path = config_home + "/opencode2/local-providers.json"
+    if not os.path.lexists(path):
+        return None
+    if not os.path.isfile(path):
+        die(f"local provider catalog is not a regular file: {path}")
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read()
+    except OSError:
+        die(f"unable to read local provider catalog: {path}")
+    catalog = parse_single_json_object(raw, "local provider catalog", path)
+    if not local_providers_valid(catalog):
+        die(f"invalid local provider catalog: {path}")
+    return os.path.realpath(path), hashlib.sha256(raw).hexdigest()
 
 
 # --- CLI -----------------------------------------------------------------------
@@ -835,6 +888,7 @@ def main(argv: Sequence[str] | None = None) -> NoReturn:
 
     global_router = find_global_router(config_home)
     global_git_config = find_global_git_config(home)
+    local_providers = find_local_providers(config_home)
     host_state = host_state_roots(config_home, data_home, state_home, cache_home, home)
 
     # --- Config loading + validation ------------------------------------------
@@ -925,6 +979,8 @@ def main(argv: Sequence[str] | None = None) -> NoReturn:
         die(f"workspace {workspace} overlaps the user-global model-router config")
     if global_git_config is not None and paths_overlap(workspace, global_git_config):
         die(f"workspace {workspace} overlaps the user-global Git config")
+    if local_providers is not None and paths_overlap(workspace, local_providers[0]):
+        die(f"workspace {workspace} overlaps the local provider catalog")
 
     # The CWD-derived project identity stays stable even when the launcher
     # itself lives elsewhere on PATH.
@@ -982,6 +1038,14 @@ def main(argv: Sequence[str] | None = None) -> NoReturn:
         image_tags = [image, args.image + ":latest"]
 
     image_exists = podman_quiet("image", "exists", image)
+    local_providers_sha = "absent" if local_providers is None else local_providers[1]
+    if image_exists and has_build_config and local_providers is not None:
+        # The catalog is runtime-mounted, but its digest is still recorded on
+        # launcher-built images. A changed catalog therefore triggers exactly
+        # one rebuild without making its bytes part of the image. Removing the
+        # file needs no rebuild because it simply removes the runtime mount.
+        if podman_image_label(image, LOCAL_PROVIDERS_LABEL) != local_providers_sha:
+            image_exists = False
 
     if args.force or not image_exists:
         if not has_build_config:
@@ -1011,56 +1075,12 @@ def main(argv: Sequence[str] | None = None) -> NoReturn:
             if not isinstance(value, str):
                 die(f"build.arg {key} must be a string")
             build_flags += ["--build-arg", f"{key}={value}"]
-
-        # A user-wide local-provider catalog is optional and build-time only. Keep
-        # it outside both this repository and the runtime mounts, validate its
-        # constrained provider-only shape, and expose only that one file to the
-        # image build. The digest is also a cache key and is verified again by
-        # the Containerfile.
-        providers_path = config_home + "/opencode2/local-providers.json"
-        providers_sha = "absent"
-        if os.path.lexists(providers_path):
-            if not os.path.isfile(providers_path):
-                die(f"local provider catalog is not a regular file: {providers_path}")
-            try:
-                with open(providers_path, "rb") as handle:
-                    raw = handle.read()
-            except OSError:
-                die(f"unable to read local provider catalog: {providers_path}")
-            catalog = parse_single_json_object(raw, "local provider catalog", providers_path)
-            if not local_providers_valid(catalog):
-                die(f"invalid local provider catalog: {providers_path}")
-            providers_path = os.path.realpath(providers_path)
-            # Mount only a canonical serialization of the validated object. Besides
-            # making formatting-only edits cache-neutral, this ensures duplicate
-            # keys or other discarded parser input cannot survive as hidden
-            # image-layer data.
-            tmp_dir = os.environ.get("TMPDIR") or "/tmp"
-            try:
-                fd, providers_build_path = tempfile.mkstemp(
-                    prefix="opencode2-local-providers.", suffix=".json", dir=tmp_dir
-                )
-            except OSError:
-                die(f"unable to create temporary file in {tmp_dir} for the local provider catalog")
-            TEMP_FILES.append(providers_build_path)
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as writer:
-                    writer.write(
-                        json.dumps(catalog, sort_keys=True, indent=2, ensure_ascii=False)
-                    )
-                    writer.write("\n")
-                os.chmod(providers_build_path, 0o600)
-            except OSError:
-                die(f"unable to write canonical local provider catalog: {providers_build_path}")
-            with open(providers_build_path, "rb") as handle:
-                providers_sha = hashlib.sha256(handle.read()).hexdigest()
-            build_flags += [
-                "--security-opt",
-                "label=disable",
-                "--volume",
-                f"{providers_build_path}:{PROVIDERS_BUILD_TARGET}:ro",
-            ]
-        build_flags += ["--build-arg", f"LOCAL_PROVIDERS_SHA256={providers_sha}"]
+        build_flags += [
+            "--build-arg",
+            f"LOCAL_PROVIDERS_SHA256={local_providers_sha}",
+            "--label",
+            f"{LOCAL_PROVIDERS_LABEL}={local_providers_sha}",
+        ]
 
         tag_flags: list[str] = []
         for tag in image_tags:
@@ -1173,6 +1193,11 @@ def main(argv: Sequence[str] | None = None) -> NoReturn:
             "-e",
             f"OPENCODE_MODEL_ROUTER_GLOBAL_CONFIG={ROUTER_GLOBAL_TARGET}",
         ]
+    if local_providers is not None:
+        run_flags += [
+            "-v",
+            f"{local_providers[0]}:{LOCAL_PROVIDERS_TARGET}:ro",
+        ]
     if config_present:
         run_flags += [
             "-v",
@@ -1241,6 +1266,8 @@ def main(argv: Sequence[str] | None = None) -> NoReturn:
             die(f"mount source {abs_source} overlaps the user-global model-router config")
         if global_git_config is not None and paths_overlap(abs_source, global_git_config):
             die(f"mount source {abs_source} overlaps the user-global Git config")
+        if local_providers is not None and paths_overlap(abs_source, local_providers[0]):
+            die(f"mount source {abs_source} overlaps the local provider catalog")
 
         target = entry.get("target")
         if target is None or target is False:
@@ -1413,6 +1440,8 @@ def main(argv: Sequence[str] | None = None) -> NoReturn:
             die(f"git metadata directory {git_common_dir} overlaps the user-global model-router config")
         if global_git_config is not None and paths_overlap(git_common_dir, global_git_config):
             die(f"git metadata directory {git_common_dir} overlaps the user-global Git config")
+        if local_providers is not None and paths_overlap(git_common_dir, local_providers[0]):
+            die(f"git metadata directory {git_common_dir} overlaps the local provider catalog")
         if paths_overlap(git_common_dir, *BAKED_ROOTS):
             die(f"git metadata directory {git_common_dir} shadows a baked config/plugin path")
         if containers_enabled and paths_overlap(git_common_dir, container_workspace):

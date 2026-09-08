@@ -39,8 +39,8 @@ ARG USER_UID=1000
 ARG USER_GID=1000
 ARG USERNAME=dev
 
-# The launcher also always passes this; declare it to suppress the unused
-# build-arg warning. Not used in this Containerfile.
+# The launcher passes the local catalog digest as a build-cache key. The catalog
+# itself is never an image build input; it is mounted read-only only at runtime.
 ARG LOCAL_PROVIDERS_SHA256=absent
 
 # The base image ends as its unprivileged image user; package installs run
@@ -69,5 +69,9 @@ RUN set -ex; \
 # started containers that mount the socket, without extra -e flags.
 ENV CONTAINER_HOST=unix:///run/opencode-container-engine.sock \
     DOCKER_HOST=unix:///run/opencode-container-engine.sock
+
+# Preserve the launcher's digest as image metadata so a forced rebuild has a
+# distinct cache key without copying the provider catalog into the image.
+LABEL io.opencode.local-providers-sha256="${LOCAL_PROVIDERS_SHA256}"
 
 USER ${USERNAME}

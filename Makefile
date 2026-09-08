@@ -8,15 +8,13 @@ IMAGE ?=
 BASE_IMAGE ?= $(if $(strip $(IMAGE)),$(IMAGE),opencode2):latest
 DEV_IMAGE ?= opencode2-dev:latest
 
-# Base runtime image, rebuilt from Containerfile. Plain build: no
-# machine-local provider catalog (see the README for the catalog-including
-# build).
+# Base runtime image, rebuilt from Containerfile. Machine-local provider
+# catalogs are mounted by the launcher at runtime, never included in builds.
 base:
 	podman build \
 		--build-arg "USER_UID=$$(id -u)" \
 		--build-arg "USER_GID=$$(id -g)" \
 		--build-arg "USERNAME=$$(id -un)" \
-		--build-arg "LOCAL_PROVIDERS_SHA256=absent" \
 		$(if $(strip $(IMAGE)),-t $(IMAGE):$$(git rev-parse --short=8 HEAD) -t $(IMAGE):latest,-t opencode2:latest) \
 		-f Containerfile .
 

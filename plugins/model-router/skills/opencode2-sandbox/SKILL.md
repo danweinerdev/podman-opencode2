@@ -34,7 +34,8 @@ the launcher from the host workspace root.
 5. For machine-wide local models, copy
    `/opt/opencode/sandbox/local-providers.json.example` to
    `${XDG_CONFIG_HOME:-$HOME/.config}/opencode2/local-providers.json` on the
-   host and customize it. Never add credentials to this build-time catalog.
+   host and customize it. Never add credentials to this runtime-mounted
+   catalog.
 6. For machine-wide routing preferences, create the standalone partial config
    `${XDG_CONFIG_HOME:-$HOME/.config}/opencode2/model-router.json` on the host.
    This runtime file is deliberately not baked into the image. Restart the
@@ -116,12 +117,14 @@ the launcher from the host workspace root.
   workspace sandbox at `/run/opencode/sandbox.json` and retains
   `OPENCODE_MODEL_ROUTER_CONFIG`; both are supplied when both exist. Router
   edits require only a launcher/container restart.
-- During an image build, the launcher optionally validates the host's shared
-  `opencode2/local-providers.json`, mounts only that file into the build, and
-  bakes its canonical JSON as `/opt/opencode/config/opencode/opencode.json`.
-  Its SHA-256 invalidates the relevant build layer. Changes require
-  `opencode-container build --force`; absent catalogs remain absent, and
-  secrets belong in Podman secrets rather than this image layer.
+- On `build`, `run`, and `shell`, the launcher validates the host's shared
+  `opencode2/local-providers.json` and mounts its exact canonical file
+  read-only at `/opt/opencode/config/opencode/opencode.json`; it never exposes
+  the catalog to an image build or bakes it into an image. A changed present
+  catalog causes the next launcher-managed build to use a new SHA-256 cache
+  key, while its runtime contents take effect immediately on the next launch.
+  Removing the file removes the mount on the next launch. Secrets belong in
+  Podman secrets rather than this catalog.
 - `network`, `capabilities`, and the restricted `runtime_args` list control the
   Podman sandbox. Allowed runtime arguments are `--add-host=`, `--pids-limit=`,
   and `--ulimit=` forms only.

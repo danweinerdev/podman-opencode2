@@ -30,6 +30,13 @@ argv = sys.argv[1:]
 if argv[:2] == ["image", "exists"]:
     sys.exit(0 if os.environ.get("PODMAN_IMAGE_EXISTS", "1") == "1" else 1)
 
+if argv[:2] == ["image", "inspect"]:
+    value = os.environ.get("PODMAN_IMAGE_LOCAL_PROVIDERS_SHA256", "")
+    if not value:
+        sys.exit(1)
+    print(value)
+    sys.exit(0)
+
 if argv[:2] == ["secret", "exists"]:
     available = os.environ.get("AVAILABLE_SECRETS", "")
     name = argv[2] if len(argv) > 2 else ""
@@ -918,63 +925,112 @@ class Suite:
         self.has_line(argv, "project-opencode-data:/var/lib/opencode-data:U")
         self.has_line(argv, "XDG_STATE_HOME=/var/lib/opencode-data/state")
 
-    def _provider_catalog_build(self) -> None:
-        # An optional user-wide local-provider catalog is validated and exposed
-        # only to the image build. Its digest is both a build-cache key and an
-        # integrity check.
-        workspace = self.tmp / "build-workspace"
-        shared = self.tmp / "shared-config" / "opencode2"
+    def _provider_catalog_runtime(self) -> None:
+        # Validate and mount the user-wide catalog from its canonical host path
+        # on every launch, including when the selected image already exists.
+        workspace = self.tmp / "provider-workspace"
+        shared_root = self.tmp / "shared-config-real"
+        shared = shared_root / "opencode2"
+        shared_link = self.tmp / "shared-config-link"
         shared.mkdir(parents=True)
+        shared_link.symlink_to(shared_root)
         workspace.mkdir()
         write_json(workspace / ".opencode-sandbox.json", {
-            "image": "opencode2:provider-build-test",
+            "image": "opencode2:provider-runtime-test",
             "build": {"containerfile": str(ROOT / "Containerfile"),
                       "context": str(ROOT)},
             "command": ["/bin/true"],
         })
         catalog = shared / "local-providers.json"
         shutil.copyfile(ROOT / "examples" / "local-providers.json.example", catalog)
-        # The Containerfile canonicalizes with `jq -S`, so the test keeps jq as
-        # an independent oracle for the launcher's canonicalization and digest.
-        canonical = subprocess.run(["jq", "-S", ".", str(catalog)],
-                                   check=True, capture_output=True).stdout
-        digest = hashlib.sha256(canonical).hexdigest()
-        env = {"HOME": str(self.tmp / "build-home"),
-               "XDG_CONFIG_HOME": str(self.tmp / "shared-config"),
-               "PODMAN_IMAGE_EXISTS": "0"}
+        env = {"HOME": str(self.tmp / "provider-home"),
+               "XDG_CONFIG_HOME": str(shared_link),
+               "PODMAN_IMAGE_EXISTS": "1",
+               "PODMAN_IMAGE_LOCAL_PROVIDERS_SHA256": hashlib.sha256(
+                   catalog.read_bytes()
+               ).hexdigest()}
+
+        self.build_argv_log.unlink(missing_ok=True)
         self.run_ok(workspace, via_path=True, extra_env=env)
+        self.has_line(
+            self.argv(),
+            f"{catalog}:/opt/opencode/config/opencode/opencode.json:ro",
+        )
+        if self.build_argv_log.exists():
+            fail("launcher rebuilt an existing image to install the local-provider catalog")
+
+        # A changed present catalog must rebuild an existing configured image
+        # when its recorded digest does not match, without mounting it into the
+        # build process.
+        catalog.write_bytes(catalog.read_bytes() + b"\n")
+        changed_digest = hashlib.sha256(catalog.read_bytes()).hexdigest()
+        self.run_ok(workspace, via_path=True, extra_env=env)
+        build_argv = self.build_argv()
+        self.has_line(build_argv, f"LOCAL_PROVIDERS_SHA256={changed_digest}")
+        self.has_line(build_argv, f"io.opencode.local-providers-sha256={changed_digest}")
+        self.no_substring(build_argv, "/run/opencode2-build-config/")
+        self.no_substring(build_argv, f"{catalog}:")
+
+        # Removing the catalog removes the mount on the next launch without a
+        # rebuild because the catalog is runtime-only.
+        catalog.unlink()
+        self.build_argv_log.unlink(missing_ok=True)
+        self.run_ok(workspace, via_path=True, extra_env=env)
+        self.no_substring(self.argv(), "/opt/opencode/config/opencode/opencode.json")
+        if self.build_argv_log.exists():
+            fail("launcher rebuilt after removing a runtime-only provider catalog")
+
+        # A configured build receives the catalog digest as a cache key but
+        # never receives the catalog itself; only the subsequent run mounts it.
+        shutil.copyfile(ROOT / "examples" / "local-providers.json.example", catalog)
+        digest = hashlib.sha256(catalog.read_bytes()).hexdigest()
+        self.run_ok(workspace, via_path=True,
+                    extra_env={**env, "PODMAN_IMAGE_EXISTS": "0"})
         build_argv = self.build_argv()
         self.has_line(build_argv, f"LOCAL_PROVIDERS_SHA256={digest}")
-        self.has_line(build_argv, "label=disable")
-        if not any(re.fullmatch(r"/.+:/run/opencode2-build-config/local-providers\.json:ro", line)
-                   for line in build_argv):
-            fail("build did not mount the local-provider catalog")
+        self.has_line(build_argv, f"io.opencode.local-providers-sha256={digest}")
+        self.no_substring(build_argv, "/run/opencode2-build-config/")
+        self.no_substring(build_argv, f"{catalog}:")
+        self.has_line(
+            self.argv(),
+            f"{catalog}:/opt/opencode/config/opencode/opencode.json:ro",
+        )
 
-        # Removing the catalog must produce an explicit absent cache key and no
-        # build mount, ensuring a rebuild can also remove a previously baked
-        # catalog.
-        catalog.unlink()
-        self.run_ok(workspace, via_path=True, extra_env=env)
-        build_argv = self.build_argv()
-        self.has_line(build_argv, "LOCAL_PROVIDERS_SHA256=absent")
-        self.no_substring(build_argv, "/run/opencode2-build-config/local-providers.json")
-
-        # Malformed, empty, or credential-bearing catalogs fail before Podman
-        # build.
+        # Credential-bearing catalogs fail before a container is launched.
         write_json(catalog, {"provider": {"local": {
             "npm": "@ai-sdk/openai-compatible",
             "options": {"baseURL": "http://host.containers.internal:18080/v1",
-                        "apiKey": "must-not-be-baked"},
+                        "apiKey": "must-not-be-mounted"},
             "models": {"model": {}},
         }}})
+        self.argv_log.unlink(missing_ok=True)
         self.run_fail(workspace,
                       "launcher accepted a credential-bearing local-provider catalog",
                       via_path=True, extra_env=env,
                       stderr_contains="invalid local provider catalog")
+        if self.argv_log.exists():
+            fail("launcher ran a container with a credential-bearing provider catalog")
 
-        # Validation must consume exactly one document and reject non-object
-        # models; otherwise a valid trailing document could hide bytes that get
-        # baked verbatim.
+        # Reject duplicate keys before mounting the host file. The overwritten
+        # first provider object deliberately contains a credential field.
+        catalog.write_text(
+            '{"provider":{"hidden":{"npm":"@ai-sdk/openai-compatible",'
+            '"options":{"baseURL":"http://host.invalid/v1",'
+            '"apiKey":"must-not-be-mounted"},"models":{"hidden":{}}}},'
+            '"provider":{"visible":{"npm":"@ai-sdk/openai-compatible",'
+            '"options":{"baseURL":"http://host.containers.internal:18080/v1"},'
+            '"models":{"model":{}}}}}\n',
+            encoding="utf-8",
+        )
+        self.run_fail(workspace,
+                      "launcher accepted duplicate keys in a local-provider catalog",
+                      via_path=True, extra_env=env,
+                      stderr_contains="invalid local provider catalog")
+        if self.argv_log.exists():
+            fail("launcher ran a container with duplicate provider catalog keys")
+
+        # Validation consumes exactly one document and rejects non-object
+        # models because the exact host bytes are mounted without rewriting.
         first = json.dumps({"provider": {"first-valid": {
             "npm": "@ai-sdk/openai-compatible",
             "options": {"baseURL": "http://host.containers.internal:18080/v1"},
@@ -1215,7 +1271,7 @@ def main() -> None:
         suite._podman_secrets(default_home, default_workspace)
         suite._secrets_subcommand(default_home, default_workspace)
         suite._data_volume_override(default_home, default_workspace)
-        suite._provider_catalog_build()
+        suite._provider_catalog_runtime()
         bare_workspace = suite._run_command_passthrough()
         suite._dangling_image(bare_workspace)
         suite._non_utf8_config()
