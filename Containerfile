@@ -229,4 +229,4 @@ LABEL io.opencode.local-providers-sha256="${LOCAL_PROVIDERS_SHA256}"
 
 USER ${USERNAME}
 WORKDIR /home/${USERNAME}
-CMD ["opencode2", "--standalone"]
+CMD ["opencode2", "--standalone", "--auto"]
