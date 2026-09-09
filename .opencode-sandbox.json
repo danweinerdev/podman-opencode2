@@ -10,5 +10,6 @@
   },
   "workspace": ".",
   "containers": true,
-  "mounts": []
+  "mounts": [],
+  "command": ["opencode2", "--standalone", "--auto"]
 }
