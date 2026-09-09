@@ -1,0 +1,744 @@
+{
+  "runtime": "opencode2 v0.0.0-beta-19234",
+  "cases": [
+    {
+      "mode": "foreground",
+      "sessions": [
+        {
+          "session": {
+            "id": "ses_f804ce103ffeN3VENTXO3hwLmg",
+            "parentID": null,
+            "projectID": "41b4caa8787f4e48ee91df48b6534fb72ffdcd9a",
+            "agent": "orchestrator",
+            "model": {
+              "id": "parent-model",
+              "providerID": "fake-parent",
+              "variant": "default"
+            },
+            "tokens": {
+              "input": 360,
+              "output": 66,
+              "reasoning": 24,
+              "cache": {
+                "read": 0,
+                "write": 0
+              }
+            },
+            "cost": 0.00108
+          },
+          "messages": [
+            {
+              "id": "msg_07fb31f27001BAiyzFnzFKUtwq",
+              "type": "user",
+              "agent": null,
+              "model": null,
+              "time": {
+                "created": 1788848840620
+              },
+              "tokens": null,
+              "cost": null,
+              "finish": null,
+              "error": null
+            },
+            {
+              "id": "msg_07fb326e6001KRylCA69dEr1ZK",
+              "type": "assistant",
+              "agent": "orchestrator",
+              "model": {
+                "id": "parent-model",
+                "providerID": "fake-parent",
+                "variant": "default"
+              },
+              "time": {
+                "created": 1788848842490,
+                "streamed": 1788848842497,
+                "completed": 1788848842753
+              },
+              "tokens": {
+                "input": 120,
+                "output": 22,
+                "reasoning": 8,
+                "cache": {
+                  "read": 0,
+                  "write": 0
+                }
+              },
+              "cost": 0.00036,
+              "finish": "tool-calls",
+              "error": null
+            },
+            {
+              "id": "msg_07fb3280a0013Q1jjX7SBxQl4d",
+              "type": "assistant",
+              "agent": "orchestrator",
+              "model": {
+                "id": "parent-model",
+                "providerID": "fake-parent",
+                "variant": "default"
+              },
+              "time": {
+                "created": 1788848842771,
+                "streamed": 1788848842776,
+                "completed": 1788848842781
+              },
+              "tokens": {
+                "input": 120,
+                "output": 22,
+                "reasoning": 8,
+                "cache": {
+                  "read": 0,
+                  "write": 0
+                }
+              },
+              "cost": 0.00036,
+              "finish": "stop",
+              "error": null
+            }
+          ],
+          "history_error": {
+            "http_error": 404,
+            "body": ""
+          },
+          "history_shape": {
+            "http_error": "int",
+            "body": "str"
+          },
+          "history_usage": [],
+          "history_event_types": []
+        },
+        {
+          "session": {
+            "id": "ses_f804cd8fdffe2jZ77GP7Iqxr7P",
+            "parentID": "ses_f804ce103ffeN3VENTXO3hwLmg",
+            "projectID": "41b4caa8787f4e48ee91df48b6534fb72ffdcd9a",
+            "agent": "extractor",
+            "model": {
+              "id": "worker-model",
+              "providerID": "fake-worker",
+              "variant": "default"
+            },
+            "tokens": {
+              "input": 100,
+              "output": 22,
+              "reasoning": 8,
+              "cache": {
+                "read": 20,
+                "write": 0
+              }
+            },
+            "cost": 0.00034
+          },
+          "messages": [
+            {
+              "id": "msg_07fb327080028NFq7GGNcBq3mZ",
+              "type": "user",
+              "agent": null,
+              "model": null,
+              "time": {
+                "created": 1788848842511
+              },
+              "tokens": null,
+              "cost": null,
+              "finish": null,
+              "error": null
+            },
+            {
+              "id": "msg_07fb32714001981vjCOb5sH8y0",
+              "type": "assistant",
+              "agent": "extractor",
+              "model": {
+                "id": "worker-model",
+                "providerID": "fake-worker",
+                "variant": "default"
+              },
+              "time": {
+                "created": 1788848842735,
+                "streamed": 1788848842740,
+                "completed": 1788848842745
+              },
+              "tokens": {
+                "input": 100,
+                "output": 22,
+                "reasoning": 8,
+                "cache": {
+                  "read": 20,
+                  "write": 0
+                }
+              },
+              "cost": 0.00034,
+              "finish": "stop",
+              "error": null
+            }
+          ],
+          "history_error": {
+            "http_error": 404,
+            "body": ""
+          },
+          "history_shape": {
+            "http_error": "int",
+            "body": "str"
+          },
+          "history_usage": [],
+          "history_event_types": []
+        }
+      ]
+    },
+    {
+      "mode": "background",
+      "sessions": [
+        {
+          "session": {
+            "id": "ses_f804cd7d9ffeysyRPBu6m2HLfQ",
+            "parentID": null,
+            "projectID": "41b4caa8787f4e48ee91df48b6534fb72ffdcd9a",
+            "agent": "orchestrator",
+            "model": {
+              "id": "parent-model",
+              "providerID": "fake-parent",
+              "variant": "default"
+            },
+            "tokens": {
+              "input": 360,
+              "output": 66,
+              "reasoning": 24,
+              "cache": {
+                "read": 0,
+                "write": 0
+              }
+            },
+            "cost": 0.00108
+          },
+          "messages": [
+            {
+              "id": "msg_07fb3282d001P8UhR583FLZ8Sl",
+              "type": "user",
+              "agent": null,
+              "model": null,
+              "time": {
+                "created": 1788848842802
+              },
+              "tokens": null,
+              "cost": null,
+              "finish": null,
+              "error": null
+            },
+            {
+              "id": "msg_07fb32837001WAYbq4739KPpdf",
+              "type": "assistant",
+              "agent": "orchestrator",
+              "model": {
+                "id": "parent-model",
+                "providerID": "fake-parent",
+                "variant": "default"
+              },
+              "time": {
+                "created": 1788848842818,
+                "streamed": 1788848842822,
+                "completed": 1788848842841
+              },
+              "tokens": {
+                "input": 120,
+                "output": 22,
+                "reasoning": 8,
+                "cache": {
+                  "read": 0,
+                  "write": 0
+                }
+              },
+              "cost": 0.00036,
+              "finish": "tool-calls",
+              "error": null
+            },
+            {
+              "id": "msg_07fb3285f001K17681HBN3s5i2",
+              "type": "assistant",
+              "agent": "orchestrator",
+              "model": {
+                "id": "parent-model",
+                "providerID": "fake-parent",
+                "variant": "default"
+              },
+              "time": {
+                "created": 1788848842854,
+                "streamed": 1788848842859,
+                "completed": 1788848842867
+              },
+              "tokens": {
+                "input": 120,
+                "output": 22,
+                "reasoning": 8,
+                "cache": {
+                  "read": 0,
+                  "write": 0
+                }
+              },
+              "cost": 0.00036,
+              "finish": "stop",
+              "error": null
+            },
+            {
+              "id": "msg_07fb3284c002BJP6JQ0RyiUuNu",
+              "type": "synthetic",
+              "agent": null,
+              "model": null,
+              "time": {
+                "created": 1788848843080
+              },
+              "tokens": null,
+              "cost": null,
+              "finish": null,
+              "error": null
+            },
+            {
+              "id": "msg_07fb3294a001zxeUUs0GbGvmkN",
+              "type": "assistant",
+              "agent": "orchestrator",
+              "model": {
+                "id": "parent-model",
+                "providerID": "fake-parent",
+                "variant": "default"
+              },
+              "time": {
+                "created": 1788848843093,
+                "streamed": 1788848843098,
+                "completed": 1788848843103
+              },
+              "tokens": {
+                "input": 120,
+                "output": 22,
+                "reasoning": 8,
+                "cache": {
+                  "read": 0,
+                  "write": 0
+                }
+              },
+              "cost": 0.00036,
+              "finish": "stop",
+              "error": null
+            }
+          ],
+          "history_error": {
+            "http_error": 404,
+            "body": ""
+          },
+          "history_shape": {
+            "http_error": "int",
+            "body": "str"
+          },
+          "history_usage": [],
+          "history_event_types": []
+        },
+        {
+          "session": {
+            "id": "ses_f804cd7b8ffeXd85GSUT96DZyC",
+            "parentID": "ses_f804cd7d9ffeysyRPBu6m2HLfQ",
+            "projectID": "41b4caa8787f4e48ee91df48b6534fb72ffdcd9a",
+            "agent": "extractor",
+            "model": {
+              "id": "worker-model",
+              "providerID": "fake-worker",
+              "variant": "default"
+            },
+            "tokens": {
+              "input": 100,
+              "output": 22,
+              "reasoning": 8,
+              "cache": {
+                "read": 20,
+                "write": 0
+              }
+            },
+            "cost": 0.00034
+          },
+          "messages": [
+            {
+              "id": "msg_07fb3284b002Gful00gFsouudG",
+              "type": "user",
+              "agent": null,
+              "model": null,
+              "time": {
+                "created": 1788848842834
+              },
+              "tokens": null,
+              "cost": null,
+              "finish": null,
+              "error": null
+            },
+            {
+              "id": "msg_07fb32854001Uwl5qiGvEJ5hW6",
+              "type": "assistant",
+              "agent": "extractor",
+              "model": {
+                "id": "worker-model",
+                "providerID": "fake-worker",
+                "variant": "default"
+              },
+              "time": {
+                "created": 1788848843065,
+                "streamed": 1788848843068,
+                "completed": 1788848843072
+              },
+              "tokens": {
+                "input": 100,
+                "output": 22,
+                "reasoning": 8,
+                "cache": {
+                  "read": 20,
+                  "write": 0
+                }
+              },
+              "cost": 0.00034,
+              "finish": "stop",
+              "error": null
+            }
+          ],
+          "history_error": {
+            "http_error": 404,
+            "body": ""
+          },
+          "history_shape": {
+            "http_error": "int",
+            "body": "str"
+          },
+          "history_usage": [],
+          "history_event_types": []
+        }
+      ]
+    }
+  ],
+  "assertions": {
+    "runtime_pin": true,
+    "message_restart_recovery": true,
+    "message_pagination": true,
+    "history_endpoint_unavailable": true,
+    "missing_and_zero_collapsed": true,
+    "unpriced_cost_zero": true,
+    "actual_model_attribution": true,
+    "worker_parent_links": true,
+    "compatible_token_normalization": true
+  },
+  "edge_cases": [
+    {
+      "model": "no-usage",
+      "messages": [
+        {
+          "id": "msg_07fb3296c0016qkG5ngHFeccbG",
+          "type": "assistant",
+          "agent": "orchestrator",
+          "model": {
+            "id": "no-usage",
+            "providerID": "fake-worker",
+            "variant": "default"
+          },
+          "tokens": {
+            "input": 0,
+            "output": 0,
+            "reasoning": 0,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          },
+          "cost": 0,
+          "finish": "stop"
+        }
+      ]
+    },
+    {
+      "model": "zero-usage",
+      "messages": [
+        {
+          "id": "msg_07fb32a630013xc57unhP6zFWC",
+          "type": "assistant",
+          "agent": "orchestrator",
+          "model": {
+            "id": "zero-usage",
+            "providerID": "fake-worker",
+            "variant": "default"
+          },
+          "tokens": {
+            "input": 0,
+            "output": 0,
+            "reasoning": 0,
+            "cache": {
+              "read": 0,
+              "write": 0
+            }
+          },
+          "cost": 0,
+          "finish": "stop"
+        }
+      ]
+    },
+    {
+      "model": "unpriced",
+      "messages": [
+        {
+          "id": "msg_07fb32b5a0014qv33tmNIzza2e",
+          "type": "assistant",
+          "agent": "orchestrator",
+          "model": {
+            "id": "unpriced",
+            "providerID": "fake-worker",
+            "variant": "default"
+          },
+          "tokens": {
+            "input": 100,
+            "output": 22,
+            "reasoning": 8,
+            "cache": {
+              "read": 20,
+              "write": 0
+            }
+          },
+          "cost": 0,
+          "finish": "stop"
+        }
+      ]
+    }
+  ],
+  "restart_history_equal": false,
+  "restart_messages_equal": true,
+  "pagination": [
+    {
+      "sessionID": "ses_f804ce103ffeN3VENTXO3hwLmg",
+      "matches_full_read": true,
+      "records": 3
+    },
+    {
+      "sessionID": "ses_f804cd8fdffe2jZ77GP7Iqxr7P",
+      "matches_full_read": true,
+      "records": 2
+    },
+    {
+      "sessionID": "ses_f804cd7d9ffeysyRPBu6m2HLfQ",
+      "matches_full_read": true,
+      "records": 5
+    },
+    {
+      "sessionID": "ses_f804cd7b8ffeXd85GSUT96DZyC",
+      "matches_full_read": true,
+      "records": 2
+    }
+  ],
+  "provider_requests": [
+    {
+      "provider": "parent",
+      "path": "/v1/chat/completions",
+      "model": "parent-model",
+      "route_header": null,
+      "route_body": null,
+      "tools": []
+    },
+    {
+      "provider": "parent",
+      "path": "/v1/chat/completions",
+      "model": "parent-model",
+      "route_header": null,
+      "route_body": null,
+      "tools": [
+        "glob",
+        "grep",
+        "question",
+        "read",
+        "shell",
+        "skill",
+        "subagent",
+        "webfetch",
+        "websearch",
+        "execute"
+      ]
+    },
+    {
+      "provider": "worker",
+      "path": "/v1/chat/completions",
+      "model": "worker-model",
+      "route_header": null,
+      "route_body": null,
+      "tools": [
+        "glob",
+        "grep",
+        "read",
+        "shell"
+      ]
+    },
+    {
+      "provider": "parent",
+      "path": "/v1/chat/completions",
+      "model": "parent-model",
+      "route_header": null,
+      "route_body": null,
+      "tools": [
+        "glob",
+        "grep",
+        "question",
+        "read",
+        "shell",
+        "skill",
+        "subagent",
+        "webfetch",
+        "websearch",
+        "execute"
+      ]
+    },
+    {
+      "provider": "parent",
+      "path": "/v1/chat/completions",
+      "model": "parent-model",
+      "route_header": null,
+      "route_body": null,
+      "tools": []
+    },
+    {
+      "provider": "parent",
+      "path": "/v1/chat/completions",
+      "model": "parent-model",
+      "route_header": null,
+      "route_body": null,
+      "tools": [
+        "glob",
+        "grep",
+        "question",
+        "read",
+        "shell",
+        "skill",
+        "subagent",
+        "webfetch",
+        "websearch",
+        "execute"
+      ]
+    },
+    {
+      "provider": "parent",
+      "path": "/v1/chat/completions",
+      "model": "parent-model",
+      "route_header": null,
+      "route_body": null,
+      "tools": [
+        "glob",
+        "grep",
+        "question",
+        "read",
+        "shell",
+        "skill",
+        "subagent",
+        "webfetch",
+        "websearch",
+        "execute"
+      ]
+    },
+    {
+      "provider": "worker",
+      "path": "/v1/chat/completions",
+      "model": "worker-model",
+      "route_header": null,
+      "route_body": null,
+      "tools": [
+        "glob",
+        "grep",
+        "read",
+        "shell"
+      ]
+    },
+    {
+      "provider": "parent",
+      "path": "/v1/chat/completions",
+      "model": "parent-model",
+      "route_header": null,
+      "route_body": null,
+      "tools": [
+        "glob",
+        "grep",
+        "question",
+        "read",
+        "shell",
+        "skill",
+        "subagent",
+        "webfetch",
+        "websearch",
+        "execute"
+      ]
+    },
+    {
+      "provider": "parent",
+      "path": "/v1/chat/completions",
+      "model": "parent-model",
+      "route_header": null,
+      "route_body": null,
+      "tools": []
+    },
+    {
+      "provider": "worker",
+      "path": "/v1/chat/completions",
+      "model": "no-usage",
+      "route_header": null,
+      "route_body": null,
+      "tools": [
+        "glob",
+        "grep",
+        "question",
+        "read",
+        "shell",
+        "skill",
+        "subagent",
+        "webfetch",
+        "websearch",
+        "execute"
+      ]
+    },
+    {
+      "provider": "parent",
+      "path": "/v1/chat/completions",
+      "model": "parent-model",
+      "route_header": null,
+      "route_body": null,
+      "tools": []
+    },
+    {
+      "provider": "worker",
+      "path": "/v1/chat/completions",
+      "model": "zero-usage",
+      "route_header": null,
+      "route_body": null,
+      "tools": [
+        "glob",
+        "grep",
+        "question",
+        "read",
+        "shell",
+        "skill",
+        "subagent",
+        "webfetch",
+        "websearch",
+        "execute"
+      ]
+    },
+    {
+      "provider": "parent",
+      "path": "/v1/chat/completions",
+      "model": "parent-model",
+      "route_header": null,
+      "route_body": null,
+      "tools": []
+    },
+    {
+      "provider": "worker",
+      "path": "/v1/chat/completions",
+      "model": "unpriced",
+      "route_header": null,
+      "route_body": null,
+      "tools": [
+        "glob",
+        "grep",
+        "question",
+        "read",
+        "shell",
+        "skill",
+        "subagent",
+        "webfetch",
+        "websearch",
+        "execute"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,1423 @@
+{
+  "version": 1,
+  "seq_counter": 0,
+  "nodes": [
+    {
+      "id": "test-harness",
+      "contract": "requirements.txt pins a working pytest, the Makefile defines check (ruff 0.16.6 plus mypy 1.18.2 over the plan's Python files) and test (pytest over tests/unit) targets, ruff.toml includes the two new extension-less bin files, and a smoke unit test runs green under both targets on the clean tree.",
+      "justifies": [
+        "NFR-04"
+      ],
+      "intent_hashes": {
+        "NFR-04": "sha256:03a2edef2ae486dfbc62d03c0ad70c70745e31f21b52fe437fdb1e9307417fc5"
+      },
+      "gate": {
+        "type": "command",
+        "command": "make check \u0026\u0026 make test"
+      },
+      "hazards": [],
+      "artifacts": [
+        "requirements.txt",
+        "Makefile",
+        "ruff.toml",
+        "tests/unit/test_harness_smoke.py"
+      ],
+      "estimate": 1,
+      "phase": "01-Collector-Core",
+      "inputs": [
+        {
+          "root": "planning",
+          "path": "Designs/ModelRouterUsage/README.md",
+          "section": {
+            "heading_path": [
+              "Testing Strategy",
+              "Structural Verification"
+            ]
+          }
+        }
+      ],
+      "input_hashes": {
+        "{\"root\":\"planning\",\"path\":\"Designs/ModelRouterUsage/README.md\",\"section\":{\"heading_path\":[\"Testing Strategy\",\"Structural Verification\"]}}": "sha256:4d9262af788eb7547f48a7a95de46e5094a0049e8673045709dc1fccebabff37"
+      }
+    },
+    {
+      "id": "store-schema",
+      "contract": "bin/oc2-usage exposes the versioned SQLite usage store (WAL, directory 0700, file 0600) with forward-only migrations that preserve data or refuse safely, (session_id, message_id)-keyed upserts, per-project rows, and the NFR-01 whitelist projection, all through one maintained module.",
+      "justifies": [
+        "FR-06",
+        "NFR-01",
+        "NFR-03",
+        "DD-5"
+      ],
+      "intent_hashes": {
+        "DD-5": "sha256:bd3ce529f73c7008cd46cfd5d8e1a4f430eaf1d4f549702e226a73309ed86911",
+        "FR-06": "sha256:a12d3a928744c2d27fa0c59eabdfacc73737dd3cb299636c46477fa5eab2c3bd",
+        "NFR-01": "sha256:4ed1d382d3c90f515548f9d4b651ff5ce02c409149805cc43251708db03bdfde",
+        "NFR-03": "sha256:8c407cdfe130117a457f26f7931aa0e7ba48d61b1ffd567738bedb2070f0665f"
+      },
+      "deps": [
+        "test-harness"
+      ],
+      "gate": {
+        "type": "tests",
+        "tests": [
+          {
+            "id": "tests/unit/test_usage_store.py::test_migrations_forward_only_preserve_or_refuse",
+            "file": "tests/unit/test_usage_store.py"
+          },
+          {
+            "id": "tests/unit/test_usage_store.py::test_wal_mode_and_file_permissions",
+            "file": "tests/unit/test_usage_store.py"
+          },
+          {
+            "id": "tests/unit/test_usage_store.py::test_adversarial_identifiers_round_trip",
+            "file": "tests/unit/test_usage_store.py",
+            "satisfies": [
+              "external-format"
+            ]
+          },
+          {
+            "id": "tests/unit/test_usage_store.py::test_concurrent_writers_preserve_records",
+            "file": "tests/unit/test_usage_store.py",
+            "satisfies": [
+              "concurrent-access"
+            ]
+          },
+          {
+            "id": "tests/unit/test_usage_store.py::test_round_trip_reopen_via_public_api",
+            "file": "tests/unit/test_usage_store.py",
+            "satisfies": [
+              "persists-state"
+            ]
+          }
+        ]
+      },
+      "hazards": [
+        "persists-state",
+        "external-format",
+        "concurrent-access"
+      ],
+      "artifacts": [
+        "bin/oc2-usage",
+        "tests/unit/test_usage_store.py"
+      ],
+      "estimate": 2,
+      "phase": "01-Collector-Core",
+      "inputs": [
+        {
+          "root": "planning",
+          "path": "Designs/ModelRouterUsage/README.md",
+          "section": {
+            "heading_path": [
+              "Architecture",
+              "Interfaces"
+            ]
+          }
+        }
+      ],
+      "input_hashes": {
+        "{\"root\":\"planning\",\"path\":\"Designs/ModelRouterUsage/README.md\",\"section\":{\"heading_path\":[\"Architecture\",\"Interfaces\"]}}": "sha256:f873713a3f0396b3a151d3b110dcc34d4c8754983d436c0a903a1e750a8233a9"
+      }
+    },
+    {
+      "id": "controls-journal",
+      "contract": "the control journal at usage/control/<project_key>/state.json implements durable exclusion intervals and the first|restart|disabled resume modes with atomic tmp+fsync+replace under the project-scoped lock, fails closed on missing or corrupt history, records disabled gaps, and skips host-side registration entirely in ephemeral mode (D-0003).",
+      "justifies": [
+        "FR-09",
+        "DD-10",
+        "D-0003",
+        "NFR-02"
+      ],
+      "intent_hashes": {
+        "DD-10": "sha256:9019ceae6a71dd38b4de607cabf130e8ee84815273a69511eb683292798cf524",
+        "FR-09": "sha256:8116d90f359086e4d50580337881a1b373aabf2e0e9955a26a69129192fca67a",
+        "NFR-02": "sha256:c1cf20efb328df2ccf9f923f93be2c4a07e2134701f35b08bd5e2f0ef360a1c3"
+      },
+      "deps": [
+        "test-harness",
+        "store-schema"
+      ],
+      "gate": {
+        "type": "tests",
+        "tests": [
+          {
+            "id": "tests/unit/test_usage_controls.py::test_journal_round_trip",
+            "file": "tests/unit/test_usage_controls.py",
+            "satisfies": [
+              "persists-state"
+            ]
+          },
+          {
+            "id": "tests/unit/test_usage_controls.py::test_adversarial_journal_values_round_trip",
+            "file": "tests/unit/test_usage_controls.py",
+            "satisfies": [
+              "external-format"
+            ]
+          },
+          {
+            "id": "tests/unit/test_usage_controls.py::test_concurrent_registration_is_serialized",
+            "file": "tests/unit/test_usage_controls.py",
+            "satisfies": [
+              "concurrent-access"
+            ]
+          },
+          {
+            "id": "tests/unit/test_usage_controls.py::test_resume_modes_first_restart_disabled",
+            "file": "tests/unit/test_usage_controls.py"
+          },
+          {
+            "id": "tests/unit/test_usage_controls.py::test_excluded_intervals_preserve_first_boundary",
+            "file": "tests/unit/test_usage_controls.py",
+            "satisfies": [
+              "computes-number"
+            ]
+          },
+          {
+            "id": "tests/unit/test_usage_controls.py::test_missing_or_corrupt_journal_fails_closed",
+            "file": "tests/unit/test_usage_controls.py"
+          },
+          {
+            "id": "tests/unit/test_usage_controls.py::test_ephemeral_mode_skips_host_registration",
+            "file": "tests/unit/test_usage_controls.py"
+          }
+        ]
+      },
+      "hazards": [
+        "persists-state",
+        "external-format",
+        "concurrent-access",
+        "computes-number"
+      ],
+      "artifacts": [
+        "bin/oc2-usage",
+        "tests/unit/test_usage_controls.py"
+      ],
+      "estimate": 3,
+      "phase": "01-Collector-Core",
+      "inputs": [
+        {
+          "root": "planning",
+          "path": "Designs/ModelRouterUsage/README.md",
+          "section": {
+            "heading_path": [
+              "Design Decisions"
+            ]
+          }
+        }
+      ],
+      "input_hashes": {
+        "{\"root\":\"planning\",\"path\":\"Designs/ModelRouterUsage/README.md\",\"section\":{\"heading_path\":[\"Design Decisions\"]}}": "sha256:cbeea4ef8418812ff93f72b9a95d5bf8f724fe08ca96affee340e3f0a0ddb688"
+      }
+    },
+    {
+      "id": "route-provenance",
+      "contract": "the resolver computes each agent's expected model from the model-router plugin's own sources (baked base defaults plus the env-named override files merged with the plugin's exact mergeConfig semantics) and marks a call's expectation verified only when the agent is mapped and pinned per the plugin's pin rules and every existing override file's mtime is at or before the producing run's start; every failure degrades to unverified, never a guess.",
+      "justifies": [
+        "FR-12",
+        "DD-7",
+        "D-0002",
+        "AC-12"
+      ],
+      "intent_hashes": {
+        "AC-12": "sha256:23e8ced3a1b25bc5f93af7df1f2e456632026c0faa2ec0da7e172b5d627b90f6",
+        "DD-7": "sha256:9450ba02eb49f874065b3e61d132c5c57cce443cf78dd89cff920cacc4c94ddc",
+        "FR-12": "sha256:e2ee1a18812edf972efb707df7513fb91695015a27bae9b037c6c1a55f20143d"
+      },
+      "deps": [
+        "test-harness"
+      ],
+      "gate": {
+        "type": "tests",
+        "tests": [
+          {
+            "id": "tests/unit/test_usage_provenance.py::test_python_merge_matches_plugin_export",
+            "file": "tests/unit/test_usage_provenance.py",
+            "satisfies": [
+              "derives-state"
+            ]
+          },
+          {
+            "id": "tests/unit/test_usage_provenance.py::test_pin_semantics_pinned_and_unpinned_agents",
+            "file": "tests/unit/test_usage_provenance.py"
+          },
+          {
+            "id": "tests/unit/test_usage_provenance.py::test_mtime_condition_at_run_start_boundary",
+            "file": "tests/unit/test_usage_provenance.py"
+          },
+          {
+            "id": "tests/unit/test_usage_provenance.py::test_run_attribution_with_reversed_windows",
+            "file": "tests/unit/test_usage_provenance.py",
+            "satisfies": [
+              "order-sensitive"
+            ]
+          },
+          {
+            "id": "tests/unit/test_usage_provenance.py::test_unreadable_or_invalid_config_is_unverified",
+            "file": "tests/unit/test_usage_provenance.py"
+          }
+        ]
+      },
+      "hazards": [
+        "derives-state",
+        "order-sensitive"
+      ],
+      "artifacts": [
+        "bin/oc2-usage",
+        "tests/unit/test_usage_provenance.py"
+      ],
+      "estimate": 3,
+      "phase": "01-Collector-Core",
+      "inputs": [
+        {
+          "root": "planning",
+          "path": "Designs/ModelRouterUsage/README.md",
+          "section": {
+            "heading_path": [
+              "Design Decisions"
+            ]
+          }
+        },
+        {
+          "root": "repository",
+          "path": "plugins/model-router/index.js"
+        }
+      ],
+      "input_hashes": {
+        "{\"root\":\"planning\",\"path\":\"Designs/ModelRouterUsage/README.md\",\"section\":{\"heading_path\":[\"Design Decisions\"]}}": "sha256:cbeea4ef8418812ff93f72b9a95d5bf8f724fe08ca96affee340e3f0a0ddb688",
+        "{\"root\":\"repository\",\"path\":\"plugins/model-router/index.js\"}": "sha256:8a0e971df1a863f6dfed6ef91d08f9260ea793b0416f4f0dcee3cbd246d62ea5"
+      }
+    },
+    {
+      "id": "import-predicate",
+      "contract": "every candidate record passes one admission predicate (project identity, collection epoch, exclusion intervals) before upsert, normalizes tokens per the verified contract, computes route status against the stored verified expectation, and never counts an unfinished step or duplicates a replay or correction.",
+      "justifies": [
+        "FR-01",
+        "FR-02",
+        "FR-04",
+        "FR-05",
+        "NFR-01",
+        "DD-6",
+        "AC-01",
+        "AC-02",
+        "AC-03",
+        "AC-09"
+      ],
+      "intent_hashes": {
+        "AC-01": "sha256:2eb575f61b8ca93c578f9d79c7d23f1133831106a340c501b122f142abb14fc5",
+        "AC-02": "sha256:d0de458c487fbfd1852c133546523b42e54829cf042066cc9521effb67d74459",
+        "AC-03": "sha256:90393b5b78244408a26915afcff1127ea23adc7bcdc3acb1c6ff2e42385be3a4",
+        "AC-09": "sha256:0ff4c6e6a7730d2e7fa4cc8d89a0e47864c202a9bb7cfe5ec0a84f28e42c88b8",
+        "DD-6": "sha256:6d5856791bf3ee43ee8380bad96bbbe75670d0269d5c4d42949a3cd0d9021c0d",
+        "FR-01": "sha256:5b13b86333d1f277d4bc0b1a067d4b8dbbdbd00151133188838ccbc0a8fbc2ca",
+        "FR-02": "sha256:cb5d990ec2b6847d36d8651c1c42178d7d4f8bd1925aa02367f7138d7b517ed3",
+        "FR-04": "sha256:bd052d724940c37ba9d509a6f53eb6566fa5c6ed8fafa4c0888c8a720725cf4a",
+        "FR-05": "sha256:6168fee04bde39e5faec10671533ec8aec1e12eb4b6f5d2dc839d3a413c5524d",
+        "NFR-01": "sha256:4ed1d382d3c90f515548f9d4b651ff5ce02c409149805cc43251708db03bdfde"
+      },
+      "deps": [
+        "store-schema",
+        "controls-journal",
+        "route-provenance"
+      ],
+      "gate": {
+        "type": "tests",
+        "tests": [
+          {
+            "id": "tests/unit/test_usage_import.py::test_three_steps_three_calls_replayed_twice_stays_three",
+            "file": "tests/unit/test_usage_import.py",
+            "satisfies": [
+              "computes-number"
+            ]
+          },
+          {
+            "id": "tests/unit/test_usage_import.py::test_correction_replaces_record_once",
+            "file": "tests/unit/test_usage_import.py",
+            "satisfies": [
+              "computes-number"
+            ]
+          },
+          {
+            "id": "tests/unit/test_usage_import.py::test_unfinished_generation_adds_no_call",
+            "file": "tests/unit/test_usage_import.py"
+          },
+          {
+            "id": "tests/unit/test_usage_import.py::test_token_normalization_contract",
+            "file": "tests/unit/test_usage_import.py"
+          },
+          {
+            "id": "tests/unit/test_usage_import.py::test_unknown_agent_and_cross_project_exclusion",
+            "file": "tests/unit/test_usage_import.py"
+          },
+          {
+            "id": "tests/unit/test_usage_import.py::test_whitelist_excludes_paths_titles_bodies",
+            "file": "tests/unit/test_usage_import.py"
+          }
+        ]
+      },
+      "hazards": [
+        "computes-number"
+      ],
+      "artifacts": [
+        "bin/oc2-usage",
+        "tests/unit/test_usage_import.py"
+      ],
+      "estimate": 2,
+      "phase": "01-Collector-Core",
+      "inputs": [
+        {
+          "root": "planning",
+          "path": "Designs/ModelRouterUsage/README.md",
+          "section": {
+            "heading_path": [
+              "Architecture",
+              "Interfaces"
+            ]
+          }
+        }
+      ],
+      "input_hashes": {
+        "{\"root\":\"planning\",\"path\":\"Designs/ModelRouterUsage/README.md\",\"section\":{\"heading_path\":[\"Architecture\",\"Interfaces\"]}}": "sha256:f873713a3f0396b3a151d3b110dcc34d4c8754983d436c0a903a1e750a8233a9"
+      }
+    },
+    {
+      "id": "polling-engine",
+      "contract": "the collector polls the session/message API with cursor pagination under bounded request and time budgets, revisits in-flight steps until completion, persists per-session progress in poll_progress, and holds at most 1,000 records in the bounded queue whose overflow drops telemetry with a visible warning without ever blocking or failing the coding path.",
+      "justifies": [
+        "FR-04",
+        "FR-10",
+        "NFR-02",
+        "NFR-03",
+        "DD-4"
+      ],
+      "intent_hashes": {
+        "DD-4": "sha256:308148cb801df3cc06fab7c3c70d1f628b81c1993826d5a92a1baa65d2bc41ee",
+        "FR-04": "sha256:bd052d724940c37ba9d509a6f53eb6566fa5c6ed8fafa4c0888c8a720725cf4a",
+        "FR-10": "sha256:c65c9ed1c7e3c48f451910870880333594e280ac3696eb0f33df7b365601b057",
+        "NFR-02": "sha256:c1cf20efb328df2ccf9f923f93be2c4a07e2134701f35b08bd5e2f0ef360a1c3",
+        "NFR-03": "sha256:8c407cdfe130117a457f26f7931aa0e7ba48d61b1ffd567738bedb2070f0665f"
+      },
+      "deps": [
+        "import-predicate"
+      ],
+      "gate": {
+        "type": "tests",
+        "tests": [
+          {
+            "id": "tests/unit/test_usage_polling.py::test_pagination_over_reversed_fixture",
+            "file": "tests/unit/test_usage_polling.py",
+            "satisfies": [
+              "order-sensitive"
+            ]
+          },
+          {
+            "id": "tests/unit/test_usage_polling.py::test_replay_fixture_yields_identical_trace",
+            "file": "tests/unit/test_usage_polling.py",
+            "satisfies": [
+              "deterministic-replay"
+            ]
+          },
+          {
+            "id": "tests/unit/test_usage_polling.py::test_inflight_steps_revisited_until_complete",
+            "file": "tests/unit/test_usage_polling.py"
+          },
+          {
+            "id": "tests/unit/test_usage_polling.py::test_queue_bounded_at_1000_with_visible_drop",
+            "file": "tests/unit/test_usage_polling.py"
+          }
+        ]
+      },
+      "hazards": [
+        "order-sensitive",
+        "deterministic-replay"
+      ],
+      "artifacts": [
+        "bin/oc2-usage",
+        "tests/unit/test_usage_polling.py"
+      ],
+      "estimate": 2,
+      "phase": "01-Collector-Core",
+      "inputs": [
+        {
+          "root": "planning",
+          "path": "Designs/ModelRouterUsage/README.md",
+          "section": {
+            "heading_path": [
+              "Architecture",
+              "Interfaces"
+            ]
+          }
+        }
+      ],
+      "input_hashes": {
+        "{\"root\":\"planning\",\"path\":\"Designs/ModelRouterUsage/README.md\",\"section\":{\"heading_path\":[\"Architecture\",\"Interfaces\"]}}": "sha256:f873713a3f0396b3a151d3b110dcc34d4c8754983d436c0a903a1e750a8233a9"
+      }
+    },
+    {
+      "id": "review-controls-risk",
+      "contract": "a recorded subset-lane review verifies the control journal's and provenance resolver's concurrency and temporal logic against the pinned design contracts, including that the Python merge matches the plugin semantics and no drift introduced exclusion or provenance errors.",
+      "justifies": [
+        "FR-09",
+        "FR-12",
+        "DD-7",
+        "DD-10",
+        "D-0002"
+      ],
+      "intent_hashes": {
+        "DD-10": "sha256:9019ceae6a71dd38b4de607cabf130e8ee84815273a69511eb683292798cf524",
+        "DD-7": "sha256:9450ba02eb49f874065b3e61d132c5c57cce443cf78dd89cff920cacc4c94ddc",
+        "FR-09": "sha256:8116d90f359086e4d50580337881a1b373aabf2e0e9955a26a69129192fca67a",
+        "FR-12": "sha256:e2ee1a18812edf972efb707df7513fb91695015a27bae9b037c6c1a55f20143d"
+      },
+      "deps": [
+        "controls-journal",
+        "route-provenance"
+      ],
+      "gate": {
+        "type": "review",
+        "lanes": [
+          "review_blind_spots",
+          "review_plan_drift",
+          "review_spec_compliance"
+        ]
+      },
+      "hazards": [],
+      "estimate": 1,
+      "phase": "01-Collector-Core"
+    },
+    {
+      "id": "supervisor",
+      "contract": "bin/oc2-standalone allocates a collision-aware loopback port (configured port is a preference only), starts opencode2 serve with the per-launch password, waits for authenticated health, starts the collector, attaches the TUI via --server with --auto passthrough, restarts serve once on death with a degraded gap, falls back to standalone under the registered enabled epoch, and tears down in order (collector SIGTERM plus at most two seconds flush, then serve) exiting with the TUI code.",
+      "justifies": [
+        "DD-1",
+        "DD-2",
+        "DD-3",
+        "NFR-02",
+        "NFR-03",
+        "AC-08"
+      ],
+      "intent_hashes": {
+        "AC-08": "sha256:e48f5e691bb99d0d19e4ab3214d993f4a2cdb85167a2f7130e8e080173f0d125",
+        "DD-1": "sha256:0c53a4e75d3652236b3a36c3b1ce46ddcff7e2ec45210750e91b6e213c0a25e9",
+        "DD-2": "sha256:d799943cf881f4cea6830d566e1ac4556797449349f60ed8228abcc582aaa735",
+        "DD-3": "sha256:05760e35c2ff4785418d20ade2b419b027eedbd07997e3cb152f0c9a49c46ea9",
+        "NFR-02": "sha256:c1cf20efb328df2ccf9f923f93be2c4a07e2134701f35b08bd5e2f0ef360a1c3",
+        "NFR-03": "sha256:8c407cdfe130117a457f26f7931aa0e7ba48d61b1ffd567738bedb2070f0665f"
+      },
+      "deps": [
+        "test-harness",
+        "polling-engine",
+        "controls-journal"
+      ],
+      "gate": {
+        "type": "tests",
+        "tests": [
+          {
+            "id": "tests/unit/test_usage_supervisor.py::test_port_allocation_retries_on_race",
+            "file": "tests/unit/test_usage_supervisor.py"
+          },
+          {
+            "id": "tests/unit/test_usage_supervisor.py::test_ordered_teardown_sequence",
+            "file": "tests/unit/test_usage_supervisor.py",
+            "satisfies": [
+              "order-sensitive"
+            ]
+          },
+          {
+            "id": "tests/unit/test_usage_supervisor.py::test_serve_death_restarts_once_then_fallback",
+            "file": "tests/unit/test_usage_supervisor.py"
+          },
+          {
+            "id": "tests/unit/test_usage_supervisor.py::test_tui_started_with_server_and_auto_passthrough",
+            "file": "tests/unit/test_usage_supervisor.py"
+          }
+        ]
+      },
+      "hazards": [
+        "order-sensitive"
+      ],
+      "artifacts": [
+        "bin/oc2-standalone",
+        "tests/unit/test_usage_supervisor.py"
+      ],
+      "estimate": 3,
+      "phase": "02-Supervisor-Image",
+      "inputs": [
+        {
+          "root": "planning",
+          "path": "Designs/ModelRouterUsage/README.md",
+          "section": {
+            "heading_path": [
+              "Architecture",
+              "Interfaces"
+            ]
+          }
+        }
+      ],
+      "input_hashes": {
+        "{\"root\":\"planning\",\"path\":\"Designs/ModelRouterUsage/README.md\",\"section\":{\"heading_path\":[\"Architecture\",\"Interfaces\"]}}": "sha256:f873713a3f0396b3a151d3b110dcc34d4c8754983d436c0a903a1e750a8233a9"
+      }
+    },
+    {
+      "id": "launcher-usage-stats",
+      "contract": "the launcher validates usage_stats (enabled boolean, port integer 1-65535 with booleans rejected), injects the OC2_* transport env contract, switches DEFAULT_COMMAND to the supervisor with --auto passthrough, invokes the validated control registration before launching any run (including disabled and custom-command launches), and skips registration entirely in ephemeral mode (D-0003).",
+      "justifies": [
+        "FR-09",
+        "DD-2",
+        "DD-9",
+        "DD-10",
+        "D-0003",
+        "ModelRouterUsage:FR-03",
+        "ModelRouterUsage:FR-08"
+      ],
+      "intent_hashes": {
+        "DD-10": "sha256:9019ceae6a71dd38b4de607cabf130e8ee84815273a69511eb683292798cf524",
+        "DD-2": "sha256:d799943cf881f4cea6830d566e1ac4556797449349f60ed8228abcc582aaa735",
+        "DD-9": "sha256:50e3b66d19b6319da5e55c1397d325813e02d04680db7c684ff022432fe9eca4",
+        "FR-09": "sha256:8116d90f359086e4d50580337881a1b373aabf2e0e9955a26a69129192fca67a",
+        "ModelRouterUsage:FR-03": "sha256:5fe24767bdb600df53069304113d0e38ffea9ee7a791c2ab3b6fba8f40777836",
+        "ModelRouterUsage:FR-08": "sha256:23bc75f59de56ac89dd4c7cdbf5b254eab435597db5773bffb15f7f77f4d67b1"
+      },
+      "deps": [
+        "test-harness",
+        "supervisor",
+        "controls-journal"
+      ],
+      "gate": {
+        "type": "tests",
+        "tests": [
+          {
+            "id": "tests/unit/test_usage_launcher_config.py::test_usage_stats_config_validation",
+            "file": "tests/unit/test_usage_launcher_config.py"
+          },
+          {
+            "id": "tests/unit/test_usage_launcher_config.py::test_transport_env_injection_contract",
+            "file": "tests/unit/test_usage_launcher_config.py"
+          },
+          {
+            "id": "tests/unit/test_usage_launcher_config.py::test_default_command_and_auto_passthrough",
+            "file": "tests/unit/test_usage_launcher_config.py",
+            "satisfies": [
+              "user-entrypoint"
+            ]
+          },
+          {
+            "id": "tests/unit/test_usage_launcher_config.py::test_custom_command_registers_exclusion_before_launch",
+            "file": "tests/unit/test_usage_launcher_config.py",
+            "satisfies": [
+              "user-entrypoint"
+            ]
+          },
+          {
+            "id": "tests/unit/test_usage_launcher_config.py::test_ephemeral_launch_skips_registration",
+            "file": "tests/unit/test_usage_launcher_config.py"
+          }
+        ]
+      },
+      "hazards": [
+        "user-entrypoint"
+      ],
+      "artifacts": [
+        "bin/opencode-container",
+        "tests/unit/test_usage_launcher_config.py"
+      ],
+      "estimate": 2,
+      "phase": "02-Supervisor-Image",
+      "inputs": [
+        {
+          "root": "planning",
+          "path": "Designs/ModelRouterUsage/README.md",
+          "section": {
+            "heading_path": [
+              "Design Decisions"
+            ]
+          }
+        }
+      ],
+      "input_hashes": {
+        "{\"root\":\"planning\",\"path\":\"Designs/ModelRouterUsage/README.md\",\"section\":{\"heading_path\":[\"Design Decisions\"]}}": "sha256:cbeea4ef8418812ff93f72b9a95d5bf8f724fe08ca96affee340e3f0a0ddb688"
+      }
+    },
+    {
+      "id": "image-packaging",
+      "contract": "the Containerfile bakes bin/oc2-standalone and bin/oc2-usage into the image, the image CMD runs the supervisor, and the repo-built image starts the supervisor (not the bare TUI) with python3 and sqlite3 available, with no other baked-path change.",
+      "justifies": [
+        "DD-3",
+        "DD-11"
+      ],
+      "intent_hashes": {
+        "DD-11": "sha256:0c13b0957718f341ab1b42ffbfd258e8090663e35909d6d980f6d5d3707f38c7",
+        "DD-3": "sha256:05760e35c2ff4785418d20ade2b419b027eedbd07997e3cb152f0c9a49c46ea9"
+      },
+      "deps": [
+        "supervisor",
+        "polling-engine"
+      ],
+      "gate": {
+        "type": "command",
+        "tests": [
+          {
+            "id": "tests/usage_image_check.py::test_image_entrypoint_supervisor",
+            "file": "tests/usage_image_check.py",
+            "satisfies": [
+              "user-entrypoint"
+            ]
+          }
+        ],
+        "command": "make build \u0026\u0026 python3 tests/usage_image_check.py"
+      },
+      "hazards": [
+        "user-entrypoint"
+      ],
+      "artifacts": [
+        "Containerfile",
+        "tests/usage_image_check.py"
+      ],
+      "estimate": 1,
+      "phase": "02-Supervisor-Image"
+    },
+    {
+      "id": "reporter",
+      "contract": "the oc2-usage report subcommand renders the FR-07 view from a read-only connection: agent-by-actual-model rows with expected model and mixed aggregation, per-status route counts that sum to the call total, compact token bars with visible numbers and text labels, the session/agent/model filters, paginated --calls and --call detail with expectation provenance, and explicit empty, unavailable, and reported-token limitation states including collection state and gaps.",
+      "justifies": [
+        "FR-02",
+        "FR-05",
+        "FR-07",
+        "FR-09",
+        "FR-12",
+        "DD-8",
+        "AC-03",
+        "AC-05",
+        "AC-06",
+        "AC-07",
+        "AC-12"
+      ],
+      "intent_hashes": {
+        "AC-03": "sha256:90393b5b78244408a26915afcff1127ea23adc7bcdc3acb1c6ff2e42385be3a4",
+        "AC-05": "sha256:271c8df5348a76c60dd6195523b94564c900f43b237f20c1e93bbb0ca6b29da3",
+        "AC-06": "sha256:0e0004851d99df6d87cdc64957901092697cea3bfa1a69e4889451c9a05ed3a6",
+        "AC-07": "sha256:07965837675542abec86a080267d9ad5cc1e274e1c20d5480cdda4c3c04fe021",
+        "AC-12": "sha256:23e8ced3a1b25bc5f93af7df1f2e456632026c0faa2ec0da7e172b5d627b90f6",
+        "DD-8": "sha256:a1f0591c875c054c971a2895b65f2449854c6d370d0632ef70793400a5a25a88",
+        "FR-02": "sha256:cb5d990ec2b6847d36d8651c1c42178d7d4f8bd1925aa02367f7138d7b517ed3",
+        "FR-05": "sha256:6168fee04bde39e5faec10671533ec8aec1e12eb4b6f5d2dc839d3a413c5524d",
+        "FR-07": "sha256:778e9e0e0db0d1efe307ef9af89f78d43cf7716ef9d6e267aa44b65971e68802",
+        "FR-09": "sha256:8116d90f359086e4d50580337881a1b373aabf2e0e9955a26a69129192fca67a",
+        "FR-12": "sha256:e2ee1a18812edf972efb707df7513fb91695015a27bae9b037c6c1a55f20143d"
+      },
+      "deps": [
+        "test-harness",
+        "store-schema"
+      ],
+      "gate": {
+        "type": "tests",
+        "tests": [
+          {
+            "id": "tests/unit/test_usage_report.py::test_main_table_columns_and_model_split_rows",
+            "file": "tests/unit/test_usage_report.py"
+          },
+          {
+            "id": "tests/unit/test_usage_report.py::test_token_bars_and_numeric_labels",
+            "file": "tests/unit/test_usage_report.py"
+          },
+          {
+            "id": "tests/unit/test_usage_report.py::test_filters_combine_and_call_inspection",
+            "file": "tests/unit/test_usage_report.py"
+          },
+          {
+            "id": "tests/unit/test_usage_report.py::test_route_status_counts_sum_to_calls",
+            "file": "tests/unit/test_usage_report.py",
+            "satisfies": [
+              "computes-number"
+            ]
+          },
+          {
+            "id": "tests/unit/test_usage_report.py::test_calls_pagination_over_reversed_fixture",
+            "file": "tests/unit/test_usage_report.py",
+            "satisfies": [
+              "order-sensitive"
+            ]
+          },
+          {
+            "id": "tests/unit/test_usage_report.py::test_empty_unavailable_and_limitation_states",
+            "file": "tests/unit/test_usage_report.py"
+          },
+          {
+            "id": "tests/unit/test_usage_report.py::test_collection_state_and_gap_display",
+            "file": "tests/unit/test_usage_report.py"
+          },
+          {
+            "id": "tests/unit/test_usage_report.py::test_report_opens_database_read_only",
+            "file": "tests/unit/test_usage_report.py"
+          }
+        ]
+      },
+      "hazards": [
+        "computes-number",
+        "order-sensitive"
+      ],
+      "artifacts": [
+        "bin/oc2-usage",
+        "tests/unit/test_usage_report.py"
+      ],
+      "estimate": 3,
+      "phase": "03-Reporting",
+      "inputs": [
+        {
+          "root": "planning",
+          "path": "Designs/ModelRouterUsage/README.md",
+          "section": {
+            "heading_path": [
+              "Architecture",
+              "Interfaces"
+            ]
+          }
+        }
+      ],
+      "input_hashes": {
+        "{\"root\":\"planning\",\"path\":\"Designs/ModelRouterUsage/README.md\",\"section\":{\"heading_path\":[\"Architecture\",\"Interfaces\"]}}": "sha256:f873713a3f0396b3a151d3b110dcc34d4c8754983d436c0a903a1e750a8233a9"
+      }
+    },
+    {
+      "id": "launcher-stats",
+      "contract": "opencode-container stats resolves the project volume via the local engine, opens usage/usage.db read-only, and renders the report with the spec filters without starting a container, model call, image build, or engine socket mount; inaccessible mountpoints and ephemeral state produce explicit errors or state, never empty results or invented data.",
+      "justifies": [
+        "FR-07",
+        "DD-12",
+        "AC-07"
+      ],
+      "intent_hashes": {
+        "AC-07": "sha256:07965837675542abec86a080267d9ad5cc1e274e1c20d5480cdda4c3c04fe021",
+        "DD-12": "sha256:4f8881fc22cf1de70eedc729c91d4358ddff9d5b517e49f3f63de85a144746d3",
+        "FR-07": "sha256:778e9e0e0db0d1efe307ef9af89f78d43cf7716ef9d6e267aa44b65971e68802"
+      },
+      "deps": [
+        "test-harness",
+        "reporter"
+      ],
+      "gate": {
+        "type": "tests",
+        "tests": [
+          {
+            "id": "tests/unit/test_usage_launcher_stats.py::test_stats_renders_fixture_volume_via_subprocess",
+            "file": "tests/unit/test_usage_launcher_stats.py",
+            "satisfies": [
+              "user-entrypoint"
+            ]
+          },
+          {
+            "id": "tests/unit/test_usage_launcher_stats.py::test_stats_requires_no_container_or_model_call",
+            "file": "tests/unit/test_usage_launcher_stats.py",
+            "satisfies": [
+              "user-entrypoint"
+            ]
+          },
+          {
+            "id": "tests/unit/test_usage_launcher_stats.py::test_inaccessible_mountpoint_is_explicit_error",
+            "file": "tests/unit/test_usage_launcher_stats.py"
+          },
+          {
+            "id": "tests/unit/test_usage_launcher_stats.py::test_ephemeral_state_reported_not_invented",
+            "file": "tests/unit/test_usage_launcher_stats.py"
+          }
+        ]
+      },
+      "hazards": [
+        "user-entrypoint"
+      ],
+      "artifacts": [
+        "bin/opencode-container",
+        "tests/unit/test_usage_launcher_stats.py"
+      ],
+      "estimate": 2,
+      "phase": "03-Reporting",
+      "inputs": [
+        {
+          "root": "planning",
+          "path": "Designs/ModelRouterUsage/README.md",
+          "section": {
+            "heading_path": [
+              "Architecture",
+              "Interfaces"
+            ]
+          }
+        }
+      ],
+      "input_hashes": {
+        "{\"root\":\"planning\",\"path\":\"Designs/ModelRouterUsage/README.md\",\"section\":{\"heading_path\":[\"Architecture\",\"Interfaces\"]}}": "sha256:f873713a3f0396b3a151d3b110dcc34d4c8754983d436c0a903a1e750a8233a9"
+      }
+    },
+    {
+      "id": "docs-update",
+      "contract": "docs/SANDBOX.md documents the usage_stats keys, the stats subcommand with its filters, and the transport, ephemeral, and collection-control behavior, and the README quickstart mentions opencode-container stats; every command in the updated prose runs against a fixture and every referenced artifact exists.",
+      "justifies": [
+        "FR-07",
+        "FR-09",
+        "NFR-04"
+      ],
+      "intent_hashes": {
+        "FR-07": "sha256:778e9e0e0db0d1efe307ef9af89f78d43cf7716ef9d6e267aa44b65971e68802",
+        "FR-09": "sha256:8116d90f359086e4d50580337881a1b373aabf2e0e9955a26a69129192fca67a",
+        "NFR-04": "sha256:03a2edef2ae486dfbc62d03c0ad70c70745e31f21b52fe437fdb1e9307417fc5"
+      },
+      "deps": [
+        "launcher-stats",
+        "image-packaging"
+      ],
+      "gate": {
+        "type": "command",
+        "tests": [
+          {
+            "id": "tests/usage_docs_check.py::test_documented_commands_run_and_artifacts_exist",
+            "file": "tests/usage_docs_check.py",
+            "satisfies": [
+              "ships-prose"
+            ]
+          }
+        ],
+        "command": "python3 tests/usage_docs_check.py"
+      },
+      "hazards": [
+        "ships-prose"
+      ],
+      "artifacts": [
+        "docs/SANDBOX.md",
+        "README.md",
+        "tests/usage_docs_check.py"
+      ],
+      "estimate": 1,
+      "phase": "03-Reporting",
+      "inputs": [
+        {
+          "root": "planning",
+          "path": "Designs/ModelRouterUsage/README.md",
+          "section": {
+            "heading_path": [
+              "Migration / Rollout"
+            ]
+          }
+        }
+      ],
+      "input_hashes": {
+        "{\"root\":\"planning\",\"path\":\"Designs/ModelRouterUsage/README.md\",\"section\":{\"heading_path\":[\"Migration / Rollout\"]}}": "sha256:4ceda4b8d2b62358b5fb1917020389dcbedaffe0c4b2f027d881074c0614f6c6"
+      }
+    },
+    {
+      "id": "integration-store",
+      "contract": "the end-to-end probe on the repo-built image verifies over both mock-provider paths the AC-10 release evidence: stable completed-call identity and actual model/agent attribution including parent/worker links, three-step prompts counting three exactly once, project isolation, token normalization display, NFR-01 canaries, file permissions, restart recovery, and offline stats rendering.",
+      "justifies": [
+        "AC-01",
+        "AC-02",
+        "AC-05",
+        "AC-06",
+        "AC-09",
+        "AC-10",
+        "FR-01",
+        "FR-04",
+        "FR-06",
+        "FR-07",
+        "NFR-01"
+      ],
+      "intent_hashes": {
+        "AC-01": "sha256:2eb575f61b8ca93c578f9d79c7d23f1133831106a340c501b122f142abb14fc5",
+        "AC-02": "sha256:d0de458c487fbfd1852c133546523b42e54829cf042066cc9521effb67d74459",
+        "AC-05": "sha256:271c8df5348a76c60dd6195523b94564c900f43b237f20c1e93bbb0ca6b29da3",
+        "AC-06": "sha256:0e0004851d99df6d87cdc64957901092697cea3bfa1a69e4889451c9a05ed3a6",
+        "AC-09": "sha256:0ff4c6e6a7730d2e7fa4cc8d89a0e47864c202a9bb7cfe5ec0a84f28e42c88b8",
+        "AC-10": "sha256:d36964c0859a3dbe2636c0edee660adea55625407bf97c54471ba50d9a2db8c0",
+        "FR-01": "sha256:5b13b86333d1f277d4bc0b1a067d4b8dbbdbd00151133188838ccbc0a8fbc2ca",
+        "FR-04": "sha256:bd052d724940c37ba9d509a6f53eb6566fa5c6ed8fafa4c0888c8a720725cf4a",
+        "FR-06": "sha256:a12d3a928744c2d27fa0c59eabdfacc73737dd3cb299636c46477fa5eab2c3bd",
+        "FR-07": "sha256:778e9e0e0db0d1efe307ef9af89f78d43cf7716ef9d6e267aa44b65971e68802",
+        "NFR-01": "sha256:4ed1d382d3c90f515548f9d4b651ff5ce02c409149805cc43251708db03bdfde"
+      },
+      "deps": [
+        "launcher-usage-stats",
+        "launcher-stats",
+        "image-packaging"
+      ],
+      "gate": {
+        "type": "command",
+        "tests": [
+          {
+            "id": "tests/usage_integration_store.py::test_launcher_dispatch_end_to_end",
+            "file": "tests/usage_integration_store.py",
+            "satisfies": [
+              "user-entrypoint"
+            ]
+          },
+          {
+            "id": "tests/usage_integration_store.py::test_three_step_prompt_counts_three_calls",
+            "file": "tests/usage_integration_store.py",
+            "satisfies": [
+              "computes-number"
+            ]
+          }
+        ],
+        "command": "python3 tests/usage_integration_store.py"
+      },
+      "hazards": [
+        "computes-number",
+        "user-entrypoint"
+      ],
+      "artifacts": [
+        "tests/usage_integration_store.py",
+        ".plans/Research/evidence/model-router-usage/usage-integration-store.json"
+      ],
+      "estimate": 3,
+      "phase": "04-Integration",
+      "inputs": [
+        {
+          "root": "planning",
+          "path": "Specs/ModelRouterUsage/README.md",
+          "section": {
+            "heading_path": [
+              "Acceptance Criteria"
+            ]
+          }
+        },
+        {
+          "root": "planning",
+          "path": "Designs/ModelRouterUsage/README.md",
+          "section": {
+            "heading_path": [
+              "Testing Strategy"
+            ]
+          }
+        }
+      ],
+      "input_hashes": {
+        "{\"root\":\"planning\",\"path\":\"Designs/ModelRouterUsage/README.md\",\"section\":{\"heading_path\":[\"Testing Strategy\"]}}": "sha256:9a26f5203ba291a4ff472417a60c48c0e07850d77707923b495b67809ff25917",
+        "{\"root\":\"planning\",\"path\":\"Specs/ModelRouterUsage/README.md\",\"section\":{\"heading_path\":[\"Acceptance Criteria\"]}}": "sha256:22e59e5561b4fd13e404a905d084b1f5616e230e6e8e4174f2e7d714c5db5e4e"
+      }
+    },
+    {
+      "id": "integration-controls",
+      "contract": "the lifecycle probe on the repo-built image verifies enabled to disabled to disabled to enabled to enabled: no records from excluded intervals, repeated disabled launches preserve the first boundary, custom-command intervals are excluded, a killed process recovers usable usage with gaps marked, and ephemeral mode leaves no files after exit.",
+      "justifies": [
+        "AC-06",
+        "FR-09",
+        "NFR-02",
+        "DD-10",
+        "D-0003"
+      ],
+      "intent_hashes": {
+        "AC-06": "sha256:0e0004851d99df6d87cdc64957901092697cea3bfa1a69e4889451c9a05ed3a6",
+        "DD-10": "sha256:9019ceae6a71dd38b4de607cabf130e8ee84815273a69511eb683292798cf524",
+        "FR-09": "sha256:8116d90f359086e4d50580337881a1b373aabf2e0e9955a26a69129192fca67a",
+        "NFR-02": "sha256:c1cf20efb328df2ccf9f923f93be2c4a07e2134701f35b08bd5e2f0ef360a1c3"
+      },
+      "deps": [
+        "integration-store"
+      ],
+      "gate": {
+        "type": "command",
+        "tests": [
+          {
+            "id": "tests/usage_integration_controls.py::test_disabled_intervals_import_nothing",
+            "file": "tests/usage_integration_controls.py",
+            "satisfies": [
+              "computes-number"
+            ]
+          },
+          {
+            "id": "tests/usage_integration_controls.py::test_journal_round_trip_across_restarts",
+            "file": "tests/usage_integration_controls.py",
+            "satisfies": [
+              "persists-state"
+            ]
+          }
+        ],
+        "command": "python3 tests/usage_integration_controls.py"
+      },
+      "hazards": [
+        "computes-number",
+        "persists-state"
+      ],
+      "artifacts": [
+        "tests/usage_integration_controls.py",
+        ".plans/Research/evidence/model-router-usage/usage-integration-controls.json"
+      ],
+      "estimate": 3,
+      "phase": "04-Integration",
+      "inputs": [
+        {
+          "root": "planning",
+          "path": "Specs/ModelRouterUsage/README.md",
+          "section": {
+            "heading_path": [
+              "Acceptance Criteria"
+            ]
+          }
+        }
+      ],
+      "input_hashes": {
+        "{\"root\":\"planning\",\"path\":\"Specs/ModelRouterUsage/README.md\",\"section\":{\"heading_path\":[\"Acceptance Criteria\"]}}": "sha256:22e59e5561b4fd13e404a905d084b1f5616e230e6e8e4174f2e7d714c5db5e4e"
+      }
+    },
+    {
+      "id": "integration-provenance",
+      "contract": "the provenance probe on the repo-built image verifies routed workers report match with expectation_source set on both provider paths, an off-route worker session reports unexpected, a between-runs override edit gives new-run calls the new expectation while stored calls keep theirs (no relabeling), and a mid-run edit degrades later imports to unverified rather than a false mismatch.",
+      "justifies": [
+        "AC-12",
+        "FR-12",
+        "D-0002"
+      ],
+      "intent_hashes": {
+        "AC-12": "sha256:23e8ced3a1b25bc5f93af7df1f2e456632026c0faa2ec0da7e172b5d627b90f6",
+        "FR-12": "sha256:e2ee1a18812edf972efb707df7513fb91695015a27bae9b037c6c1a55f20143d"
+      },
+      "deps": [
+        "integration-store"
+      ],
+      "gate": {
+        "type": "command",
+        "tests": [
+          {
+            "id": "tests/usage_integration_provenance.py::test_stored_routes_match_plugin_resolution",
+            "file": "tests/usage_integration_provenance.py",
+            "satisfies": [
+              "derives-state"
+            ]
+          },
+          {
+            "id": "tests/usage_integration_provenance.py::test_between_run_config_change_no_relabel",
+            "file": "tests/usage_integration_provenance.py",
+            "satisfies": [
+              "computes-number"
+            ]
+          }
+        ],
+        "command": "python3 tests/usage_integration_provenance.py"
+      },
+      "hazards": [
+        "derives-state",
+        "computes-number"
+      ],
+      "artifacts": [
+        "tests/usage_integration_provenance.py",
+        ".plans/Research/evidence/model-router-usage/usage-integration-provenance.json"
+      ],
+      "estimate": 2,
+      "phase": "04-Integration",
+      "inputs": [
+        {
+          "root": "planning",
+          "path": "Specs/ModelRouterUsage/README.md",
+          "section": {
+            "heading_path": [
+              "Acceptance Criteria"
+            ]
+          }
+        }
+      ],
+      "input_hashes": {
+        "{\"root\":\"planning\",\"path\":\"Specs/ModelRouterUsage/README.md\",\"section\":{\"heading_path\":[\"Acceptance Criteria\"]}}": "sha256:22e59e5561b4fd13e404a905d084b1f5616e230e6e8e4174f2e7d714c5db5e4e"
+      }
+    },
+    {
+      "id": "integration-faults",
+      "contract": "the fault probe verifies port collision, serve death, disk-full or unwritable storage, and queue overflow never alter or block successful model output; the queue stays within 1,000 records, shutdown flushing ends within two seconds, and lost usage is visible in the report after recovery unless reconciliation restored it.",
+      "justifies": [
+        "AC-08",
+        "FR-10",
+        "NFR-02",
+        "NFR-03"
+      ],
+      "intent_hashes": {
+        "AC-08": "sha256:e48f5e691bb99d0d19e4ab3214d993f4a2cdb85167a2f7130e8e080173f0d125",
+        "FR-10": "sha256:c65c9ed1c7e3c48f451910870880333594e280ac3696eb0f33df7b365601b057",
+        "NFR-02": "sha256:c1cf20efb328df2ccf9f923f93be2c4a07e2134701f35b08bd5e2f0ef360a1c3",
+        "NFR-03": "sha256:8c407cdfe130117a457f26f7931aa0e7ba48d61b1ffd567738bedb2070f0665f"
+      },
+      "deps": [
+        "integration-store"
+      ],
+      "gate": {
+        "type": "command",
+        "tests": [
+          {
+            "id": "tests/usage_integration_faults.py::test_faults_preserve_successful_calls",
+            "file": "tests/usage_integration_faults.py",
+            "satisfies": [
+              "computes-number"
+            ]
+          }
+        ],
+        "command": "python3 tests/usage_integration_faults.py"
+      },
+      "hazards": [
+        "computes-number"
+      ],
+      "artifacts": [
+        "tests/usage_integration_faults.py",
+        ".plans/Research/evidence/model-router-usage/usage-integration-faults.json"
+      ],
+      "estimate": 2,
+      "phase": "04-Integration",
+      "inputs": [
+        {
+          "root": "planning",
+          "path": "Specs/ModelRouterUsage/README.md",
+          "section": {
+            "heading_path": [
+              "Acceptance Criteria"
+            ]
+          }
+        }
+      ],
+      "input_hashes": {
+        "{\"root\":\"planning\",\"path\":\"Specs/ModelRouterUsage/README.md\",\"section\":{\"heading_path\":[\"Acceptance Criteria\"]}}": "sha256:22e59e5561b4fd13e404a905d084b1f5616e230e6e8e4174f2e7d714c5db5e4e"
+      }
+    },
+    {
+      "id": "integration-concurrency",
+      "contract": "the concurrency probe verifies two simultaneous host-network launches allocate distinct ports and never kill each other's listeners, an occupied preferred port yields another candidate within the deadline, and two projects sharing one volume collect independently with no cross-project rows.",
+      "justifies": [
+        "FR-06",
+        "NFR-03",
+        "DD-2"
+      ],
+      "intent_hashes": {
+        "DD-2": "sha256:d799943cf881f4cea6830d566e1ac4556797449349f60ed8228abcc582aaa735",
+        "FR-06": "sha256:a12d3a928744c2d27fa0c59eabdfacc73737dd3cb299636c46477fa5eab2c3bd",
+        "NFR-03": "sha256:8c407cdfe130117a457f26f7931aa0e7ba48d61b1ffd567738bedb2070f0665f"
+      },
+      "deps": [
+        "integration-store"
+      ],
+      "gate": {
+        "type": "command",
+        "tests": [
+          {
+            "id": "tests/usage_integration_concurrency.py::test_concurrent_host_network_launches_isolated",
+            "file": "tests/usage_integration_concurrency.py",
+            "satisfies": [
+              "concurrent-access"
+            ]
+          }
+        ],
+        "command": "python3 tests/usage_integration_concurrency.py"
+      },
+      "hazards": [
+        "concurrent-access"
+      ],
+      "artifacts": [
+        "tests/usage_integration_concurrency.py",
+        ".plans/Research/evidence/model-router-usage/usage-integration-concurrency.json"
+      ],
+      "estimate": 2,
+      "phase": "04-Integration",
+      "inputs": [
+        {
+          "root": "planning",
+          "path": "Specs/ModelRouterUsage/README.md",
+          "section": {
+            "heading_path": [
+              "Acceptance Criteria"
+            ]
+          }
+        }
+      ],
+      "input_hashes": {
+        "{\"root\":\"planning\",\"path\":\"Specs/ModelRouterUsage/README.md\",\"section\":{\"heading_path\":[\"Acceptance Criteria\"]}}": "sha256:22e59e5561b4fd13e404a905d084b1f5616e230e6e8e4174f2e7d714c5db5e4e"
+      }
+    },
+    {
+      "id": "tui-smoke",
+      "contract": "the scripted checklist launches the repo-built image exactly as its CMD (including --auto passthrough), verifies the session list, drives one dispatched prompt with a worker, and exits cleanly; the saved TUI log and assertion summary are the evidence.",
+      "justifies": [
+        "AC-10",
+        "DD-1"
+      ],
+      "intent_hashes": {
+        "AC-10": "sha256:d36964c0859a3dbe2636c0edee660adea55625407bf97c54471ba50d9a2db8c0",
+        "DD-1": "sha256:0c53a4e75d3652236b3a36c3b1ce46ddcff7e2ec45210750e91b6e213c0a25e9"
+      },
+      "deps": [
+        "integration-store"
+      ],
+      "gate": {
+        "type": "command",
+        "tests": [
+          {
+            "id": "tests/usage_tui_smoke.py::test_tui_smoke_checklist",
+            "file": "tests/usage_tui_smoke.py",
+            "satisfies": [
+              "user-entrypoint"
+            ]
+          }
+        ],
+        "command": "python3 tests/usage_tui_smoke.py"
+      },
+      "hazards": [
+        "user-entrypoint"
+      ],
+      "artifacts": [
+        "tests/usage_tui_smoke.py",
+        ".plans/Research/evidence/model-router-usage/usage-tui-smoke.json"
+      ],
+      "estimate": 2,
+      "phase": "04-Integration",
+      "inputs": [
+        {
+          "root": "planning",
+          "path": "Designs/ModelRouterUsage/README.md",
+          "section": {
+            "heading_path": [
+              "Testing Strategy"
+            ]
+          }
+        }
+      ],
+      "input_hashes": {
+        "{\"root\":\"planning\",\"path\":\"Designs/ModelRouterUsage/README.md\",\"section\":{\"heading_path\":[\"Testing Strategy\"]}}": "sha256:9a26f5203ba291a4ff472417a60c48c0e07850d77707923b495b67809ff25917"
+      }
+    },
+    {
+      "id": "structural-gate",
+      "contract": "make check (ruff 0.16.6 plus mypy 1.18.2) and make test (the full pytest unit suite) pass over every file this plan adds or changes with zero violations.",
+      "justifies": [
+        "NFR-04"
+      ],
+      "intent_hashes": {
+        "NFR-04": "sha256:03a2edef2ae486dfbc62d03c0ad70c70745e31f21b52fe437fdb1e9307417fc5"
+      },
+      "deps": [
+        "store-schema",
+        "controls-journal",
+        "route-provenance",
+        "import-predicate",
+        "polling-engine",
+        "supervisor",
+        "launcher-usage-stats",
+        "image-packaging",
+        "reporter",
+        "launcher-stats",
+        "docs-update",
+        "integration-store",
+        "integration-controls",
+        "integration-provenance",
+        "integration-faults",
+        "integration-concurrency",
+        "tui-smoke"
+      ],
+      "gate": {
+        "type": "command",
+        "command": "make check \u0026\u0026 make test"
+      },
+      "hazards": [],
+      "estimate": 1,
+      "phase": "05-Release-Gates",
+      "inputs": [
+        {
+          "root": "planning",
+          "path": "Designs/ModelRouterUsage/README.md",
+          "section": {
+            "heading_path": [
+              "Testing Strategy",
+              "Structural Verification"
+            ]
+          }
+        }
+      ],
+      "input_hashes": {
+        "{\"root\":\"planning\",\"path\":\"Designs/ModelRouterUsage/README.md\",\"section\":{\"heading_path\":[\"Testing Strategy\",\"Structural Verification\"]}}": "sha256:4d9262af788eb7547f48a7a95de46e5094a0049e8673045709dc1fccebabff37"
+      }
+    },
+    {
+      "id": "ac11-repo-review",
+      "contract": "a scripted repository review finds every SQLite access path confined to bin/oc2-usage and the launcher's stats path, confirms no public command accepts raw SQL and no skill or agent prompt instructs direct database access, and verifies the report runs without any LLM.",
+      "justifies": [
+        "FR-11",
+        "AC-11",
+        "D-0001"
+      ],
+      "intent_hashes": {
+        "AC-11": "sha256:344b54f84369b6ed52a05139b46fea48c5a408ff2c967b0492ea3fd350ed306e",
+        "FR-11": "sha256:d706ddccb6b4337a5dda4806fd445ae41edd6079814bbe30d29627b41d05bfc3"
+      },
+      "deps": [
+        "structural-gate"
+      ],
+      "gate": {
+        "type": "command",
+        "command": "python3 tests/usage_ac11_review.py"
+      },
+      "hazards": [],
+      "artifacts": [
+        "tests/usage_ac11_review.py"
+      ],
+      "estimate": 1,
+      "phase": "05-Release-Gates",
+      "inputs": [
+        {
+          "root": "planning",
+          "path": "Specs/ModelRouterUsage/README.md",
+          "section": {
+            "heading_path": [
+              "Requirements",
+              "Functional Requirements"
+            ]
+          }
+        }
+      ],
+      "input_hashes": {
+        "{\"root\":\"planning\",\"path\":\"Specs/ModelRouterUsage/README.md\",\"section\":{\"heading_path\":[\"Requirements\",\"Functional Requirements\"]}}": "sha256:88cfb4891d8962e5492df882138cb20969ebab98f9690fc1ff77b10e1cc9822e"
+      }
+    },
+    {
+      "id": "review-stack",
+      "contract": "a recorded four-lane review closes the integrated stack (supervisor, collector, launcher, image, docs) against the approved design and spec before release gates are accepted.",
+      "justifies": [
+        "AC-10",
+        "DD-1"
+      ],
+      "intent_hashes": {
+        "AC-10": "sha256:d36964c0859a3dbe2636c0edee660adea55625407bf97c54471ba50d9a2db8c0",
+        "DD-1": "sha256:0c53a4e75d3652236b3a36c3b1ce46ddcff7e2ec45210750e91b6e213c0a25e9"
+      },
+      "deps": [
+        "integration-store",
+        "docs-update",
+        "review-controls-risk"
+      ],
+      "gate": {
+        "type": "review",
+        "lanes": "full"
+      },
+      "hazards": [],
+      "estimate": 1,
+      "phase": "05-Release-Gates"
+    },
+    {
+      "id": "review-release",
+      "contract": "a recorded four-lane review closes the plan: every release gate is green, the AC-11 code-only SQLite boundary holds, and the completion evidence cites each green observation.",
+      "justifies": [
+        "AC-11",
+        "FR-11",
+        "D-0001"
+      ],
+      "intent_hashes": {
+        "AC-11": "sha256:344b54f84369b6ed52a05139b46fea48c5a408ff2c967b0492ea3fd350ed306e",
+        "FR-11": "sha256:d706ddccb6b4337a5dda4806fd445ae41edd6079814bbe30d29627b41d05bfc3"
+      },
+      "deps": [
+        "integration-controls",
+        "integration-provenance",
+        "integration-faults",
+        "integration-concurrency",
+        "tui-smoke",
+        "ac11-repo-review",
+        "structural-gate",
+        "review-stack"
+      ],
+      "gate": {
+        "type": "review",
+        "lanes": "full"
+      },
+      "hazards": [],
+      "estimate": 1,
+      "phase": "05-Release-Gates"
+    }
+  ]
+}
