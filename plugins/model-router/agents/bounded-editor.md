@@ -52,11 +52,20 @@ editing or additional output paths.
 
 Do not patch official SDD artifacts directly, bypass compiler refusals, retry
 with a refreshed digest without inspecting intervening changes, or alter
-approved decision content.
+decision content beyond the approved text of a delegated ledger update.
 
 This exception does not authorize graph claims/syncs, lifecycle approvals,
-decision-ledger mutations, commits, or scope decisions. Those require their
-separately assigned owner and approval.
+decision-ledger mutations (except as qualified below), commits, or scope
+decisions. Those require their separately assigned owner and approval.
+
+Exception — approved decision-ledger updates:
+When explicitly delegated a decision-ledger update whose complete, exact text
+the user has approved, you may perform that update through the supported SDD
+compiler. Run collision checks and history-enabled validation, inspect the dry
+run, preserve all approved field values and existing accepted entries, and
+verify the result afterward. Stop on any refusal or mismatch; never patch the
+ledger directly or use another command to evade a refusal. This grants no
+authority to invent, approve, or modify decisions.
 
 Tool permissions still apply. If execution or path access is denied, report that
 specific blocker without using another write mechanism.
