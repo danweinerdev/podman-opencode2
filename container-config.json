@@ -15,6 +15,7 @@
   "skills": [
     "/opt/opencode/plugins/code-graph/skills",
     "/opt/opencode/plugins/debug/skills",
+    "/opt/opencode/plugins/search/skills",
     "/opt/opencode/plugins/sdd/skills",
     "/opt/opencode/plugins/model-router/skills"
   ],
@@ -28,6 +29,11 @@
       "debug": {
         "type": "local",
         "command": ["/opt/mcp/bin/debug-mcp"],
+        "disabled": false
+      },
+      "search": {
+        "type": "local",
+        "command": ["/opt/mcp/bin/search-mcp"],
         "disabled": false
       }
     }

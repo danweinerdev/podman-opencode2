@@ -1,5 +1,5 @@
 # Containerfile — OpenCode2 container: a Fedora 44 runtime for the OpenCode2 CLI
-# with the code-graph / debug MCP servers, the SDD planning CLI, and a native
+# with the code-graph / debug / search MCP servers, the SDD planning CLI, and a native
 # v2 model-router plugin baked in.
 #
 # Multi-stage build. Only compiled binaries and plugin/skill assets are carried
@@ -7,8 +7,8 @@
 # builder stages, so the runtime image ships no dev toolchain.
 #
 # Final-image layout:
-#   /opt/mcp/bin/<code-graph-mcp|debug-mcp|sdd>   MCP + SDD binaries (on PATH)
-#   /opt/opencode/plugins/<code-graph|debug|sdd>  OpenCode skills/plugin assets
+#   /opt/mcp/bin/<code-graph-mcp|debug-mcp|search-mcp|sdd>  MCP + SDD binaries (on PATH)
+#   /opt/opencode/plugins/<code-graph|debug|search|sdd>    OpenCode skills/plugin assets
 #   /opt/opencode/plugins/model-router            native v2 model-router plugin
 #   /opt/opencode/sandbox/                         launcher + config templates
 #   /opt/opencode/config/opencode/opencode.json    optional runtime-mounted local providers
@@ -44,7 +44,7 @@ RUN set -eux; \
     cp -a .opencode-plugin /opt/build/sdd-plugin/
 
 # ---------------------------------------------------------------------------
-# Stage 2: builder-only Rust toolchains for the two MCP servers
+# Stage 2: builder-only Rust toolchains for the Rust MCP servers
 # ---------------------------------------------------------------------------
 FROM docker.io/library/fedora:44 AS mcp-builder
 
@@ -60,6 +60,7 @@ RUN dnf install -y --setopt=install_weak_deps=False \
 # surprise toolchain download mid-build:
 #   - code-graph-mcp pins channel "stable"
 #   - lldb-debug-mcp pins channel "1.97.1"
+#   - search-mcp pins channel "stable"
 # Both list rustfmt + clippy as required components.
 ENV RUSTUP_HOME=/opt/rust/rustup \
     CARGO_HOME=/opt/rust/cargo \
@@ -100,6 +101,20 @@ RUN set -eux; \
     install -Dm755 target/release/debug-mcp /opt/build/bin/debug-mcp; \
     mkdir -p /opt/build/debug-plugin; \
     cp -a .opencode-plugin /opt/build/debug-plugin/
+
+# search-mcp: pinned server binary + its .opencode-plugin tree
+# (search-mcp.js + skills/ + commands/).
+ARG SEARCH_MCP_REF=98e49e1126c24f1726c1152337124b8b315d6470
+RUN set -eux; \
+    git clone --filter=blob:none --no-tags \
+        https://github.com/danweinerdev/search-mcp.git /tmp/search-mcp; \
+    cd /tmp/search-mcp; \
+    git fetch --depth 1 origin "${SEARCH_MCP_REF}"; \
+    git checkout FETCH_HEAD; \
+    cargo build --release -p search-mcp; \
+    install -Dm755 target/release/search-mcp /opt/build/bin/search-mcp; \
+    mkdir -p /opt/build/search-plugin; \
+    cp -a .opencode-plugin /opt/build/search-plugin/
 
 # ---------------------------------------------------------------------------
 # Stage 3: final runtime image
@@ -160,12 +175,14 @@ RUN mkdir -p /opt/mcp/bin
 COPY --from=sdd-builder  /opt/build/bin/sdd            /opt/mcp/bin/sdd
 COPY --from=mcp-builder  /opt/build/bin/code-graph-mcp /opt/mcp/bin/code-graph-mcp
 COPY --from=mcp-builder  /opt/build/bin/debug-mcp      /opt/mcp/bin/debug-mcp
+COPY --from=mcp-builder  /opt/build/bin/search-mcp     /opt/mcp/bin/search-mcp
 RUN chmod 0755 /opt/mcp/bin/*
 
 # --- Baked plugin/skill assets ----------------------------------------------
 RUN mkdir -p /opt/opencode/plugins
 COPY --from=mcp-builder /opt/build/code-graph-plugin/opencode-plugin /opt/opencode/plugins/code-graph
 COPY --from=mcp-builder /opt/build/debug-plugin/.opencode-plugin        /opt/opencode/plugins/debug
+COPY --from=mcp-builder /opt/build/search-plugin/.opencode-plugin       /opt/opencode/plugins/search
 COPY --from=sdd-builder /opt/build/sdd-plugin/.opencode-plugin          /opt/opencode/plugins/sdd
 
 # The native v2 model-router plugin, built from this repository. Its runtime
@@ -197,8 +214,9 @@ COPY plugins/model-router/agents/*.md /opt/opencode/config/opencode/agent/
 RUN touch /opt/opencode/config/opencode/opencode.json \
     && chmod 0644 /opt/opencode/config/opencode/opencode.json
 
-# code-graph slash commands become OpenCode commands.
+# code-graph and search slash commands become OpenCode commands.
 COPY --from=mcp-builder /opt/build/code-graph-plugin/opencode-plugin/commands/*.md /opt/opencode/config/opencode/command/
+COPY --from=mcp-builder /opt/build/search-plugin/.opencode-plugin/commands/*.md /opt/opencode/config/opencode/command/
 
 # --- Baked OPENCODE_CONFIG ---------------------------------------------------
 COPY container-config.json /etc/opencode/container-config.json
