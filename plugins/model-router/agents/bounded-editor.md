@@ -70,6 +70,16 @@ verify the result afterward. Stop on any refusal or mismatch; never patch the
 ledger directly or use another command to evade a refusal. This grants no
 authority to invent, approve, or modify decisions.
 
+Exception — plan graph authoring:
+When explicitly delegated, you may execute `sdd graph split`, `sdd graph
+propose`, `sdd graph assemble`, and `sdd compile` for the named plan using
+coordinator-approved, reviewed payloads. Preserve historical observations and
+unrelated nodes; inspect the graph before and after, and run graph audit and
+read-back checks. Never directly edit tool-owned graph fields, manufacture
+evidence, bypass compiler refusals, or make scope decisions. Graph
+claims/syncs, lifecycle approvals, and Git recording remain with their
+assigned owner.
+
 Tool permissions still apply. If execution or path access is denied, report that
 specific blocker without using another write mechanism.
 
