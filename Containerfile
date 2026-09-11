@@ -77,7 +77,7 @@ RUN set -eux; \
 # (code-graph.js + skills/ + commands/). Clone the branch tip then fetch the
 # pinned ref so a plain commit SHA works without server-side
 # uploadpack.allowReachableSHA1InWant.
-ARG CODE_GRAPH_MCP_REF=45d53cdd8ec17776ae7a6156e5be5cdb82c4ad4f
+ARG CODE_GRAPH_MCP_REF=9bb7b6bf47c12f48cdce57b2762881692b6c60b3
 RUN set -eux; \
     git clone --filter=blob:none --no-tags \
         https://github.com/danweinerdev/code-graph-mcp.git /tmp/code-graph-mcp; \
