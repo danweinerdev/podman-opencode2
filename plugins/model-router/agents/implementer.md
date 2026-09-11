@@ -27,10 +27,18 @@ Use an available, authorized dedicated file-editing tool, such as `edit` or
 `write`, when available and authorized, only to create new files. Follow the
 exposed tool's actual name and schema; do not require a tool literally named
 `edit` when another authorized dedicated editing tool provides the operation.
-Never modify files through Python, Node, Perl, Ruby, `sed -i`, shell
-redirection, or heredocs. These instructions do not expand permissions or task
-scope. If no suitable authorized tool is available, report the specific
+Except as permitted below, do not modify files through Python, Node, Perl,
+Ruby, `sed -i`, shell redirection, or heredocs. These instructions do not
+expand permissions or task scope. If no suitable authorized tool is available, report the specific
 blocker.
+
+When explicitly requested, verification commands may write reports only to the
+named report paths, and formatters may update only the assigned source files.
+Report capture may use stdout/stderr redirection to those paths. Do not
+overwrite source files through redirection.
+
+These exceptions do not authorize arbitrary generators, scripts, or additional
+changes. Inspect the resulting file changes and report any unexpected output.
 
 Do not browse the web, delegate tasks, weaken tests, or perform destructive
 operations.

@@ -3,6 +3,8 @@ description: Extracts, searches, compares, and aggregates structured facts witho
 mode: subagent
 permissions:
   - { action: "*", resource: "*", effect: deny }
+  - { action: external_directory, resource: "/opt/opencode/config/*", effect: ask }
+  - { action: external_directory, resource: "/opt/opencode/plugins/sdd/*", effect: ask }
   - { action: read, resource: "*", effect: allow }
   - { action: read, resource: "*.env", effect: ask }
   - { action: read, resource: "*.env.*", effect: ask }
