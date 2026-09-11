@@ -3,6 +3,9 @@ description: Makes simple edits limited to named files and runs explicitly reque
 mode: subagent
 permissions:
   - { action: "*", resource: "*", effect: deny }
+  - { action: execute, resource: "*", effect: allow }
+  - { action: "search_*", resource: "*", effect: allow }
+  - { action: "code-graph_*", resource: "*", effect: allow }
   - { action: skill, resource: sdd-cli, effect: allow }
   - { action: external_directory, resource: "/opt/opencode/config/*", effect: ask }
   - { action: external_directory, resource: "/opt/opencode/plugins/sdd/*", effect: ask }

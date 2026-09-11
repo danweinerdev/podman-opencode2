@@ -3,6 +3,9 @@ description: Implements one approved semantic code task and its specified verifi
 mode: subagent
 permissions:
   - { action: "*", resource: "*", effect: deny }
+  - { action: execute, resource: "*", effect: allow }
+  - { action: "search_*", resource: "*", effect: allow }
+  - { action: "code-graph_*", resource: "*", effect: allow }
   - { action: read, resource: "*", effect: allow }
   - { action: read, resource: "*.env", effect: ask }
   - { action: read, resource: "*.env.*", effect: ask }

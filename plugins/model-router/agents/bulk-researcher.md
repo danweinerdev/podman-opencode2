@@ -4,6 +4,9 @@ mode: subagent
 steps: 12
 permissions:
   - { action: "*", resource: "*", effect: deny }
+  - { action: execute, resource: "*", effect: allow }
+  - { action: "search_*", resource: "*", effect: allow }
+  - { action: "code-graph_*", resource: "*", effect: allow }
   - { action: external_directory, resource: "/opt/opencode/config/*", effect: ask }
   - { action: external_directory, resource: "/opt/opencode/plugins/sdd/*", effect: ask }
   - { action: read, resource: "*", effect: allow }
