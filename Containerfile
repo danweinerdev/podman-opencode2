@@ -31,7 +31,7 @@ ENV GOFLAGS=-buildvcs=false
 # portable .opencode-plugin tree (plugin.json + skills/ + shared/) alongside it.
 # Its collaboration prompts are rendered by the skills into the restricted
 # native workers, so the separate Claude-oriented agent catalog is not copied.
-ARG SDD_PLANNER_REF=103abe038d896d40adeeaa9d900cdda2fb6c2ae0
+ARG SDD_PLANNER_REF=0c62f409ac57256b3c3bbba5cc33161a112a8334
 RUN set -eux; \
     git clone --filter=blob:none --no-tags \
         https://github.com/danweinerdev/claude-sdd-planner.git /tmp/claude-sdd-planner; \
@@ -104,7 +104,7 @@ RUN set -eux; \
 
 # search-mcp: pinned server binary + its .opencode-plugin tree
 # (search-mcp.js + skills/ + commands/).
-ARG SEARCH_MCP_REF=98e49e1126c24f1726c1152337124b8b315d6470
+ARG SEARCH_MCP_REF=89891c8a8fdcaea6b8ab28e60441c01227f54306
 RUN set -eux; \
     git clone --filter=blob:none --no-tags \
         https://github.com/danweinerdev/search-mcp.git /tmp/search-mcp; \
