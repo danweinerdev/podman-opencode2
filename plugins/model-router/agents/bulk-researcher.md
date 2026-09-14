@@ -8,7 +8,7 @@ permissions:
   - { action: "search_*", resource: "*", effect: allow }
   - { action: "code-graph_*", resource: "*", effect: allow }
   - { action: external_directory, resource: "/opt/opencode/config/*", effect: ask }
-  - { action: external_directory, resource: "/opt/opencode/plugins/sdd/*", effect: ask }
+  - { action: external_directory, resource: "/opt/opencode/plugins/*", effect: allow }
   - { action: read, resource: "*", effect: allow }
   - { action: read, resource: "*.env", effect: ask }
   - { action: read, resource: "*.env.*", effect: ask }
