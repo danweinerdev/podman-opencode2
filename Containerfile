@@ -196,9 +196,15 @@ RUN cd /opt/opencode/plugins/model-router \
 # copied into a mounted workspace for the user to run after leaving the image.
 RUN mkdir -p /opt/opencode/sandbox
 COPY bin/opencode-container /opt/opencode/sandbox/opencode-container
+# The verification broker. Review lanes are granted exactly this path as a shell
+# resource, so its location is part of the permission contract: moving it means
+# updating agents/*.md. It owns every container-engine decision a lane can make,
+# which is why it is baked read-only-executable here rather than supplied by a
+# workspace that a reviewed change could edit.
+COPY bin/oc2-verify /opt/opencode/sandbox/oc2-verify
 COPY examples/opencode-sandbox.json.example /opt/opencode/sandbox/.opencode-sandbox.json.example
 COPY examples/local-providers.json.example /opt/opencode/sandbox/local-providers.json.example
-RUN chmod 0755 /opt/opencode/sandbox/opencode-container \
+RUN chmod 0755 /opt/opencode/sandbox/opencode-container /opt/opencode/sandbox/oc2-verify \
     && chmod 0644 /opt/opencode/sandbox/.opencode-sandbox.json.example \
         /opt/opencode/sandbox/local-providers.json.example
 

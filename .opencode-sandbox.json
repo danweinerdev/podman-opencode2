@@ -10,6 +10,22 @@
   },
   "workspace": ".",
   "containers": true,
+  "verify": {
+    "image": "localhost/opencode2-verify:latest",
+    "network": "none",
+    "timeout_seconds": 600,
+    "memory": "2g",
+    "cpus": "2",
+    "checks": {
+      "lint": "ruff check .",
+      "types": "mypy .",
+      "compile": "python3 -m py_compile bin/opencode-container bin/oc2-verify",
+      "config": "jq empty container-config.json container-config.schema.json examples/*.example",
+      "launcher": "./tests/launcher-env.test.py",
+      "broker": "./tests/verify-broker.test.py",
+      "plugin": "cd plugins/model-router && node --test"
+    }
+  },
   "mounts": [],
   "command": ["opencode2", "--standalone", "--auto"]
 }

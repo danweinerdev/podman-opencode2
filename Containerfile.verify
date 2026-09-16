@@ -1,0 +1,97 @@
+# Containerfile.verify — disposable verification worker for the review lanes.
+#
+# A deliberately small Fedora 44 image carrying only the toolchain needed to run
+# this repository's documented checks (docs/DEVELOPMENT.md, "Run checks"). It is
+# not an OpenCode image: it ships no CLI, no MCP servers, no plugins, no agent
+# definitions, no baked config, and no credentials. A worker container built from
+# it is a scratch domain: the broker mounts the workspace read-only, copies it
+# into the container's own throwaway layer, runs the named command there, and the
+# whole thing is discarded on exit.
+#
+# Deliberately absent, each for a reason:
+#   opencode2 CLI, MCP servers, plugins   the worker executes project commands, it
+#                                         does not host an agent
+#   podman / container engine socket      a worker that can mount host paths read
+#                                         write is not isolated; the broker owns
+#                                         all engine access
+#   provider API keys                     the broker passes a minimal environment;
+#                                         untrusted repo code must not inherit them
+#   rust/go/gcc toolchains                this repository's checks are Python, Node,
+#                                         ruff, mypy, jq. A worker that cannot run a
+#                                         project's tests must not pretend to.
+#
+# This repository's documented checks and what each needs:
+#   python3 -m py_compile bin/opencode-container   python3
+#   tests/launcher-env.test.py                     python3, git, jq (mocked podman)
+#   jq empty container-config.json ...             jq
+#   npx --yes ajv-cli@5 validate ...               nodejs24 + npm (network at run time)
+#   cd plugins/model-router && npm test            nodejs24 (node --test) + node_modules
+#                                                  supplied by the copied workspace
+#   ruff check . / mypy                            pinned in requirements.txt
+#
+# tests/model-router-dispatch.test.py is NOT runnable here by design: it drives a
+# real container engine, which this image does not have. The broker must report a
+# check it cannot run as unavailable, never as passed.
+#
+# Build (context is the repository root; .containerignore already excludes
+# .git, caches, node_modules, and test trees):
+#   podman build -t opencode2-verify:latest -f Containerfile.verify .
+#
+# Run through the broker, not by hand:
+#   bin/oc2-verify -- ruff check .
+
+FROM docker.io/library/fedora:44
+
+# --- Toolchain ---------------------------------------------------------------
+# nodejs24 matches the plugin's engines.node (>=22) and the runtime image's own
+# Node major version, so plugin tests see the same parser they see in the agent
+# container. Weak deps are off to keep this image small and predictable.
+RUN dnf install -y --setopt=install_weak_deps=False \
+        ca-certificates \
+        git jq tar gzip xz findutils which diffutils \
+        nodejs24 nodejs24-npm \
+        python3 python3-pip \
+        procps-ng \
+    && dnf clean all
+
+# --- Pinned Python checkers --------------------------------------------------
+# Versions come from requirements.txt so the worker and any human run identical
+# ruff/mypy releases. requirements.txt is the only build input this image reads.
+COPY requirements.txt /tmp/requirements.txt
+RUN python3 -m pip install --no-cache-dir --root-user-action ignore \
+        -r /tmp/requirements.txt \
+    && rm -f /tmp/requirements.txt
+
+# --- Build-time assertions ---------------------------------------------------
+# Fail the build rather than ship a worker that silently cannot run a check.
+# `pip show` confirms the pins actually landed.
+RUN set -eux; \
+    for tool in git jq tar node npm python3 ruff mypy; do \
+        command -v "${tool}" >/dev/null || { echo "missing tool: ${tool}" >&2; exit 1; }; \
+    done; \
+    node --version; \
+    python3 --version; \
+    ruff --version; \
+    mypy --version; \
+    git --version; \
+    jq --version
+# The launcher and tests/launcher-env.test.py import stdlib only (verified), so
+# no PyYAML is installed here. The suite shells out to git and npm, both asserted
+# above, and to podman only through its own mocks.
+
+# --- Runtime posture ---------------------------------------------------------
+# No ENTRYPOINT: the broker supplies --entrypoint and the command verbatim.
+#
+# With `--userns=keep-id` the caller's UID is mapped in and may have no passwd
+# entry, so HOME must not be assumed to exist under /home. HOME points at the
+# world-writable scratch root, which keeps git, npm, and pip content without a
+# baked username. The broker overrides these to point inside its scratch copy.
+ENV HOME=/tmp \
+    NPM_CONFIG_UPDATE_NOTIFIER=false \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+LABEL io.opencode.verify.purpose="disposable workspace verification worker" \
+      io.opencode.verify.toolchain="python3,nodejs24,git,jq,ruff,mypy"
+
+WORKDIR /tmp
+CMD ["/bin/sh", "-c", "echo 'opencode2-verify: supply a command via the broker (bin/oc2-verify)' >&2; exit 2"]

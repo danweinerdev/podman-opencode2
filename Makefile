@@ -1,4 +1,4 @@
-.PHONY: build base dev
+.PHONY: build base dev verify-image
 
 # Fully qualified base-image name (no tag). When set, the base is tagged
 # $(IMAGE):<git short hash, 8 chars> and $(IMAGE):latest, and the dev image
@@ -27,6 +27,16 @@ dev:
 		--build-arg "USER_GID=$$(id -g)" \
 		--build-arg "USERNAME=$$(id -un)" \
 		-t $(DEV_IMAGE) -f Containerfile.dev .
+
+# Disposable verification worker for review lanes. Independent of the runtime
+# images and cheap to rebuild, so rebuild it whenever requirements.txt moves:
+# ruff and mypy versions are pinned from there. It ships a toolchain only, so a
+# project whose tests need more than Python/Node/git/jq should point its own
+# sandbox config's verify.image at an image that has them.
+VERIFY_IMAGE ?= opencode2-verify:latest
+
+verify-image:
+	podman build --pull=never -t $(VERIFY_IMAGE) -f Containerfile.verify .
 
 # Full rebuild: base, then dev.
 build: base dev

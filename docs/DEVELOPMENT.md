@@ -105,3 +105,38 @@ tests/model-router-dispatch.test.py
 
 This checks router overrides and native dispatch using containers; inspect the
 test's prerequisites before running it.
+
+## Verify checks in a disposable worker
+
+`bin/oc2-verify` runs any of the checks above inside a throwaway container, so a
+review lane can gather evidence without any possibility of changing the
+checkout. Build the worker image first; it is independent of the runtime images:
+
+```sh
+make verify-image          # builds localhost/opencode2-verify:latest
+bin/oc2-verify --list      # names configured in .opencode-sandbox.json
+bin/oc2-verify --check lint
+bin/oc2-verify -- ruff check .
+```
+
+The workspace is mounted read-only at `/src`, copied to `/tmp/w`, and the command
+runs against the copy; the container starts `--rm`, so its writable layer is
+discarded on exit. Only the workspace is ever mounted — no engine socket, no host
+paths — and the environment is a fixed minimal set, so provider credentials held
+by the agent container do not reach workspace code. Container *creation* is
+serialized under a lock because nested engine calls race; runs themselves proceed
+in parallel, and four concurrent checks complete in about 0.7s each.
+
+Configuration lives in the `verify` block of `.opencode-sandbox.json`: `image`,
+`network` (default `none`, so a check needing the network must opt in),
+`timeout_seconds`, `memory`, `cpus`, and `checks`. Point `image` at a
+project-supplied image whenever the shared one cannot run that project's tests —
+a worker missing the toolchain reports a clean run while having executed nothing,
+which is the failure mode this tool exists to avoid. `--json` returns
+`status`, `exit_code`, `duration_seconds`, and `output` for citation in findings.
+
+`tests/model-router-dispatch.test.py` cannot run in the worker by design: it
+drives a real container engine, which the worker does not have. Review lanes are
+granted exactly one shell resource, `/opt/opencode/sandbox/oc2-verify *`, and no
+other command; the broker path is baked into the image, so a reviewed change
+cannot substitute its own.
