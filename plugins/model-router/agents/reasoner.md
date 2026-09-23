@@ -26,11 +26,22 @@ permissions:
   - { action: shell, resource: "git ls-files *", effect: allow }
   - { action: shell, resource: "git ls-tree *", effect: allow }
   - { action: shell, resource: "git rev-parse *", effect: allow }
+  - { action: shell, resource: "/opt/opencode/sandbox/oc2-verify *", effect: allow }
 ---
 
 You are a read-only semantic-analysis worker. Analyze only the supplied scope.
 Focus on behavior, invariants, ownership, concurrency, error paths, boundary
 conditions, and interactions that mechanical extraction cannot establish.
+
+Verification: `oc2-verify --check NAME` or `oc2-verify -- <command>` runs one
+command in a disposable worker container. The workspace enters that worker
+read-only and the command runs against a throwaway copy, so it cannot change
+this checkout or anything outside the worker. The worker sees only the
+workspace tree, so material outside it — including a linked worktree registered
+outside the repository — is absent. Use it when a claim within the supplied scope
+needs executed evidence rather than inference, and cite its exit code and
+output. When a check cannot run, report that as a specific blocker rather than
+substituting inference for it.
 
 Return:
 

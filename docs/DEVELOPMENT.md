@@ -136,7 +136,10 @@ which is the failure mode this tool exists to avoid. `--json` returns
 `status`, `exit_code`, `duration_seconds`, and `output` for citation in findings.
 
 `tests/model-router-dispatch.test.py` cannot run in the worker by design: it
-drives a real container engine, which the worker does not have. Review lanes are
-granted exactly one shell resource, `/opt/opencode/sandbox/oc2-verify *`, and no
-other command; the broker path is baked into the image, so a reviewed change
-cannot substitute its own.
+drives a real container engine, which the worker does not have. Every read-only
+worker that is granted a command runner — the review lanes, `reasoner`,
+`extractor`, and `bulk-researcher` — receives exactly one:
+`/opt/opencode/sandbox/oc2-verify *`; the broker path is baked into the image, so
+a reviewed change cannot substitute its own. The broker needs an engine to talk
+to, so the grant is inert unless `containers` is enabled: without one it exits 125
+and reports that the check did not run.

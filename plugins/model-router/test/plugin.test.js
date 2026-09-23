@@ -194,6 +194,48 @@ test("baked workers use native v2 permissions and subagent terminology", async (
   assert.doesNotMatch(orchestrator, /code-implementer|quality-scanner|drift-detector/)
 })
 
+const BROKER_AGENTS = [
+  "reasoner",
+  "extractor",
+  "bulk-researcher",
+  "review-blind-spots",
+  "review-plan-drift",
+  "review-quality",
+  "review-spec-compliance",
+]
+const BROKER_RULE = '- { action: shell, resource: "/opt/opencode/sandbox/oc2-verify *", effect: allow }'
+
+test("read-only workers run commands only through the baked verification broker", async () => {
+  // The broker owns the only privileged decision in the design — what a worker
+  // container can see — so granting it grants no write or host authority. It is
+  // `allow` rather than `ask` because a background worker has no client to
+  // answer a prompt. The rule must sit after the catch-all deny: permission
+  // rules append and the last match wins.
+  for (const agent of BROKER_AGENTS) {
+    const source = await readFile(resolve(ROOT, "agents", `${agent}.md`), "utf8")
+    const denyAll = source.indexOf('- { action: "*", resource: "*", effect: deny }')
+    const broker = source.indexOf(BROKER_RULE)
+    assert.ok(denyAll >= 0, `${agent} denies everything before granting anything`)
+    assert.ok(broker > denyAll, `${agent} grants the baked broker after the deny-all rule`)
+    assert.match(source, /oc2-verify/, `${agent} prose must name the broker it may call`)
+  }
+  for (const agent of BAKED_AGENTS) {
+    if (PRIMARY_AGENT_IDS.has(agent)) continue
+    const source = await readFile(resolve(ROOT, "agents", `${agent}.md`), "utf8")
+    assert.doesNotMatch(
+      source,
+      /action: shell, resource: "\*", effect: allow/,
+      `${agent} must not allow arbitrary commands`,
+    )
+    if (BROKER_AGENTS.includes(agent)) continue
+    assert.equal(
+      source.includes(BROKER_RULE),
+      false,
+      `${agent} is not granted the broker; widen BROKER_AGENTS deliberately if that changes`,
+    )
+  }
+})
+
 test("source does not contain legacy v1 hook or dispatch markers", async () => {
   const source = await readFile(resolve(ROOT, "index.js"), "utf8")
   const forbidden = [
