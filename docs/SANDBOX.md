@@ -38,7 +38,9 @@ adapt its model routes, secret selections, and volume name before using it.
 | `network` | Optional Podman network mode, such as `slirp4netns`. |
 | `capabilities` | Extra capabilities, such as `SYS_PTRACE` for debugging. |
 | `runtime_args` | Only `--add-host=`, `--pids-limit=`, and `--ulimit=` entries are allowed. |
-| `command` | Defaults to `["opencode2", "--standalone"]`. |
+| `command` | Defaults to `["opencode2", "--standalone"]`. The image built
+  from this repository ships its own `CMD` with `--auto`; see
+  [permission posture](#permission-posture). |
 
 ## Files and Git
 
@@ -110,3 +112,35 @@ baked config or plugin paths. Explicit environment settings cannot override
 The supported user-config mounts are individual files: model routing,
 local providers, and Git config. Treat sandbox configuration as trusted
 repository code because it controls additional mounts and runtime settings.
+
+### Permission posture
+
+OpenCode auto-approves every permission that is not explicitly denied when the
+CLI runs with `--auto` (`opencode2 --help`: "Auto-approve permissions that are
+not explicitly denied"). Two independent settings decide whether a session has
+it:
+
+- The image `CMD`, which this repository ships as
+  `["opencode2", "--standalone", "--auto"]`. It applies to a bare `podman run`
+  of the image. The launcher always passes a command explicitly, so the image
+  `CMD` does not reach a launcher session.
+- The `command` setting. Its launcher default is `["opencode2", "--standalone"]`
+  with no `--auto`; a project that names `--auto` in `command` runs its sessions
+  with auto-approval.
+
+What auto-approval changes, and what it does not:
+
+- An explicit `deny` still wins, so it grants nothing to the baked agents or the
+  review lanes. Each of them opens with
+  `{ action: "*", resource: "*", effect: deny }`.
+- Every `effect: ask` rule stops prompting. Reads of `.env` files, `grep`, the
+  review lanes' `git status`/`diff`/`show`/`log`, and `external_directory` on the
+  baked config are approved without a prompt. Under `--auto`, read `ask` as a
+  statement of intent rather than a gate: the enforceable boundaries are `deny`
+  rules and what the container mounts.
+- Checks that read-only workers run go through the `oc2-verify` broker, whose
+  boundary does not depend on a prompt being answered. See
+  [development](DEVELOPMENT.md).
+
+The `Containerfile` command is pinned by a policy guard in the model-router test
+suite, so changing that flag set is a deliberate edit rather than drift.
