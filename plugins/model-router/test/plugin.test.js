@@ -136,7 +136,12 @@ test("container keeps policy assets root-owned and installs only native agents",
   assert.match(source, /chmod 0755 \/opt\/opencode\/config\/opencode/)
   assert.doesNotMatch(source, /service\.json/)
   assert.match(source, /COPY plugins\/model-router\/agents\/\*\.md \/opt\/opencode\/config\/opencode\/agent\//)
-  assert.match(source, /CMD \["opencode2", "--standalone"\]/)
+  // The image command is a permission-posture decision: `--auto` auto-approves
+  // every permission that is not explicitly denied. Adopted deliberately, so the
+  // guard pins the whole instruction rather than a prefix — changing the flag set
+  // here has to be a conscious edit, not drift. Deny-first agent policies still
+  // hold, because an explicit deny outranks auto-approval.
+  assert.match(source, /^CMD \["opencode2", "--standalone", "--auto"\]$/m)
 })
 
 test("final runtime image includes Git and ShellCheck", async () => {
