@@ -30,6 +30,7 @@ adapt its model routes, secret selections, and volume name before using it.
 | `workdir` | Starting directory inside the workspace. Relative paths are supported. |
 | `containers` | Share a host container-engine socket; defaults to `false`. |
 | `mounts` | Extra mounts with `source` and optional `target`. A relative source resolves against the workspace; an omitted target mirrors the absolute source path. |
+| `agents` | Directory of Markdown agent definitions to add to the container's own agents. Defaults to `.agents`; `false` skips them. See [project agent definitions](#project-agent-definitions). |
 | `env.pass` | Host variable names to forward when set. |
 | `env.set` | Literal environment values. |
 | `provider_secrets` | Keys this project can use; see [credentials](CREDENTIALS.md). |
@@ -56,6 +57,81 @@ through `GIT_CONFIG_GLOBAL`. Includes, credential files, and helper programs
 are not automatically mounted. Relative includes resolve from
 `/run/opencode`; included files and helpers must be separately available.
 Any secrets written directly in `.gitconfig` are readable inside the container.
+
+## Project agent definitions
+
+A project can add its own agents by placing OpenCode agent Markdown files in
+`.agents` at the workspace root:
+
+```md
+---
+description: Checks changes against this project's architecture decisions
+mode: subagent
+review-gates: [review_quality, review_blind_spots]
+permissions:
+  - { action: "*", resource: "*", effect: deny }
+  - { action: read, resource: "*", effect: allow }
+  - { action: grep, resource: "*", effect: allow }
+---
+
+Review the current changes against `docs/adr/`. Report findings with file and
+line references. Do not edit files.
+```
+
+Each file becomes an agent named after the file, mounted read-only into the
+agent directory the runtime scans beside the one the image bakes. Use `agents`
+to read them from another directory, or `"agents": false` to skip them. Entries
+must be regular files named `<agent-id>.md`, with no subdirectories, and must
+open with a closed `---` frontmatter fence: nothing else checks these documents,
+and the runtime registers one with unparseable frontmatter as an unnamed primary
+agent carrying its own frontmatter as its prompt. Hidden files are ignored, and a
+hidden `.md` warns instead of vanishing quietly.
+
+These definitions are additions, never replacements. An id that already belongs
+to a container agent or to OpenCode itself (`review-quality`, `orchestrator`,
+`build`, `plan`, and the rest) stops the launch with a message: a same-id
+definition does not cleanly override, it substitutes its own prompt and
+concatenates permission rules, which silently widens the agent it shadowed.
+
+Two things to know about a new agent:
+
+- It runs on whatever its own `permissions` say. Container agents are deny-first
+  by convention; a project agent should be too, and the container cannot make it
+  so for you.
+- Only `review-*` ids are granted worker dispatch. `orchestrator` and `engineer`
+  allow `review-*` after denying everything else, so a reviewer named to that
+  convention is launchable and anything else (`migration-planner`) is not — it
+  stays selectable as a primary agent, and the launcher says so at launch.
+
+### Contributing to a review gate
+
+A reviewer declares which review gates it feeds with `review-gates`, a list of
+`review_plan_drift`, `review_quality`, `review_spec_compliance`, or
+`review_blind_spots`. Anything else stops the launch: the review tooling closes
+on exactly those four, so a fifth name is a typo, not an extension. `[]` is a
+deliberate "advisory only"; omitting the key on a `review-*` agent warns, because
+its findings would otherwise be dropped at synthesis. The launcher prints the
+resulting contribution map at launch.
+
+The primary agent merges contributions into the gate named, and two limits hold
+in both `orchestrator` and `engineer`:
+
+- **A gate never closes on project reviewers alone.** The standard lane for that
+  gate still runs, and its recorded evidence names each contributing reviewer with
+  the concrete observation it made. A project cannot substitute its own reviewer
+  for a required lane or lower what that lane requires.
+- **An advisory reviewer is not verification.** Its findings are reported, not
+  attached to a gate.
+
+A contribution never becomes a gate of its own: a phase gate records exactly four
+lane results, so project reviewers widen what a gate checks rather than adding
+lanes.
+
+To route a new agent onto a lane profile, name it under `model_router.agents`;
+see [model router](MODEL_ROUTER.md).
+
+This directory is the project's own `.agents`, not your home directory's: host
+`$HOME/.agents` remains unreachable from the container.
 
 ## Saved state
 

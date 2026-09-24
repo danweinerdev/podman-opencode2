@@ -94,6 +94,13 @@ The baked routes use OpenAI and DeepSeek. See
 [container-config.json](../container-config.json) for the exact model assignments.
 Agents have their own prompts and permissions. SDD uses these same workers.
 
+A project can add its own agents from `.agents`; name one under
+`model_router.agents` to route it onto a profile, the same way you route a
+baked agent. An added agent that is not named here inherits the session model,
+and an id named here that never arrives disables routing for every agent, so
+check the spelling against the directory listing. See
+[project agent definitions](SANDBOX.md#project-agent-definitions).
+
 ## Plugin details
 
 This is a native v2 plugin: OpenCode's `subagent` tool runs workers directly on

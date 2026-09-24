@@ -76,6 +76,27 @@ the launcher from the host workspace root.
   mount host OpenCode state from effective XDG directories, `.agents`,
   `.claude`, or `.mcp` state, and do not target `/etc/opencode`,
   `/opt/opencode`, `/opt/mcp`, `/run/opencode`, `/src`, or `/workspace`.
+- `agents` names a workspace directory of OpenCode agent Markdown files that the
+  launcher mounts read-only at `/opt/opencode/config/opencode/agents`, the agent
+  directory it scans in addition to the one the image bakes. It defaults to
+  `.agents`; `false` skips the pickup and a path replaces the directory. These
+  entries are additions and may not reuse a container or runtime agent id
+  (`review-quality`, `orchestrator`, `build`, and the rest): a same-id file
+  substitutes its own prompt and concatenates permission rules, silently widening
+  the agent it shadowed, so the launch is refused. Entries must be regular files
+  named `<agent-id>.md` with no subdirectories, because a nested path produces an
+  id the model router rejects and a rejected id disables agent routing for every
+  agent. Each file must open with a closed `---` frontmatter fence, since the
+  runtime otherwise registers it as an unnamed primary agent whose prompt is its
+  own frontmatter. Only `review-*` ids are dispatchable: the primary agents allow
+  `review-*` after their deny-all rule. A reviewer declares the gates it feeds with
+  `review-gates`, a list drawn from `review_plan_drift`, `review_quality`,
+  `review_spec_compliance`, and `review_blind_spots`; the vocabulary is closed, so
+  any other name is refused at launch, `[]` means advisory only, and a `review-*`
+  agent omitting the key warns. Contributions merge into the named gate's evidence,
+  which must still include the standard lane's own run. Route an added agent with
+  `model_router.agents`. This is the workspace's own directory and is unrelated to
+  the host `$HOME/.agents` state the mount rule above protects.
 - On every launch, a present `$HOME/.gitconfig` must resolve to a readable
   regular file. The launcher mounts only its canonical exact file read-only at
   `/run/opencode/gitconfig` and sets `GIT_CONFIG_GLOBAL` to that path; it mounts
