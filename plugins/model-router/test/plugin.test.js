@@ -199,6 +199,32 @@ test("baked workers use native v2 permissions and subagent terminology", async (
   assert.doesNotMatch(orchestrator, /code-implementer|quality-scanner|drift-detector/)
 })
 
+test("primary agents dispatch workspace reviewers without opening dispatch generally", async () => {
+  // Workspace reviewers are granted by the `review-*` convention, and only after
+  // the deny-all rule: permission rules append and the last match wins, so the
+  // same rule placed before the deny would be dead.
+  for (const agent of ["orchestrator", "engineer"]) {
+    const source = await readFile(resolve(ROOT, "agents", `${agent}.md`), "utf8")
+    const deny = source.indexOf('- { action: subagent, resource: "*", effect: deny }')
+    const workspaceAllow = source.indexOf('- { action: subagent, resource: "review-*", effect: allow }')
+    assert.ok(deny >= 0, `${agent} denies subagent dispatch by default`)
+    assert.ok(workspaceAllow > deny, `${agent} allows the workspace reviewer convention`)
+    for (const id of BAKED_AGENTS) {
+      if (id === agent || !id.startsWith("review-")) continue
+      assert.ok(
+        source.includes(`- { action: subagent, resource: ${id}, effect: allow }`),
+        `${agent} still names the shipped lane ${id} explicitly`,
+      )
+    }
+  }
+
+  const orchestrator = await readFile(resolve(ROOT, "agents", "orchestrator.md"), "utf8")
+  assert.match(orchestrator, /Project reviewers:/)
+  assert.match(orchestrator, /A gate never closes on project reviewers alone/)
+  const engineer = await readFile(resolve(ROOT, "agents", "engineer.md"), "utf8")
+  assert.match(engineer, /supplements a required lane, it never replaces it/)
+})
+
 const BROKER_AGENTS = [
   "reasoner",
   "extractor",
