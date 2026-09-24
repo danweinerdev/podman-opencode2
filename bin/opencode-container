@@ -148,6 +148,63 @@ ALLOWED_RUNTIME_ARG_PREFIXES: Final[tuple[str, ...]] = (
     "--ulimit=",
 )
 
+# --- Workspace agent definitions ----------------------------------------------
+# A workspace may supply additional agent definitions (review lanes, project
+# specialists). They are mounted into a second agent directory the runtime also
+# scans, beside the ones the image bakes, so they are additive: the container's
+# own agents stay in place. Ids are reserved rather than merged because a
+# same-id definition is not an override: the later file replaces the agent's
+# system prompt and the two permission rule sets are concatenated, so a project
+# file reusing a baked id silently widens that baked agent's permissions.
+PROJECT_AGENTS_DEFAULT_DIR: Final[str] = ".agents"
+PROJECT_AGENTS_TARGET: Final[str] = "/opt/opencode/config/opencode/agents"
+MAX_PROJECT_AGENTS: Final[int] = 64
+AGENT_ID_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+
+# The ids the image bakes at /opt/opencode/config/opencode/agent/. This mirrors
+# the plugin's BAKED_AGENTS, and tests/launcher-env.test.py asserts it matches
+# plugins/model-router/agents/, so it cannot silently drift from the image.
+BAKED_AGENT_IDS: Final[tuple[str, ...]] = (
+    "orchestrator",
+    "engineer",
+    "reasoner",
+    "extractor",
+    "bulk-researcher",
+    "bounded-editor",
+    "implementer",
+    "review-plan-drift",
+    "review-quality",
+    "review-spec-compliance",
+    "review-blind-spots",
+)
+# OpenCode's own visible and hidden agents, which a same-id definition would
+# likewise override-and-widen.
+RUNTIME_AGENT_IDS: Final[tuple[str, ...]] = (
+    "build",
+    "plan",
+    "general",
+    "explore",
+    "compaction",
+    "title",
+    "summary",
+)
+RESERVED_AGENT_IDS: Final[frozenset[str]] = frozenset(BAKED_AGENT_IDS + RUNTIME_AGENT_IDS)
+
+# Container agents grant worker dispatch to this prefix, so a workspace agent
+# outside it still registers but cannot be launched as a worker.
+REVIEW_DISPATCH_PREFIX: Final[str] = "review-"
+# A project reviewer names, in its frontmatter, which review gates it
+# contributes to. The gate vocabulary is closed by the review tooling, whose
+# phase gate records exactly these four results, so a name outside this set is a
+# typo rather than an extension, and the launcher refuses it at launch.
+REVIEW_GATES_KEY: Final[str] = "review-gates"
+REVIEW_GATE_IDS: Final[frozenset[str]] = frozenset({
+    "review_plan_drift",
+    "review_quality",
+    "review_spec_compliance",
+    "review_blind_spots",
+})
+
 # How an environment variable reaches the container: "pass" forwards the
 # process value by name (secrets stay out of argv), "set" carries a literal.
 EnvMode = Literal["pass", "set"]
@@ -386,6 +443,160 @@ def host_state_roots(
         home + "/.mcp",
     )
     return [os.path.realpath(candidate) for candidate in candidates]
+
+
+def read_review_gates(path: str, display: str) -> tuple[list[str], bool]:
+    """Read one definition's `review-gates` declaration.
+
+    Returns `(gate ids, key was present)`. The runtime ignores frontmatter fields
+    it does not know, so this declaration is only meaningful to the agents that
+    read it, and nothing else checks the document either: a file whose frontmatter
+    does not parse is registered as an unnamed primary agent carrying its own
+    frontmatter as its prompt. Both are refused here, at launch, rather than
+    surfacing as a review that silently did not happen.
+    """
+    try:
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+    except OSError:
+        die(f"unable to read agent definition: {display}")
+    except UnicodeDecodeError:
+        die(f"agent definition is not UTF-8 text: {display}")
+
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        die(f'agent definition must open with a "---" frontmatter fence: {display}')
+    frontmatter_end = next(
+        (index for index in range(1, len(lines)) if lines[index].strip() == "---"), None
+    )
+    if frontmatter_end is None:
+        die(f"agent frontmatter is never closed: {display}")
+
+    key_match = re.compile(rf"^{REVIEW_GATES_KEY}:(.*)$")
+    declared: list[str] | None = None
+    for index in range(1, frontmatter_end):
+        match = key_match.match(lines[index])
+        if match is None:
+            continue
+        value = match.group(1).strip()
+        if value == "":
+            declared = []
+            for following in range(index + 1, frontmatter_end):
+                item = re.match(r"^\s+-\s*(.+?)\s*$", lines[following])
+                if item is not None:
+                    declared.append(item.group(1).strip("\"'"))
+                elif lines[following].strip() != "" and not lines[following].startswith(" "):
+                    break
+        elif value.startswith("[") and value.endswith("]"):
+            declared = [
+                part.strip().strip("\"'") for part in value[1:-1].split(",") if part.strip()
+            ]
+        else:
+            die(
+                f"{REVIEW_GATES_KEY} must be a list of review gates "
+                f"({'|'.join(sorted(REVIEW_GATE_IDS))}): {display}"
+            )
+        break
+
+    if declared is None:
+        return ([], False)
+    unknown = sorted({gate for gate in declared if gate not in REVIEW_GATE_IDS})
+    if unknown:
+        die(
+            f"{display} names unknown review gate(s) {', '.join(unknown)}; "
+            f"allowed: {', '.join(sorted(REVIEW_GATE_IDS))}"
+        )
+    unique: dict[str, None] = {}
+    for gate in declared:
+        unique[gate] = None
+    return (list(unique), True)
+
+
+def discover_project_agents(
+    workspace: str, config: dict[str, Any], host_state: Sequence[str]
+) -> tuple[str, list[tuple[str, list[str] | None]]] | None:
+    """Resolve and validate a workspace's additional agent definitions.
+
+    Returns `(absolute source directory, [(agent id, declared gates)])` for a
+    directory worth mounting, or None when there is nothing to mount. Declared
+    gates are None when the definition named none. `agents` overrides the default
+    `.agents` directory and `false` disables the pickup; neither can reach the
+    container's own definitions, which stay reserved.
+
+    Fails closed on anything the runtime would otherwise half-load: a nested path
+    becomes an id the model router rejects, which disables agent routing for the
+    whole container, and an id collision silently rewrites a container agent.
+    """
+    setting = config.get("agents", None)
+    if setting is None or setting is True:
+        requested = PROJECT_AGENTS_DEFAULT_DIR
+        default_pickup = True
+    elif setting is False:
+        return None
+    elif isinstance(setting, str) and setting != "":
+        requested = setting
+        default_pickup = False
+    else:
+        die('agents must be a directory path or false')
+
+    source = requested if requested.startswith("/") else workspace + "/" + requested
+    if not os.path.exists(source):
+        if default_pickup:
+            return None
+        die(f"agents directory does not exist: {source}")
+    source = os.path.realpath(source)
+    if not os.path.isdir(source):
+        die(f"agents is not a directory: {source}")
+    if paths_overlap(source, *host_state):
+        die(f"agent source {source} overlaps host OpenCode/.agents/.claude/.mcp state")
+
+    try:
+        with os.scandir(source) as scan:
+            children = sorted(scan, key=lambda child: child.name)
+    except OSError:
+        die(f"unable to read the agents directory: {source}")
+
+    entries: list[tuple[str, list[str] | None]] = []
+    for child in children:
+        name = child.name
+        if name.startswith("."):
+            # Dotfiles and editor swap files are not definitions. A hidden file
+            # that still looks like one is worth a noise: it is being skipped.
+            if name.endswith(".md"):
+                warn(f"skipping hidden agent file: {requested}/{name}")
+            continue
+        if not child.is_file(follow_symlinks=False):
+            die(f"agents directory entries must be regular files: {requested}/{name}")
+        if not name.endswith(".md"):
+            die(f"agent definition must be a Markdown file: {requested}/{name}")
+        agent_id = name[:-3]
+        if not AGENT_ID_RE.fullmatch(agent_id):
+            die(f"invalid agent name (letters, digits, '.', '_' or '-'): {requested}/{name}")
+        if agent_id in RESERVED_AGENT_IDS:
+            die(
+                f"agent {agent_id} redefines a container agent, which would replace "
+                f"its prompt and widen its permissions; rename it or set "
+                f'"agents": false'
+            )
+        gates, declared = read_review_gates(child.path, f"{requested}/{name}")
+        if not declared:
+            if agent_id.startswith(REVIEW_DISPATCH_PREFIX):
+                warn(
+                    f"{requested}/{name} names no {REVIEW_GATES_KEY}; its findings "
+                    f"contribute to no review gate"
+                )
+            else:
+                warn(
+                    f"{requested}/{name} is outside the {REVIEW_DISPATCH_PREFIX}* "
+                    f"convention: container agents will not launch it as a worker"
+                )
+        entries.append((agent_id, gates if declared else None))
+
+    if len(entries) > MAX_PROJECT_AGENTS:
+        die(f"too many agent definitions: {len(entries)} (limit {MAX_PROJECT_AGENTS})")
+    if not entries:
+        return None
+    return (source, entries)
 
 
 def discover_container_socket(uid: str) -> str | None:
@@ -1205,6 +1416,24 @@ def main(argv: Sequence[str] | None = None) -> NoReturn:
             "-e",
             f"OPENCODE_MODEL_ROUTER_CONFIG={SANDBOX_TARGET}",
         ]
+
+    # Workspace agent definitions, mounted into the agent directory the runtime
+    # scans beside the baked one. They are additional agents: the image's own
+    # definitions stay in place. Read-only, because a container must not write
+    # back into the agent definitions a review lane is judged against.
+    project_agents = discover_project_agents(workspace, config, host_state)
+    if project_agents is not None:
+        agents_source, agents = project_agents
+        print(
+            f"{PROG}: workspace agents: {len(agents)} definition(s) from {agents_source}",
+            flush=True,
+        )
+        contributions = [
+            f"{agent_id} -> {', '.join(gates)}" for agent_id, gates in agents if gates
+        ]
+        if contributions:
+            print(f"{PROG}: review contributions: {'; '.join(contributions)}", flush=True)
+        run_flags += ["-v", f"{agents_source}:{PROJECT_AGENTS_TARGET}:ro"]
 
     # Network mode.
     network = jq_or(config.get("network"), "")
