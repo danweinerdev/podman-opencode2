@@ -21,9 +21,11 @@ build arguments. The launcher can also build the image selected by a project's
 ./bin/opencode-container build --force
 ```
 
-The first command reuses an existing image unless a present local-provider
-catalog has a different checksum. `--force` rebuilds it. Catalog contents never
-enter the build; see [local providers](LOCAL_PROVIDERS.md).
+The first command reuses an existing image unless that image records a
+local-provider checksum and a present catalog differs from it. An image built by
+`make` records no checksum and is used as built, with a warning. `--force`
+rebuilds either way. Catalog contents never enter the build; see
+[local providers](LOCAL_PROVIDERS.md).
 
 To choose a fully qualified image name, omit the tag:
 

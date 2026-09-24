@@ -1348,6 +1348,63 @@ class Suite:
                       via_path=True, extra_env=env,
                       stderr_contains="invalid local provider catalog")
 
+    def _provider_catalog_unstamped_image(self) -> None:
+        # An image built outside the launcher records no catalog digest: `make`
+        # never passes the build argument, so the Containerfile default stamps
+        # "absent", and an image carrying no label at all is the same case. That
+        # is unknown provenance, not staleness: the catalog reaches the container
+        # by mount regardless, so the launch must not discard a build the user
+        # just paid for, and must say what it could not verify.
+        workspace = self.tmp / "provider-unstamped"
+        config_home = self.tmp / "provider-unstamped-config"
+        shared = config_home / "opencode2"
+        shared.mkdir(parents=True)
+        workspace.mkdir()
+        write_json(workspace / ".opencode-sandbox.json", {
+            "image": "opencode2:provider-unstamped-test",
+            "build": {"containerfile": str(ROOT / "Containerfile"), "context": str(ROOT)},
+            "command": ["/bin/true"],
+        })
+        catalog = shared / "local-providers.json"
+        shutil.copyfile(ROOT / "examples" / "local-providers.json.example", catalog)
+        env = {
+            "HOME": str(self.tmp / "provider-unstamped-home"),
+            "XDG_CONFIG_HOME": str(config_home),
+            "PODMAN_IMAGE_EXISTS": "1",
+        }
+
+        for label, reason in (
+            ("absent", "an image whose recorded digest is the Containerfile default"),
+            (None, "an image carrying no provider-catalog label"),
+        ):
+            self.build_argv_log.unlink(missing_ok=True)
+            run_env = dict(env)
+            if label is not None:
+                run_env["PODMAN_IMAGE_LOCAL_PROVIDERS_SHA256"] = label
+            proc = self.run_ok(workspace, via_path=True, extra_env=run_env)
+            if self.build_argv_log.exists():
+                fail(f"launcher rebuilt {reason}")
+            self.has_substring([proc.stderr], "records no provider-catalog digest")
+            self.has_line(
+                self.argv(),
+                f"{catalog}:/opt/opencode/config/opencode/opencode.json:ro",
+            )
+
+        # A launcher-stamped digest still carries the comparison this check
+        # exists for: a moved catalog is exactly one rebuild.
+        self.build_argv_log.unlink(missing_ok=True)
+        proc = self.run_ok(
+            workspace, via_path=True,
+            extra_env={**env, "PODMAN_IMAGE_LOCAL_PROVIDERS_SHA256": "0" * 64},
+        )
+        self.has_line(
+            self.build_argv(),
+            "io.opencode.local-providers-sha256="
+            + hashlib.sha256(catalog.read_bytes()).hexdigest(),
+        )
+        if "records no provider-catalog digest" in proc.stderr:
+            fail(f"a stamped image must not warn about provenance: {proc.stderr}")
+
     def _run_command_passthrough(self) -> Path:
         # "run" is the default action: a bare invocation, "run", and a bare
         # trailing "--" all pass the configured command. Extra arguments after
@@ -1587,6 +1644,7 @@ def main() -> None:
         suite._secrets_subcommand(default_home, default_workspace)
         suite._data_volume_override(default_home, default_workspace)
         suite._provider_catalog_runtime()
+        suite._provider_catalog_unstamped_image()
         bare_workspace = suite._run_command_passthrough()
         suite._dangling_image(bare_workspace)
         suite._non_utf8_config()

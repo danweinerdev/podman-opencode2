@@ -58,10 +58,14 @@ it mounts only that file, read-only, as
 `/opt/opencode/config/opencode/opencode.json`.
 
 Changes take effect on the next launch. If a project has a `build` block, a
-new or changed catalog also triggers a rebuild when its checksum differs from
-the image label. Only the checksum goes into the build; the catalog stays on
-the host. Without a `build` block, an existing image uses the runtime mount.
-Removing the catalog removes the mount on the next launch without a rebuild.
+new or changed catalog also triggers one rebuild when the image carries a
+launcher-recorded checksum and it differs. Only the checksum goes into the
+build; the catalog stays on the host. An image built outside the launcher —
+`make dev`, `make base`, or any build that does not pass the checksum — records
+none, so the launcher uses it as built and warns that the catalog provenance is
+unverified instead of rebuilding it. Without a `build` block, an existing image
+uses the runtime mount. Removing the catalog removes the mount on the next
+launch without a rebuild.
 
 The file must contain a provider-only JSON object (an optional `$schema` is
 allowed). Duplicate keys and credential fields are rejected. Keep API keys,

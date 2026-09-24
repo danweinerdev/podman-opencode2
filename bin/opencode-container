@@ -93,6 +93,10 @@ SANDBOX_TARGET: Final[str] = "/run/opencode/sandbox.json"
 CONTAINER_SOCKET_TARGET: Final[str] = "/run/opencode-container-engine.sock"
 LOCAL_PROVIDERS_TARGET: Final[str] = "/opt/opencode/config/opencode/opencode.json"
 LOCAL_PROVIDERS_LABEL: Final[str] = "io.opencode.local-providers-sha256"
+# A digest the launcher stamped. Anything else on an image — no label, or the
+# "absent" that Containerfile* writes when built without the build argument, as
+# `make` does — means the builder never recorded catalog provenance.
+PROVIDER_DIGEST_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
 OPENCODE_DATA_MOUNT: Final[str] = "/var/lib/opencode-data"
 
 # Provider API keys auto-forwarded when set in the host environment. This is
@@ -1255,7 +1259,21 @@ def main(argv: Sequence[str] | None = None) -> NoReturn:
         # launcher-built images. A changed catalog therefore triggers exactly
         # one rebuild without making its bytes part of the image. Removing the
         # file needs no rebuild because it simply removes the runtime mount.
-        if podman_image_label(image, LOCAL_PROVIDERS_LABEL) != local_providers_sha:
+        #
+        # Only a stamped digest can carry that comparison. An image built by
+        # `make` records "absent", because the Containerfile argument defaults to
+        # it, and that is indistinguishable from a host with no catalog: treating
+        # it as a mismatch discarded every build the user had just paid for, and
+        # the rebuild produced the same bytes because the catalog arrives by
+        # mount either way. Unknown provenance is named instead of paid for.
+        recorded = podman_image_label(image, LOCAL_PROVIDERS_LABEL)
+        if recorded is None or not PROVIDER_DIGEST_RE.fullmatch(recorded):
+            warn(
+                f"image {image} records no provider-catalog digest: it was built "
+                f"outside the launcher, so its catalog provenance is unverified "
+                f"and no rebuild is due"
+            )
+        elif recorded != local_providers_sha:
             image_exists = False
 
     if args.force or not image_exists:
