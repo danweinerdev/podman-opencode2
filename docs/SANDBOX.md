@@ -134,6 +134,10 @@ shared `models` entry. See [model router](MODEL_ROUTER.md).
 This directory is the project's own `.agents`, not your home directory's: host
 `$HOME/.agents` remains unreachable from the container.
 
+The `oc2-verify-and-agents` skill carries the lane template, the `oc2-verify`
+broker's interface and exit codes, and the launch-refusal messages, so a project
+reviewer can be written and checked without reading the launcher or broker source.
+
 ## Saved state
 
 Logins, sessions, and UI preferences are saved in a named volume:
