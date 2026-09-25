@@ -932,8 +932,8 @@ class Suite:
         link = self.tmp / "global-config-link"
         link.symlink_to(real)
         write_json(real / "opencode2" / "model-router.json",
-                   {"schema_version": 1,
-                    "profiles": {"reasoning": {"model": "anthropic/claude-opus-4-1"}}})
+                   {"schema_version": 2,
+                    "models": {"reasoning": {"model": "anthropic/claude-opus-4-1"}}})
         proc = self.run_ok(default_workspace, via_path=True,
                            extra_env={"HOME": str(default_home), "XDG_CONFIG_HOME": str(link)})
         if "user-global routing config" not in proc.stderr:
@@ -998,6 +998,50 @@ class Suite:
                       extra_env={"HOME": str(default_home), "XDG_CONFIG_HOME": str(link)},
                       stderr_contains="global model-router config is not a regular file")
         shutil.rmtree(router)
+
+    def _retired_router_shape_rejected(self, default_home: Path, default_workspace: Path,
+                                       link: Path, router: Path) -> None:
+        # The router's retired v1 shape is refused at launch. The plugin rejects it
+        # too, but there the failure is a disabled plugin: every agent follows the
+        # session model and one log line is the only trace.
+        stale = {"reasoning": {"model": "anthropic/claude-opus-4-1"}}
+        cases = (
+            ({"schema_version": 1, "profiles": stale}, 'uses "profiles"',
+             "launcher accepted a v1 global router file"),
+            ({"schema_version": 1, "models": stale}, "unsupported schema_version",
+             "launcher accepted a retired router schema_version"),
+        )
+        for document, needle, reject in cases:
+            router.write_text(json.dumps(document) + "\n", encoding="utf-8")
+            self.run_fail(default_workspace, reject, via_path=True,
+                          extra_env={"HOME": str(default_home), "XDG_CONFIG_HOME": str(link)},
+                          stderr_contains=(needle,))
+
+        # A v2 global file launches again, so the guard is about the retired shape
+        # and not about the file's presence.
+        router.write_text(json.dumps({"schema_version": 2, "models": stale}) + "\n",
+                          encoding="utf-8")
+
+        workspace = self.tmp / "router-v1-workspace"
+        workspace.mkdir()
+        env = {"HOME": str(default_home), "XDG_CONFIG_HOME": str(link)}
+        write_json(workspace / ".opencode-sandbox.json",
+                   {"model_router": {"schema_version": 1, "profiles": {"x": {"model": "a/b"}}}})
+        self.run_fail(workspace, "launcher accepted a v1 model_router block",
+                      via_path=True, extra_env=env,
+                      stderr_contains=('model_router uses "profiles"',))
+        write_json(workspace / ".opencode-sandbox.json", {"model_router": "nope"})
+        self.run_fail(workspace, "launcher accepted a non-object model_router block",
+                      via_path=True, extra_env=env,
+                      stderr_contains=("model_router must be an object",))
+
+        # The point of the new shape: one agent naming its own model, with no
+        # shared map declared, launches and is mounted for the plugin to read.
+        write_json(workspace / ".opencode-sandbox.json",
+                   {"model_router": {"agents": {"review-adr": {"model": "local/my-model"}}}})
+        self.run_ok(workspace, via_path=True, extra_env=env)
+        self.has_line(self.argv(),
+                      f"{workspace}/.opencode-sandbox.json:/run/opencode/sandbox.json:ro")
 
     def _partial_config(self, default_home: Path, default_workspace: Path) -> None:
         # A present partial config inherits the same defaults and is mounted so
@@ -1639,6 +1683,7 @@ def main() -> None:
                                            default_home, default_workspace)
         router = global_real / "opencode2" / "model-router.json"
         suite._malformed_global_router(default_home, default_workspace, global_link, router)
+        suite._retired_router_shape_rejected(default_home, default_workspace, global_link, router)
         suite._partial_config(default_home, default_workspace)
         suite._podman_secrets(default_home, default_workspace)
         suite._secrets_subcommand(default_home, default_workspace)

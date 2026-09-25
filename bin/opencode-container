@@ -89,6 +89,8 @@ CONTAINERS_WORKSPACE_RESERVED_ROOTS: Final[tuple[str, ...]] = (
 
 GLOBAL_GIT_CONFIG_TARGET: Final[str] = "/run/opencode/gitconfig"
 ROUTER_GLOBAL_TARGET: Final[str] = "/run/opencode/model-router-global.json"
+# The only model-router schema_version this image's router reads.
+ROUTER_SCHEMA_VERSION: Final[int] = 2
 SANDBOX_TARGET: Final[str] = "/run/opencode/sandbox.json"
 CONTAINER_SOCKET_TARGET: Final[str] = "/run/opencode-container-engine.sock"
 LOCAL_PROVIDERS_TARGET: Final[str] = "/opt/opencode/config/opencode/opencode.json"
@@ -400,6 +402,27 @@ def is_reserved_env_name(name: str) -> bool:
 
 
 # --- Host discovery -----------------------------------------------------------
+def require_router_v2(document: dict[str, Any], where: str) -> None:
+    """Refuse a router layer this image's router cannot read, before anything starts.
+
+    The plugin rejects these as well, but its failure mode is a disabled plugin:
+    every agent then follows the session model and a single log line is the only
+    sign anything was wrong. A router file left on the retired shape is a mistake
+    worth stopping the launch over.
+    """
+    if "profiles" in document:
+        die(
+            f'{where} uses "profiles", which the router no longer reads: rename it to '
+            f'"models" and set "schema_version" to {ROUTER_SCHEMA_VERSION}'
+        )
+    version = document.get("schema_version", ROUTER_SCHEMA_VERSION)
+    if version != ROUTER_SCHEMA_VERSION:
+        die(
+            f"{where} has unsupported schema_version {version!r}; "
+            f"the router reads {ROUTER_SCHEMA_VERSION}"
+        )
+
+
 def find_global_router(config_home: str) -> str | None:
     path = config_home + "/opencode2/model-router.json"
     if not os.path.lexists(path):
@@ -411,7 +434,8 @@ def find_global_router(config_home: str) -> str | None:
             raw = handle.read()
     except OSError:
         die(f"unable to read global model-router config: {path}")
-    parse_single_json_object(raw, "global model-router config", path)
+    document = parse_single_json_object(raw, "global model-router config", path)
+    require_router_v2(document, path)
     return os.path.realpath(path)
 
 
@@ -1139,6 +1163,12 @@ def main(argv: Sequence[str] | None = None) -> NoReturn:
     schema_version = jq_or(config.get("schema_version"), 1)
     if jq_string(schema_version) != "1":
         die(f"unsupported schema_version: {jq_string(schema_version)}")
+
+    router_block = config.get("model_router")
+    if router_block is not None:
+        if not isinstance(router_block, dict):
+            die("model_router must be an object")
+        require_router_v2(router_block, f"{config_path} model_router")
 
     containers_enabled = False
     if "containers" in config:
