@@ -136,5 +136,13 @@ their assigned models. The router does not intercept tool calls or enforce
 runtime guards such as web-fetch limits or sensitive-data scrubbing.
 Permissions and agent prompts govern those behaviors.
 
+Request options are the one part of a selection the shipped runtime does not act
+on. `request.headers` and `request.body` are validated, merged, and attached to
+the agent, but nothing forwards them to a provider declared with
+`@ai-sdk/openai-compatible`, which is how [local providers](LOCAL_PROVIDERS.md)
+are declared here. Put a header that must reach such a provider in that provider's
+own `options.headers` instead. The dispatch test pins this behavior; see
+[upstream issues](UPSTREAM_ISSUES.md).
+
 For request options on a model, v2 hooks, and validation details, see the
 [plugin reference](../plugins/model-router/README.md).

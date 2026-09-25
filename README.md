@@ -75,3 +75,4 @@ saved state. See [setup](docs/SETUP.md) to use it with another repository.
 | Manage API keys and saved logins | [Credentials](docs/CREDENTIALS.md) |
 | Change mounts, environment, persistence, or container access | [Sandbox configuration](docs/SANDBOX.md) |
 | Build custom images or run checks | [Development](docs/DEVELOPMENT.md) |
+| Understand a runtime limitation we work around | [Upstream issues](docs/UPSTREAM_ISSUES.md) |

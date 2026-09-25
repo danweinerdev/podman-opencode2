@@ -75,8 +75,13 @@ A **full** config (the plugin defaults, or the merged result):
   Each value is either a name in `models` or an inline selection, so an agent that
   wants its own model needs one entry and no shared declaration.
 - `models` is optional shared storage for selections several agents want. In both
-  forms `model` is `provider/model-id`, and `variant` and `request` are optional;
-  `request` adds `headers` and `body` to that agent's requests.
+  forms `model` is `provider/model-id`, and `variant` and `request` are optional.
+  `request` sets `headers` and `body` on the agent and they survive validation and
+  merging, but the runtime this image ships does not forward that object to a
+  provider declared with `@ai-sdk/openai-compatible`, so none of it arrives. The
+  provider's own `options.headers` do arrive, so a header that must reach such a
+  provider belongs there. The dispatch integration test pins this, and
+  [upstream issues](../../docs/UPSTREAM_ISSUES.md) tracks it.
 - `default_agent` is **optional**; when present it must name an agent whose
   selection resolves.
 - `pin_default_agent_model` is optional and defaults to `false`, which keeps

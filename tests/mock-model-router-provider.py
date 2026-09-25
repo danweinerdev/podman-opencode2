@@ -56,6 +56,9 @@ def handler_for(provider, state):
                     "model": body.get("model"),
                     "route_header": route_header,
                     "route_body": body.get("router_marker"),
+                    # Positive control: the provider's own options.headers, which
+                    # the runtime does forward, proving the wire path is live.
+                    "provider_header": self.headers.get("x-provider-fixed"),
                     "tools": tools,
                 }
             )

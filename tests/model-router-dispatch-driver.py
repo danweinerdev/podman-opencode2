@@ -217,6 +217,22 @@ def main() -> None:
                    for r in records if r.get("provider") == "worker"):
             fail("mock worker provider saw a request for the wrong model")
 
+        # Request options are pinned to what the runtime forwards, not to what
+        # the router asks for. Measured on opencode2 v0.0.0-beta-19234: the
+        # agent `request` object (here `x-router-route` and `router_marker`,
+        # both set by the sandbox model_router block) never reaches an
+        # @ai-sdk/openai-compatible provider, while the provider's own
+        # options.headers (x-provider-fixed) always do. docs/UPSTREAM_ISSUES.md
+        # tracks the gap; a runtime that starts forwarding them fails here on
+        # purpose, and both halves are then inverted to require the markers.
+        if not all(r.get("provider_header") == "provider-options" for r in records):
+            fail("provider-level options.headers never reached the mock, so the "
+                 "wire path was not exercised and the pin below means nothing")
+        if not all(r.get("route_header") is None and r.get("route_body") is None
+                   for r in records):
+            fail("agent request options reached the provider; invert this "
+                 "assertion per docs/UPSTREAM_ISSUES.md")
+
         print("model-router foreground/background dispatch integration test passed "
               "(sandbox model_router block overrides global routing)")
     except BaseException:  # last-resort guard mirroring the shell trap
