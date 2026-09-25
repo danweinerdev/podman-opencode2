@@ -125,14 +125,21 @@ the launcher from the host workspace root.
 - Model-router precedence is baked/plugin options < the standalone user-global
   `${XDG_CONFIG_HOME:-$HOME/.config}/opencode2/model-router.json` < the
   workspace's top-level `model_router`. Each layer shallow-merges partial
-  `profiles`, `agents`, `default_agent`, and `pin_default_agent_model`. The last
-  setting defaults to `false`, allowing the persisted UI model to control the
-  default agent while workers remain profile-routed; set it to `true` to pin the
-  default agent to its profile too. The global result must
-  be valid before the workspace layer is applied; a workspace cannot repair an
-  invalid global cross-reference.
+  `models`, `agents`, `default_agent`, and `pin_default_agent_model`, replacing an
+  entry whole rather than deep-merging it. `schema_version` must be 2; `profiles`
+  was v1's name for `models` and is refused. `agents` maps any valid agent id —
+  baked, a project's `.agents`, or a derived image's — to either a `models` name or
+  an inline `{model, variant?, request?}` selection, so routing one added agent to
+  its own model is one entry with no shared declaration. `pin_default_agent_model`
+  defaults to `false`, leaving the persisted UI model in charge of the default
+  agent while workers follow the model named for them; set it to `true` to pin the
+  default agent too. The global result must be valid before the workspace layer is
+  applied; a workspace cannot repair an invalid global cross-reference.
 - On every launch, a present global router must be one JSON object in a regular
-  file. The launcher canonicalizes and mounts that exact file, never its parent
+  file, in a shape this image's router reads (`schema_version` 2, no `profiles`
+  key); a retired shape stops the launch and names the rename, since the plugin's
+  own rejection would only disable routing and leave one log line behind. The same
+  check applies to a workspace `model_router` block. The launcher canonicalizes and mounts that exact file, never its parent
   directory, read-only at `/run/opencode/model-router-global.json`, and sets
   `OPENCODE_MODEL_ROUTER_GLOBAL_CONFIG`. It independently mounts a present
   workspace sandbox at `/run/opencode/sandbox.json` and retains

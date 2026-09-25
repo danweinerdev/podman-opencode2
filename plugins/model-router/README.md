@@ -34,7 +34,7 @@ The plugin's config is assembled in three layers, in increasing precedence:
 3. **Project overrides** come from the sandbox JSON mounted by the launcher at
    `/run/opencode/sandbox.json`. The plugin reads the path from the
    `OPENCODE_MODEL_ROUTER_CONFIG` environment variable, extracts the top-level
-   `model_router` block, and shallow-merges its `profiles`/`agents`/
+   `model_router` block, and shallow-merges its `models`/`agents`/
    `default_agent` over the global result before validating the final result.
    The workspace-only environment variable remains backward compatible when no
    global config is present.
@@ -50,46 +50,58 @@ A **full** config (the plugin defaults, or the merged result):
 
 ```json
 {
-  "schema_version": 1,
-  "profiles": {
+  "schema_version": 2,
+  "models": {
     "<name>": {
       "model": "provider/model-id",
       "variant": "optional-variant",
       "request": { "headers": {}, "body": {} }
     }
   },
-  "agents": { "<agent-id>": "<profile-name>" },
+  "agents": {
+    "<agent-id>": "<model-name>",
+    "<other-agent>": { "model": "provider/model-id", "variant": "optional-variant" }
+  },
   "default_agent": "orchestrator",
   "pin_default_agent_model": false
 }
 ```
 
-- `schema_version` must be `1`.
-- `profiles` is a non-empty map of profile name → model selection. `model` is
-  `provider/model-id`; `variant` and `request` are optional.
-- `agents` maps arbitrary valid agent ids to profiles, allowing derived images
-  to route additional agent definitions.
-- `default_agent` is **optional**; when present it must name an agent that maps
-  to a defined profile.
+- `schema_version` must be `2`. A config that still carries `profiles` — v1's
+  name for `models` — is refused with the rename spelled out; nothing is
+  translated on the user's behalf.
+- `agents` is the map that decides routing. Keys are arbitrary valid agent ids: a
+  baked agent, a project's `.agents` definition, or one a derived image installs.
+  Each value is either a name in `models` or an inline selection, so an agent that
+  wants its own model needs one entry and no shared declaration.
+- `models` is optional shared storage for selections several agents want. In both
+  forms `model` is `provider/model-id`, and `variant` and `request` are optional;
+  `request` adds `headers` and `body` to that agent's requests.
+- `default_agent` is **optional**; when present it must name an agent whose
+  selection resolves.
 - `pin_default_agent_model` is optional and defaults to `false`, which keeps
   selecting the default agent while leaving its model under OpenCode's
-  persisted UI preference. Set it to `true` to route that agent through its
-  profile too. Request options still apply in either mode. Before a UI model has
+  persisted UI preference. Set it to `true` to route that agent through its model
+  too. Request options still apply in either mode. Before a UI model has
   been selected, OpenCode uses its provider fallback.
 
 A **partial override** (either the standalone user-global document or the
 `model_router` block of a sandbox config) may carry only the keys it wants to
-change — e.g. a single profile, a single agent mapping, or just
+change — one shared model, one agent's selection, or just
 `default_agent`/`pin_default_agent_model`. Its entries replace the same-named
-entries in lower-precedence layers (shallow merge; profile objects are not
-deep-merged). An override may
-point an agent at a profile defined by a lower layer. Global cross-references
-are validated after merging over defaults, before the workspace layer; final
-cross-references are validated again after the workspace merge.
+entries in lower-precedence layers (shallow merge; a shared model and an inline
+selection are each replaced whole, never deep-merged), so a project can move one
+agent off a shared model onto its own, or the reverse, without disturbing the
+rest. An override may point an agent at a model defined by a lower layer. Global
+cross-references are validated after merging over defaults, before the workspace
+layer; final cross-references are validated again after the workspace merge.
 
-Baked profiles demonstrate OpenAI + DeepSeek provider routing; only the
+Baked models demonstrate OpenAI + DeepSeek provider routing; only the
 corresponding provider environment variables (`OPENAI_API_KEY`,
-`DEEPSEEK_API_KEY`) are required at runtime.
+`DEEPSEEK_API_KEY`) are required at runtime. The launcher refuses a file in the
+retired shape before it starts a container, because the plugin's own rejection
+looks different from outside: the plugin is disabled, every agent follows the
+session model, and one log line is the only trace.
 
 ## Testing
 
@@ -99,7 +111,7 @@ npm test      # node:test, including a mock AgentDraft
 ```
 
 The tests prove multi-provider assignment, variant/request merge and defaults,
-definition-existence validation, three-layer shallow-merge precedence,
+definition-existence validation, both target forms, three-layer shallow-merge precedence,
 independent global validation, malformed override/path handling, setup
 registering a merged config, bad-config rejection, and that the source contains
 no legacy v1 hook/dispatch markers.

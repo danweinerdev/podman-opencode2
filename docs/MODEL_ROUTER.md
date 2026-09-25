@@ -2,12 +2,13 @@
 
 [Back to README](../README.md)
 
-The router chooses a model for each agent. A **profile** names a model and its
-options; an **agent mapping** assigns that profile to an agent.
+The router chooses a model for each agent. `agents` is that map: every agent
+names what it runs on, either as its own model selection written inline or as the
+name of a shared entry in `models`.
 
 Your default agent follows the model selected in the OpenCode UI. Worker agents
-use their profiles. Set `pin_default_agent_model` to `true` to make the default
-agent use its profile too.
+use the model you name for them. Set `pin_default_agent_model` to `true` to make the default
+agent use the model named for it too.
 
 ## Set models for all projects
 
@@ -23,13 +24,25 @@ Edit that file to change only the routes you need. For example:
 
 ```json
 {
-  "schema_version": 1,
-  "profiles": {
+  "schema_version": 2,
+  "models": {
     "local-coding": { "model": "local/my-model" }
   },
   "agents": {
     "implementer": "local-coding",
     "bounded-editor": "local-coding"
+  }
+}
+```
+
+Two workers want the same model here, so it is named once. One agent wanting its
+own model needs no `models` entry at all:
+
+```json
+{
+  "schema_version": 2,
+  "agents": {
+    "review-adr": { "model": "local/my-model", "variant": "high" }
   }
 }
 ```
@@ -45,15 +58,22 @@ Add a `model_router` block to the project's `.opencode-sandbox.json`:
 {
   "schema_version": 1,
   "model_router": {
-    "profiles": {
-      "coding": { "model": "local/my-model" }
+    "models": {
+      "deep-review": { "model": "deepseek/deepseek-v4-pro", "variant": "high" }
     },
-    "agents": { "engineer": "coding" },
+    "agents": {
+      "engineer": { "model": "local/my-model" },
+      "review-adr": "deep-review"
+    },
     "default_agent": "engineer",
     "pin_default_agent_model": true
   }
 }
 ```
+
+The engineer runs on a model only it uses, so the selection is written inline;
+`review-adr`, a reviewer this project added in `.agents`, shares one. Both forms
+can appear in the same block, and either may come from any layer.
 
 Restart the launcher to apply routing changes. No image rebuild is needed.
 Keep credentials out of router files; use [provider credentials](CREDENTIALS.md).
@@ -66,13 +86,14 @@ Settings apply in this order, with later settings taking priority:
 2. Your user-wide `opencode2/model-router.json`.
 3. The project's `model_router` block.
 
-You can override individual profiles and agent mappings. Replacing a profile
-replaces its whole object, including any `variant` or `request` options.
-Omitted settings keep their previous values.
+You can override individual models and agent entries. Replacing either replaces
+its whole object, including any `variant` or `request` options, so one agent can
+be moved off a shared model onto its own inline selection, or the reverse, without
+touching the others. Omitted settings keep their previous values.
 
 Each layer must be valid after it is applied. A project override cannot fix an
-invalid global mapping. A mapping must name an existing agent; it does not
-create one. Custom images can supply additional agent definitions.
+invalid global entry. An entry must name an existing agent; it does not create
+one. Projects (`.agents`) and derived images supply the additional definitions.
 
 ## Available agents
 
@@ -94,12 +115,19 @@ The baked routes use OpenAI and DeepSeek. See
 [container-config.json](../container-config.json) for the exact model assignments.
 Agents have their own prompts and permissions. SDD uses these same workers.
 
-A project can add its own agents from `.agents`; name one under
-`model_router.agents` to route it onto a profile, the same way you route a
-baked agent. An added agent that is not named here inherits the session model,
-and an id named here that never arrives disables routing for every agent, so
-check the spelling against the directory listing. See
-[project agent definitions](SANDBOX.md#project-agent-definitions).
+A project adds its own agents in `.agents`; name one under `model_router.agents`
+and give it a model inline, which is what the inline form is for. An agent that is
+not named here inherits the session model, and an id named here that never arrives
+disables routing for every agent, so check the spelling against the directory
+listing. See [project agent definitions](SANDBOX.md#project-agent-definitions).
+
+## Upgrading from the previous shape
+
+`profiles` is now `models`, and an `agents` value may be that shared name or the
+model selection itself. The version is 2, and version 1 is refused rather than
+read half-way: a launcher pointed at a `profiles` file stops with a message naming
+the rename, because the alternative is a disabled router and every agent quietly
+following the session model.
 
 ## Plugin details
 
@@ -108,5 +136,5 @@ their assigned models. The router does not intercept tool calls or enforce
 runtime guards such as web-fetch limits or sensitive-data scrubbing.
 Permissions and agent prompts govern those behaviors.
 
-For profile request options, v2 hooks, and validation details, see the
+For request options on a model, v2 hooks, and validation details, see the
 [plugin reference](../plugins/model-router/README.md).

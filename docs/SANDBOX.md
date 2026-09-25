@@ -127,8 +127,9 @@ A contribution never becomes a gate of its own: a phase gate records exactly fou
 lane results, so project reviewers widen what a gate checks rather than adding
 lanes.
 
-To route a new agent onto a lane profile, name it under `model_router.agents`;
-see [model router](MODEL_ROUTER.md).
+To route a new agent to a model, give it an entry under `model_router.agents`:
+either its own `{"model": "provider/model-id", "variant": "..."}` or the name of a
+shared `models` entry. See [model router](MODEL_ROUTER.md).
 
 This directory is the project's own `.agents`, not your home directory's: host
 `$HOME/.agents` remains unreachable from the container.
