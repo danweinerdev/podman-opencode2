@@ -44,9 +44,9 @@
     {
       "package": "file:///opt/opencode/plugins/model-router",
       "options": {
-        "schema_version": 1,
+        "schema_version": 2,
         "pin_default_agent_model": false,
-        "profiles": {
+        "models": {
           "orchestration": { "model": "openai/gpt-5.6-sol" },
           "reasoning": { "model": "deepseek/deepseek-v4-pro", "variant": "high" },
           "implementation": { "model": "deepseek/deepseek-v4-pro", "variant": "max" },

@@ -105,12 +105,12 @@ def main() -> None:
 
     # The user-global layer routes both agents to the OPPOSITE provider on
     # purpose. Only the workspace model_router block below may correct it, so
-    # the final assertions prove the sandbox block's profiles/agents actually
+    # the final assertions prove the sandbox block's models/agents actually
     # won.
     write_json(SCRATCH / "router-global.json", {
-        "schema_version": 1,
+        "schema_version": 2,
         "pin_default_agent_model": True,
-        "profiles": {
+        "models": {
             "orchestration": {"model": "fake-worker/worker-model"},
             "extraction": {"model": "fake-parent/parent-model"},
         },
@@ -125,9 +125,9 @@ def main() -> None:
         "schema_version": 1,
         "workspace": ".",
         "model_router": {
-            "schema_version": 1,
+            "schema_version": 2,
             "pin_default_agent_model": True,
-            "profiles": {
+            "models": {
                 "orchestration": {
                     "model": "fake-parent/parent-model",
                     "request": {"headers": {"x-router-route": "parent"},
@@ -141,7 +141,9 @@ def main() -> None:
             },
             "agents": {"orchestrator": "orchestration",
                        "extractor": "extraction",
-                       "title": "orchestration"},
+                       # One agent may name its own model inline; v2 requires no
+                       # shared entry for a single agent.
+                       "title": {"model": "fake-parent/parent-model"}},
             "default_agent": "orchestrator",
         },
     })

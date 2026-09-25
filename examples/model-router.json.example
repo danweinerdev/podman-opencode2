@@ -1,6 +1,6 @@
 {
-  "schema_version": 1,
-  "profiles": {
+  "schema_version": 2,
+  "models": {
     "orchestration": {
       "model": "openai/gpt-5.6-sol"
     },

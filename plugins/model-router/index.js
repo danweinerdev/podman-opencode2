@@ -16,15 +16,22 @@
  * workspace override. Each layer shallow-merges over the previous one. The
  * global result is validated before the workspace is read, then the final
  * result is validated again. Routing accepts arbitrary valid agent ids so a
- * sandbox can route additional agent definitions supplied by a derived image.
+ * sandbox can route additional agent definitions supplied by a project or a
+ * derived image.
+ *
+ * v2 shape: `agents` is the one map that matters. Each value is either the name
+ * of an entry in the optional shared `models` map or an inline
+ * `{ model, variant?, request? }` selection, so naming a model for a project
+ * agent is one entry and does not require declaring a shared entry first.
  *
  * Exported for tests:
  *   - `validateConfig(value)`        full merged-config validation (throws)
  *   - `validateOverride(value)`      partial `model_router` shape validation
- *   - `mergeConfig(base, override)`  shallow profile/agent merge
+ *   - `mergeConfig(base, override)`  shallow models/agents merge
  *   - `readStandaloneModelRouterOverride(path)` read a standalone partial config
  *   - `readModelRouterOverride(path)` read + parse a sandbox JSON file
- *   - `modelRefFor(profile)`         profile -> { providerID, id, variant? }
+ *   - `modelRefFor(spec)`            model selection -> { providerID, id, variant? }
+ *   - `modelSpecFor(config, agentID)` an agent's resolved model selection
  *   - `applyAgentConfig(draft, config)`  pure draft application
  *   - `BAKED_AGENTS` and `DEFAULT_CONFIG`
  */
@@ -35,7 +42,7 @@ import { resolve } from "node:path"
 
 import { define } from "@opencode-ai/plugin/v2/promise"
 
-export const SCHEMA_VERSION = 1
+export const SCHEMA_VERSION = 2
 
 /**
  * Agent ids the container bakes as OpenCode agent definitions. The
@@ -60,12 +67,15 @@ export const BAKED_AGENTS = Object.freeze([
  * Bundled fallback configuration. Demonstrates OpenAI + DeepSeek provider
  * routing: orchestration/extraction run on OpenAI, reasoning/implementation/
  * review on DeepSeek. Only the corresponding provider environment variables
- * (OPENAI_API_KEY / DEEPSEEK_API_KEY) are required at runtime.
+ * (OPENAI_API_KEY / DEEPSEEK_API_KEY) are required at runtime. The shared
+ * `models` entries exist because four review lanes and two workers genuinely
+ * want the same selection; an agent that wants its own model can name it
+ * inline instead.
  */
 export const DEFAULT_CONFIG = Object.freeze({
-  schema_version: 1,
+  schema_version: 2,
   pin_default_agent_model: false,
-  profiles: {
+  models: {
     orchestration: { model: "openai/gpt-5.6-sol" },
     reasoning: { model: "deepseek/deepseek-v4-pro", variant: "high" },
     implementation: { model: "deepseek/deepseek-v4-pro", variant: "max" },
@@ -99,19 +109,47 @@ function rejectUnknown(value, allowed, context) {
   }
 }
 
-const PROFILE_NAME_RE = /^[a-z0-9][a-z0-9.-]*$/
+const MODEL_NAME_RE = /^[a-z0-9][a-z0-9.-]*$/
 const AGENT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
+const SPEC_FIELDS = ["model", "variant", "request"]
+const TARGET_HINT = 'must name an entry in "models" or be a {model, variant} object'
+
+/**
+ * v1 stored its model selections under `profiles`. Naming the rename is more
+ * useful than the generic unknown-field error a stale file would otherwise get.
+ */
+function rejectV1(value) {
+  if (Object.hasOwn(value, "profiles")) {
+    throw new Error(
+      `"profiles" is not read at schema_version ${SCHEMA_VERSION}: rename it to "models", ` +
+        `and give each "agents" value a model name or a {model, variant} object`,
+    )
+  }
+}
+
+/**
+ * The one shape both validators reject: a schema_version this build cannot
+ * read. v1 is refused rather than translated, so a stale file names the new
+ * shape instead of silently routing on a half-read config.
+ */
+function versionError(value) {
+  return new Error(
+    `unsupported schema_version: ${String(value.schema_version)}; this router reads ` +
+      `schema_version ${SCHEMA_VERSION}, where "profiles" is renamed to "models" and each ` +
+      `"agents" value ${TARGET_HINT}`,
+  )
+}
 
 /**
  * Parse a `"provider/model-id"` string into `{ providerID, id }`.
  */
-export function parseModelRef(model) {
+export function parseModelRef(model, context = "model") {
   if (typeof model !== "string" || model.length === 0) {
-    throw new Error("profile.model must be a non-empty string")
+    throw new Error(`${context} must be a non-empty string`)
   }
   const separator = model.indexOf("/")
   if (separator <= 0 || separator === model.length - 1) {
-    throw new Error(`profile.model must use provider/model format: ${JSON.stringify(model)}`)
+    throw new Error(`${context} must use provider/model format: ${JSON.stringify(model)}`)
   }
   return {
     providerID: model.slice(0, separator),
@@ -120,35 +158,61 @@ export function parseModelRef(model) {
 }
 
 /**
- * Build a native `ModelRef` ({ providerID, id, variant? }) from a profile.
+ * Build a native `ModelRef` ({ providerID, id, variant? }) from a model selection.
  */
-export function modelRefFor(profile) {
-  const { providerID, id } = parseModelRef(profile.model)
+export function modelRefFor(spec) {
+  const { providerID, id } = parseModelRef(spec.model)
   const ref = { providerID, id }
-  if (typeof profile.variant === "string" && profile.variant.length > 0) {
-    ref.variant = profile.variant
+  if (typeof spec.variant === "string" && spec.variant.length > 0) {
+    ref.variant = spec.variant
   }
   return ref
 }
 
-function validateProfile(profile, context) {
-  if (!isObject(profile)) throw new Error(`${context} must be an object`)
-  rejectUnknown(profile, ["model", "variant", "request"], context)
-  parseModelRef(profile.model)
-  if (profile.variant !== undefined && (typeof profile.variant !== "string" || profile.variant.length === 0)) {
+function validateModelSpec(spec, context) {
+  if (!isObject(spec)) throw new Error(`${context} must be an object`)
+  rejectUnknown(spec, SPEC_FIELDS, context)
+  parseModelRef(spec.model, `${context}.model`)
+  if (spec.variant !== undefined && (typeof spec.variant !== "string" || spec.variant.length === 0)) {
     throw new Error(`${context}.variant must be a non-empty string`)
   }
-  if (profile.request !== undefined) {
-    if (!isObject(profile.request)) throw new Error(`${context}.request must be an object`)
-    rejectUnknown(profile.request, ["headers", "body"], `${context}.request`)
-    if (profile.request.headers !== undefined && !isObject(profile.request.headers)) {
+  if (spec.request !== undefined) {
+    if (!isObject(spec.request)) throw new Error(`${context}.request must be an object`)
+    rejectUnknown(spec.request, ["headers", "body"], `${context}.request`)
+    if (spec.request.headers !== undefined && !isObject(spec.request.headers)) {
       throw new Error(`${context}.request.headers must be an object`)
     }
-    if (profile.request.body !== undefined && !isObject(profile.request.body)) {
+    if (spec.request.body !== undefined && !isObject(spec.request.body)) {
       throw new Error(`${context}.request.body must be an object`)
     }
   }
-  return profile
+  return spec
+}
+
+/** Shape-only check of one `agents` value: a model name or an inline selection. */
+function validateAgentTarget(agent, target) {
+  if (!AGENT_ID_RE.test(agent)) {
+    throw new Error(`invalid agent id: ${JSON.stringify(agent)}`)
+  }
+  if (typeof target === "string") {
+    if (target.length === 0) throw new Error(`agents.${agent} ${TARGET_HINT}`)
+    return target
+  }
+  if (isObject(target)) {
+    validateModelSpec(target, `agents.${agent}`)
+    return undefined
+  }
+  throw new Error(`agents.${agent} ${TARGET_HINT}`)
+}
+
+/**
+ * An agent's model selection from a validated config: the inline object, or the
+ * named entry in `models`. Returns undefined only for an unvalidated config.
+ */
+export function modelSpecFor(config, agentID) {
+  const target = config.agents?.[agentID]
+  if (typeof target === "string") return config.models?.[target]
+  return isObject(target) ? target : undefined
 }
 
 /**
@@ -157,49 +221,44 @@ function validateProfile(profile, context) {
  *
  * Accepted shape:
  *   {
- *     schema_version: 1,
- *     profiles: { [name]: { model: "provider/model", variant?, request? } },
- *     agents: { [agent-id]: "<profile-name>" },
- *     default_agent: "<agent-id>",  // optional; must resolve to a profile
+ *     schema_version: 2,
+ *     models?: { [name]: { model: "provider/model", variant?, request? } },
+ *     agents: { [agent-id]: "<model-name>" | { model, variant?, request? } },
+ *     default_agent?: "<agent-id>",  // optional; must resolve to a model
  *     pin_default_agent_model: false // optional; defaults to false
  *   }
  *
- * - `profiles` is required and non-empty; every profile must be valid.
- * - `agents` maps valid agent ids to defined profiles.
- * - `default_agent` is optional; when present it must name an agent that maps
- *   to a defined profile.
+ * - `models` is optional: an agent may carry its own selection inline.
+ * - `agents` is required and maps valid agent ids to a named model or an inline
+ *   selection. Every name must resolve, here or in a layer below.
+ * - `default_agent` is optional; when present it must be an agent whose
+ *   selection resolves.
  */
 export function validateConfig(value) {
   if (!isObject(value)) throw new Error("model-router config must be an object")
+  rejectV1(value)
   rejectUnknown(
     value,
-    ["schema_version", "profiles", "agents", "default_agent", "pin_default_agent_model"],
+    ["schema_version", "models", "agents", "default_agent", "pin_default_agent_model"],
     "model-router config",
   )
 
-  if (value.schema_version !== SCHEMA_VERSION) {
-    throw new Error(`unsupported schema_version: ${String(value.schema_version)}`)
-  }
-  if (!isObject(value.profiles) || Object.keys(value.profiles).length === 0) {
-    throw new Error("profiles must be a non-empty object")
-  }
-  for (const [name, profile] of Object.entries(value.profiles)) {
-    if (!PROFILE_NAME_RE.test(name)) {
-      throw new Error(`invalid profile name: ${JSON.stringify(name)}`)
+  if (value.schema_version !== SCHEMA_VERSION) throw versionError(value)
+
+  if (value.models !== undefined && !isObject(value.models)) throw new Error("models must be an object")
+  const models = value.models ?? {}
+  for (const [name, spec] of Object.entries(models)) {
+    if (!MODEL_NAME_RE.test(name)) {
+      throw new Error(`invalid model name: ${JSON.stringify(name)}`)
     }
-    validateProfile(profile, `profiles.${name}`)
+    validateModelSpec(spec, `models.${name}`)
   }
 
   if (!isObject(value.agents)) throw new Error("agents must be an object")
-  for (const [agent, profileName] of Object.entries(value.agents)) {
-    if (!AGENT_ID_RE.test(agent)) {
-      throw new Error(`invalid agent id: ${JSON.stringify(agent)}`)
-    }
-    if (typeof profileName !== "string" || profileName.length === 0) {
-      throw new Error(`agents.${agent} must name a profile`)
-    }
-    if (!Object.hasOwn(value.profiles, profileName)) {
-      throw new Error(`agents.${agent} references missing profile ${JSON.stringify(profileName)}`)
+  for (const [agent, target] of Object.entries(value.agents)) {
+    const name = validateAgentTarget(agent, target)
+    if (name !== undefined && !Object.hasOwn(models, name)) {
+      throw new Error(`agents.${agent} names undefined model ${JSON.stringify(name)}`)
     }
   }
 
@@ -211,12 +270,14 @@ export function validateConfig(value) {
     if (typeof value.default_agent !== "string" || value.default_agent.length === 0) {
       throw new Error("default_agent must name an agent")
     }
-    const defaultProfile = value.agents[value.default_agent]
-    if (typeof defaultProfile !== "string" || defaultProfile.length === 0) {
-      throw new Error(`default_agent ${JSON.stringify(value.default_agent)} has no agent mapping`)
+    if (!Object.hasOwn(value.agents, value.default_agent)) {
+      throw new Error(`default_agent ${JSON.stringify(value.default_agent)} has no agent entry`)
     }
-    if (!Object.hasOwn(value.profiles, defaultProfile)) {
-      throw new Error(`default_agent ${JSON.stringify(value.default_agent)} references missing profile ${JSON.stringify(defaultProfile)}`)
+    if (modelSpecFor(value, value.default_agent) === undefined) {
+      throw new Error(
+        `default_agent ${JSON.stringify(value.default_agent)} ` +
+          `names undefined model ${JSON.stringify(value.agents[value.default_agent])}`,
+      )
     }
   }
 
@@ -226,39 +287,35 @@ export function validateConfig(value) {
 /**
  * Validate a partial `model_router` override block (the top-level
  * `model_router` of a sandbox config). This is shape-only: cross-references
- * (an agent naming a profile, or `default_agent` resolving) are checked after
- * the override is merged over the defaults, because an override may reference
- * a profile that only the defaults define.
+ * (an agent naming a model, or `default_agent` resolving) are checked after
+ * the override is merged over the defaults, because an override may name a
+ * model that only a lower layer defines.
  */
 export function validateOverride(value) {
   if (!isObject(value)) throw new Error("model_router must be an object")
+  rejectV1(value)
   rejectUnknown(
     value,
-    ["schema_version", "profiles", "agents", "default_agent", "pin_default_agent_model"],
+    ["schema_version", "models", "agents", "default_agent", "pin_default_agent_model"],
     "model_router",
   )
 
   if (value.schema_version !== undefined && value.schema_version !== SCHEMA_VERSION) {
-    throw new Error(`unsupported schema_version: ${String(value.schema_version)}`)
+    throw versionError(value)
   }
-  if (value.profiles !== undefined) {
-    if (!isObject(value.profiles)) throw new Error("profiles must be an object")
-    for (const [name, profile] of Object.entries(value.profiles)) {
-      if (!PROFILE_NAME_RE.test(name)) {
-        throw new Error(`invalid profile name: ${JSON.stringify(name)}`)
+  if (value.models !== undefined) {
+    if (!isObject(value.models)) throw new Error("models must be an object")
+    for (const [name, spec] of Object.entries(value.models)) {
+      if (!MODEL_NAME_RE.test(name)) {
+        throw new Error(`invalid model name: ${JSON.stringify(name)}`)
       }
-      validateProfile(profile, `profiles.${name}`)
+      validateModelSpec(spec, `models.${name}`)
     }
   }
   if (value.agents !== undefined) {
     if (!isObject(value.agents)) throw new Error("agents must be an object")
-    for (const [agent, profileName] of Object.entries(value.agents)) {
-      if (!AGENT_ID_RE.test(agent)) {
-        throw new Error(`invalid agent id: ${JSON.stringify(agent)}`)
-      }
-      if (typeof profileName !== "string" || profileName.length === 0) {
-        throw new Error(`agents.${agent} must name a profile`)
-      }
+    for (const [agent, target] of Object.entries(value.agents)) {
+      validateAgentTarget(agent, target)
     }
   }
   if (value.pin_default_agent_model !== undefined && typeof value.pin_default_agent_model !== "boolean") {
@@ -274,18 +331,18 @@ export function validateOverride(value) {
 }
 
 /**
- * Shallow-merge a partial override over a full base config: profile and agent
- * maps merge at the top-level key (an override entry replaces the base entry
- * for that name; profile objects are not deep-merged). Overrides may add
- * profiles and agent mappings; scalar settings fall back to the base when
- * absent. The override is shape-validated first; the caller validates the
- * merged result.
+ * Shallow-merge a partial override over a full base config: the shared-model and
+ * agent maps merge at the top-level key (an override entry replaces the base
+ * entry for that name; neither object is deep-merged, so an inline selection
+ * replaces the whole one it overrides). Overrides may add models and agents;
+ * scalar settings fall back to the base when absent. The override is
+ * shape-validated first; the caller validates the merged result.
  */
 export function mergeConfig(base, override) {
   validateOverride(override)
   const merged = {
     schema_version: override.schema_version ?? base.schema_version,
-    profiles: { ...base.profiles, ...(override.profiles ?? {}) },
+    models: { ...(base.models ?? {}), ...(override.models ?? {}) },
     agents: { ...base.agents, ...(override.agents ?? {}) },
   }
   const defaultAgent = override.default_agent ?? base.default_agent
@@ -335,8 +392,8 @@ export async function readModelRouterOverride(path) {
 
 /**
  * Apply a validated config to an `AgentDraft`:
- *   - for every configured agent mapping, set `agent.model` to the profile's
- *     `ModelRef` and merge any optional request headers/body into
+ *   - for every configured agent entry, set `agent.model` to that agent's model
+ *     selection as a `ModelRef` and merge any optional request headers/body into
  *     `agent.request`; when `pin_default_agent_model` is false, preserve the
  *     default agent's existing model instead;
  *   - call `draft.default(config.default_agent)` when a default is set.
@@ -355,25 +412,25 @@ export function applyAgentConfig(draft, config, declaredAgentIDs = []) {
     throw new Error(`model-router agent definition(s) not found: ${missing.join(", ")}`)
   }
 
-  // Preflight every mapping before mutation so a typo cannot synthesize an
+  // Preflight every entry before mutation so a typo cannot synthesize an
   // unrestricted primary agent through AgentDraft.update's create-on-miss
   // behavior. The pinned runtime activates external plugins before its
   // Markdown-agent transform, so declared definitions are allowed to be
   // created here and completed by that later transform.
-  for (const [agentID, profileName] of Object.entries(resolved.agents)) {
-    const profile = resolved.profiles[profileName]
-    if (!profile) continue
+  for (const agentID of Object.keys(resolved.agents)) {
+    const spec = modelSpecFor(resolved, agentID)
+    if (!spec) continue
     draft.update(agentID, (item) => {
       if (pinDefaultAgentModel || agentID !== resolved.default_agent) {
-        item.model = modelRefFor(profile)
+        item.model = modelRefFor(spec)
       }
-      if (isObject(profile.request)) {
+      if (isObject(spec.request)) {
         if (!isObject(item.request)) item.request = {}
-        if (isObject(profile.request.headers)) {
-          item.request.headers = { ...(item.request.headers ?? {}), ...profile.request.headers }
+        if (isObject(spec.request.headers)) {
+          item.request.headers = { ...(item.request.headers ?? {}), ...spec.request.headers }
         }
-        if (isObject(profile.request.body)) {
-          item.request.body = { ...(item.request.body ?? {}), ...profile.request.body }
+        if (isObject(spec.request.body)) {
+          item.request.body = { ...(item.request.body ?? {}), ...spec.request.body }
         }
       }
     })

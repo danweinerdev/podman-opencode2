@@ -23,14 +23,15 @@
     "data_volume": "my-project-opencode2-data"
   },
   "model_router": {
-    "schema_version": 1,
+    "schema_version": 2,
     "pin_default_agent_model": false,
-    "profiles": {
+    "models": {
       "reasoning": { "model": "anthropic/claude-opus-4-1", "variant": "high" }
     },
     "agents": {
       "reasoner": "reasoning",
-      "implementer": "implementation"
+      "implementer": "implementation",
+      "review-adr": { "model": "anthropic/claude-opus-4-1" }
     }
   },
   "network": "slirp4netns",

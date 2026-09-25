@@ -11,6 +11,7 @@ import defaultExport, {
   applyAgentConfig,
   mergeConfig,
   modelRefFor,
+  modelSpecFor,
   readModelRouterOverride,
   readStandaloneModelRouterOverride,
   validateConfig,
@@ -123,10 +124,30 @@ test("container config registers the router through the native v2 loader", async
   )
   assert.ok(entry, "pinned runtime rejects configured plugin files; register model-router by directory URL")
   assert.equal(typeof entry.options, "object")
-  assert.equal(entry.options.schema_version, 1)
+  assert.equal(entry.options.schema_version, 2)
   assert.equal(entry.options.pin_default_agent_model, false)
+  // The schema and the baked options must agree on the v2 vocabulary: the shared
+  // map is `models`, and one agent's value is either a name in it or an inline
+  // selection. A drift here is invisible to every other test in this file.
+  assert.equal("profiles" in entry.options, false)
+  assert.equal(typeof entry.options.models, "object")
+  assert.deepEqual(schema.$defs.routerConfig.required, ["schema_version", "agents"])
+  assert.deepEqual(schema.$defs.routerConfig.properties.schema_version, { const: 2 })
+  assert.equal(
+    schema.$defs.routerConfig.properties.models.additionalProperties.$ref,
+    "#/$defs/modelSpec",
+  )
+  assert.deepEqual(
+    schema.$defs.routerConfig.properties.agents.additionalProperties.anyOf.map(
+      (form) => form.type ?? form.$ref,
+    ),
+    ["string", "#/$defs/modelSpec"],
+  )
   assert.equal("model" in config, false)
   assert.deepEqual(Object.keys(entry.options.agents).sort(), [...BAKED_AGENTS].sort())
+  // The baked options are the config every layer merges onto, so the plugin's own
+  // validator must accept them as-is.
+  assert.equal(validateConfig(entry.options), entry.options)
 })
 
 test("container keeps policy assets root-owned and installs only native agents", async () => {
@@ -295,9 +316,9 @@ test("source does not contain legacy v1 hook or dispatch markers", async () => {
 
 test("assigns models across multiple providers (OpenAI + DeepSeek)", () => {
   const config = {
-    schema_version: 1,
+    schema_version: 2,
     pin_default_agent_model: true,
-    profiles: {
+    models: {
       orchestration: { model: "openai/gpt-5.6-sol" },
       reasoning: { model: "deepseek/deepseek-v4-pro" },
       implementation: { model: "deepseek/deepseek-v4-pro" },
@@ -340,9 +361,9 @@ test("assigns models across multiple providers (OpenAI + DeepSeek)", () => {
 
 test("assigns variant and merges request headers/body, leaving unconfigured request empty", () => {
   const config = {
-    schema_version: 1,
+    schema_version: 2,
     pin_default_agent_model: true,
-    profiles: {
+    models: {
       orchestration: {
         model: "openai/gpt-5.6-sol",
         variant: "high",
@@ -381,7 +402,7 @@ test("assigns variant and merges request headers/body, leaving unconfigured requ
 
 test("merges request fields into a pre-populated agent request without clobbering", () => {
   const config = fullConfig()
-  config.profiles.orchestration = {
+  config.models.orchestration = {
     model: "openai/gpt-5.6-sol",
     request: { headers: { "x-b": "2" }, body: { b: 2 } },
   }
@@ -404,8 +425,8 @@ test("merges request fields into a pre-populated agent request without clobberin
 test("initializes a missing agent request object before applying request fields", () => {
   const { draft, agent } = makeDraft([agentInfo("orchestrator", { request: undefined })])
   applyAgentConfig(draft, {
-    schema_version: 1,
-    profiles: {
+    schema_version: 2,
+    models: {
       orchestration: {
         model: "openai/gpt-5.6-sol",
         request: { headers: { "x-routing": "primary" } },
@@ -427,8 +448,8 @@ test("sets the default agent via draft.default", () => {
 test("can leave the default agent model unpinned while routing worker agents", () => {
   const config = fullConfig()
   config.pin_default_agent_model = false
-  config.profiles.orchestration = {
-    ...config.profiles.orchestration,
+  config.models.orchestration = {
+    ...config.models.orchestration,
     request: { headers: { "x-routing": "primary" } },
   }
   const { draft, agent, defaults } = makeDraft(
@@ -483,8 +504,8 @@ test("leaves unmapped agents untouched", () => {
 test("rejects missing agent definitions before mutating the draft", () => {
   const { draft, agent, defaults } = makeDraft([agentInfo("reasoner")])
   const config = {
-    schema_version: 1,
-    profiles: { reasoning: { model: "deepseek/deepseek-v4-pro", variant: "high" } },
+    schema_version: 2,
+    models: { reasoning: { model: "deepseek/deepseek-v4-pro", variant: "high" } },
     agents: { reasoner: "reasoning", ghost: "reasoning" },
     default_agent: "ghost",
   }
@@ -498,9 +519,9 @@ test("rejects missing agent definitions before mutating the draft", () => {
 test("allows an agent backed by a later Markdown definition to be created", () => {
   const { draft, agent, defaults } = makeDraft([])
   const config = {
-    schema_version: 1,
+    schema_version: 2,
     pin_default_agent_model: true,
-    profiles: { extraction: { model: "openai/gpt-5.6-luna" } },
+    models: { extraction: { model: "openai/gpt-5.6-luna" } },
     agents: { extractor: "extraction" },
     default_agent: "extractor",
   }
@@ -513,8 +534,8 @@ test("allows an agent backed by a later Markdown definition to be created", () =
 
 test("routes arbitrary valid agent ids, not a closed role list", () => {
   const config = {
-    schema_version: 1,
-    profiles: {
+    schema_version: 2,
+    models: {
       orchestration: { model: "openai/gpt-5.6-sol" },
       custom: { model: "deepseek/deepseek-v4-pro" },
     },
@@ -545,31 +566,44 @@ test("accepts a config with no default_agent (optional) and skips draft.default"
   assert.deepEqual(defaults, [])
 })
 
-test("rejects a default_agent with no agent mapping", () => {
+test("rejects a default_agent with no agent entry", () => {
   const config = fullConfig()
   config.default_agent = "reasoner"
   delete config.agents.reasoner
-  assert.throws(() => validateConfig(config), /default_agent "reasoner" has no agent mapping/)
+  assert.throws(() => validateConfig(config), /default_agent "reasoner" has no agent entry/)
 })
 
-test("rejects a default_agent whose agent references a missing profile", () => {
+test("rejects a default_agent whose agent names an undefined model", () => {
   const config = fullConfig()
   config.agents.orchestrator = "missing"
-  assert.throws(() => validateConfig(config), /references missing profile "missing"/)
+  assert.throws(() => validateConfig(config), /names undefined model "missing"/)
+})
+
+test("rejects a v1 config naming the rename instead of translating it", () => {
+  const v1 = fullConfig()
+  v1.schema_version = 1
+  v1.profiles = v1.models
+  delete v1.models
+  assert.throws(() => validateConfig(v1), /"profiles" is not read at schema_version 2/)
+
+  const staleBlock = { schema_version: 1, profiles: { reasoning: { model: "a/b" } } }
+  assert.throws(() => validateOverride(staleBlock), /"profiles" is not read at schema_version 2/)
 })
 
 test("rejects structurally invalid configs", () => {
-  const missingProfile = fullConfig()
-  delete missingProfile.profiles.reasoning
-  assert.throws(() => validateConfig(missingProfile), /references missing profile "reasoning"/)
+  const missingModel = fullConfig()
+  delete missingModel.models.reasoning
+  assert.throws(() => validateConfig(missingModel), /names undefined model "reasoning"/)
 
   const badSchema = fullConfig()
-  badSchema.schema_version = 2
-  assert.throws(() => validateConfig(badSchema), /unsupported schema_version/)
+  badSchema.schema_version = 99
+  assert.throws(() => validateConfig(badSchema), /unsupported schema_version: 99/)
 
-  const emptyProfiles = fullConfig()
-  emptyProfiles.profiles = {}
-  assert.throws(() => validateConfig(emptyProfiles), /profiles must be a non-empty object/)
+  // `models` is optional in v2 — an all-inline config is complete — but `agents`
+  // is the map that must exist.
+  const noAgents = fullConfig()
+  noAgents.agents = "nope"
+  assert.throws(() => validateConfig(noAgents), /agents must be an object/)
 
   const notObject = "nope"
   assert.throws(() => validateConfig(notObject), /must be an object/)
@@ -583,19 +617,19 @@ test("rejects structurally invalid configs", () => {
   assert.throws(() => validateConfig(badAgentId), /invalid agent id/)
 
   const badModel = fullConfig()
-  badModel.profiles.reasoning.model = "no-provider-prefix"
+  badModel.models.reasoning.model = "no-provider-prefix"
   assert.throws(() => validateConfig(badModel), /provider\/model format/)
 
   const emptyModelId = fullConfig()
-  emptyModelId.profiles.reasoning.model = "provider/"
+  emptyModelId.models.reasoning.model = "provider/"
   assert.throws(() => validateConfig(emptyModelId), /provider\/model format/)
 
   const badVariant = fullConfig()
-  badVariant.profiles.reasoning.variant = ""
+  badVariant.models.reasoning.variant = ""
   assert.throws(() => validateConfig(badVariant), /variant must be a non-empty string/)
 
   const badRequest = fullConfig()
-  badRequest.profiles.reasoning.request = { headers: "nope" }
+  badRequest.models.reasoning.request = { headers: "nope" }
   assert.throws(() => validateConfig(badRequest), /request.headers must be an object/)
 
   const badPinDefault = fullConfig()
@@ -621,29 +655,29 @@ test("modelRefFor omits variant when absent and includes it when present", () =>
 
 test("DEFAULT_CONFIG is self-consistent and covers every baked agent", () => {
   assert.equal(validateConfig(DEFAULT_CONFIG), DEFAULT_CONFIG)
-  assert.equal(DEFAULT_CONFIG.schema_version, 1)
+  assert.equal(DEFAULT_CONFIG.schema_version, 2)
   assert.equal(DEFAULT_CONFIG.default_agent, "orchestrator")
   assert.equal(DEFAULT_CONFIG.pin_default_agent_model, false)
   // Demonstrates both providers.
   const providers = new Set(
-    Object.values(DEFAULT_CONFIG.profiles).map((profile) => profile.model.split("/")[0]),
+    Object.values(DEFAULT_CONFIG.models).map((spec) => spec.model.split("/")[0]),
   )
   assert.ok(providers.has("openai"))
   assert.ok(providers.has("deepseek"))
 
-  // Every baked agent resolves to a defined profile.
+  // Every baked agent resolves to a defined model entry.
   assert.equal(BAKED_AGENTS.length, 11)
   for (const id of BAKED_AGENTS) {
-    const profileName = DEFAULT_CONFIG.agents[id]
-    assert.equal(typeof profileName, "string", `${id} has a profile mapping`)
-    assert.ok(Object.hasOwn(DEFAULT_CONFIG.profiles, profileName), `${id} -> ${profileName} is defined`)
+    const modelName = DEFAULT_CONFIG.agents[id]
+    assert.equal(typeof modelName, "string", `${id} has a model entry`)
+    assert.ok(Object.hasOwn(DEFAULT_CONFIG.models, modelName), `${id} -> ${modelName} is defined`)
   }
 })
 
-test("mergeConfig shallow-merges partial profiles and agents over defaults", () => {
+test("mergeConfig shallow-merges partial models and agents over defaults", () => {
   const override = {
-    schema_version: 1,
-    profiles: {
+    schema_version: 2,
+    models: {
       reasoning: { model: "anthropic/claude-opus-4-1", variant: "high" },
       custom: { model: "openai/gpt-5.6-luna" },
     },
@@ -655,11 +689,11 @@ test("mergeConfig shallow-merges partial profiles and agents over defaults", () 
   }
   const merged = mergeConfig(DEFAULT_CONFIG, override)
 
-  // Overridden profile replaces the base one wholesale (no deep merge).
-  assert.deepEqual(merged.profiles.reasoning, { model: "anthropic/claude-opus-4-1", variant: "high" })
-  // New profile added alongside the base ones.
-  assert.deepEqual(merged.profiles.custom, { model: "openai/gpt-5.6-luna" })
-  assert.deepEqual(merged.profiles.orchestration, { model: "openai/gpt-5.6-sol" })
+  // An overridden model entry replaces the base one wholesale (no deep merge).
+  assert.deepEqual(merged.models.reasoning, { model: "anthropic/claude-opus-4-1", variant: "high" })
+  // A new shared model is added alongside the base ones.
+  assert.deepEqual(merged.models.custom, { model: "openai/gpt-5.6-luna" })
+  assert.deepEqual(merged.models.orchestration, { model: "openai/gpt-5.6-sol" })
   // Agents merged by id; base entries survive.
   assert.equal(merged.agents.reasoner, "reasoning")
   assert.equal(merged.agents.orchestrator, "orchestration")
@@ -673,7 +707,7 @@ test("mergeConfig shallow-merges partial profiles and agents over defaults", () 
 
 test("mergeConfig keeps base default_agent when the override omits it", () => {
   const merged = mergeConfig(DEFAULT_CONFIG, {
-    schema_version: 1,
+    schema_version: 2,
     agents: { reasoner: "reasoning" },
   })
   assert.equal(merged.default_agent, "orchestrator")
@@ -682,8 +716,8 @@ test("mergeConfig keeps base default_agent when the override omits it", () => {
 
 test("mergeConfig validates the override shape before merging", () => {
   assert.throws(() => mergeConfig(DEFAULT_CONFIG, null), /model_router must be an object/)
-  assert.throws(() => mergeConfig(DEFAULT_CONFIG, { schema_version: 2 }), /unsupported schema_version/)
-  assert.throws(() => mergeConfig(DEFAULT_CONFIG, { profiles: "nope" }), /profiles must be an object/)
+  assert.throws(() => mergeConfig(DEFAULT_CONFIG, { schema_version: 1 }), /unsupported schema_version: 1/)
+  assert.throws(() => mergeConfig(DEFAULT_CONFIG, { models: "nope" }), /models must be an object/)
   assert.throws(() => mergeConfig(DEFAULT_CONFIG, { agents: "nope" }), /agents must be an object/)
   assert.throws(() => mergeConfig(DEFAULT_CONFIG, { agents: { "bad id": "x" } }), /invalid agent id/)
   assert.throws(() => mergeConfig(DEFAULT_CONFIG, { default_agent: 42 }), /default_agent must name an agent/)
@@ -695,17 +729,95 @@ test("mergeConfig validates the override shape before merging", () => {
 })
 
 test("validateOverride rejects malformed model_router blocks", () => {
-  assert.throws(() => validateOverride({ profiles: { "bad name": { model: "a/b" } } }), /invalid profile name/)
-  assert.throws(() => validateOverride({ profiles: { p: { model: "no-slash" } } }), /provider\/model format/)
-  assert.throws(() => validateOverride({ agents: { a: "" } }), /must name a profile/)
+  assert.throws(() => validateOverride({ models: { "bad name": { model: "a/b" } } }), /invalid model name/)
+  assert.throws(() => validateOverride({ models: { p: { model: "no-slash" } } }), /provider\/model format/)
+  assert.throws(() => validateOverride({ agents: { a: "" } }), /must name an entry in "models"/)
+  assert.throws(() => validateOverride({ agents: { a: 42 } }), /must name an entry in "models"/)
+  // An inline selection is valid in a partial block; its model name is not checked
+  // until the layers merge.
+  assert.deepEqual(validateOverride({ agents: { "review-adr": { model: "local/my-model" } } }),
+    { agents: { "review-adr": { model: "local/my-model" } } })
   assert.throws(() => validateOverride({ agents: { "": "x" } }), /invalid agent id/)
   // A partial override with only a default_agent is fine (shape-wise).
   assert.deepEqual(validateOverride({ default_agent: "reasoner" }), { default_agent: "reasoner" })
 })
 
-test("a merged override referencing a missing profile is rejected", () => {
+test("a merged override naming an undefined model is rejected", () => {
   const merged = mergeConfig(DEFAULT_CONFIG, { agents: { reasoner: "does-not-exist" } })
-  assert.throws(() => validateConfig(merged), /references missing profile "does-not-exist"/)
+  assert.throws(() => validateConfig(merged), /names undefined model "does-not-exist"/)
+})
+
+test("an agent carries its own model selection inline, with no shared map at all", () => {
+  // The reason v2 exists: naming a model for one agent is one entry, with no
+  // shared entry to declare first. A project's `.agents` reviewer and a plugin's
+  // own agent are addressed exactly like a baked one.
+  const config = {
+    schema_version: 2,
+    agents: {
+      engineer: { model: "local/my-model" },
+      "review-adr": { model: "deepseek/deepseek-v4-flash", variant: "high" },
+    },
+  }
+  assert.equal(validateConfig(config), config)
+
+  const { draft, agent } = makeDraft([agentInfo("engineer"), agentInfo("review-adr")])
+  applyAgentConfig(draft, config)
+  assert.deepEqual(agent("engineer").model, { providerID: "local", id: "my-model" })
+  assert.deepEqual(agent("review-adr").model, {
+    providerID: "deepseek",
+    id: "deepseek-v4-flash",
+    variant: "high",
+  })
+})
+
+test("an inline selection carries request options the same way a named model does", () => {
+  const request = { headers: { "x-route": "inline" }, body: { temperature: 0 } }
+  const config = {
+    schema_version: 2,
+    models: { shared: { model: "openai/gpt-5.6-sol", request } },
+    agents: {
+      engineer: "shared",
+      "review-adr": { model: "openai/gpt-5.6-sol", request },
+    },
+  }
+  const { draft, agent } = makeDraft([agentInfo("engineer"), agentInfo("review-adr")])
+  applyAgentConfig(draft, config)
+  assert.deepEqual(agent("engineer").request.headers, { "x-route": "inline" })
+  assert.deepEqual(agent("review-adr").request.headers, { "x-route": "inline" })
+  assert.deepEqual(agent("review-adr").request.body, { temperature: 0 })
+})
+
+test("modelSpecFor resolves a name and an inline object, and yields nothing for an unknown agent", () => {
+  const config = {
+    schema_version: 2,
+    models: { shared: { model: "openai/gpt-5.6-sol" } },
+    agents: { engineer: "shared", "review-adr": { model: "local/my-model" } },
+  }
+  assert.deepEqual(modelSpecFor(config, "engineer"), { model: "openai/gpt-5.6-sol" })
+  assert.deepEqual(modelSpecFor(config, "review-adr"), { model: "local/my-model" })
+  assert.equal(modelSpecFor(config, "nobody"), undefined)
+})
+
+test("an override replaces an inline selection with a name and a name with an inline selection", () => {
+  // Both directions merge at the entry key, wholesale, so a project layer can
+  // move one agent off a shared model, or onto one, without touching the rest.
+  const inlineOverName = mergeConfig(DEFAULT_CONFIG, {
+    agents: { reasoner: { model: "local/my-model", variant: "low" } },
+  })
+  assert.deepEqual(inlineOverName.agents.reasoner, { model: "local/my-model", variant: "low" })
+  assert.deepEqual(modelRefFor(modelSpecFor(inlineOverName, "reasoner")), {
+    providerID: "local",
+    id: "my-model",
+    variant: "low",
+  })
+
+  const nameOverInline = mergeConfig(inlineOverName, { agents: { reasoner: "review" } })
+  assert.equal(nameOverInline.agents.reasoner, "review")
+  assert.deepEqual(modelRefFor(modelSpecFor(nameOverInline, "reasoner")), {
+    providerID: "deepseek",
+    id: "deepseek-v4-flash",
+  })
+  assert.equal(validateConfig(nameOverInline), nameOverInline)
 })
 
 test("readModelRouterOverride returns undefined when the sandbox has no model_router", async (t) => {
@@ -715,10 +827,10 @@ test("readModelRouterOverride returns undefined when the sandbox has no model_ro
 
 test("readModelRouterOverride extracts the model_router block", async (t) => {
   const path = await withTempSandbox(t, {
-    model_router: { schema_version: 1, agents: { reasoner: "reasoning" } },
+    model_router: { schema_version: 2, agents: { reasoner: "reasoning" } },
   })
   assert.deepEqual(await readModelRouterOverride(path), {
-    schema_version: 1,
+    schema_version: 2,
     agents: { reasoner: "reasoning" },
   })
 })
@@ -739,12 +851,12 @@ test("readModelRouterOverride throws on a non-object document", async (t) => {
 
 test("readStandaloneModelRouterOverride reads a standalone partial config", async (t) => {
   const path = await withTempSandbox(t, {
-    schema_version: 1,
-    profiles: { reasoning: { model: "anthropic/claude-opus-4-1" } },
+    schema_version: 2,
+    models: { reasoning: { model: "anthropic/claude-opus-4-1" } },
   })
   assert.deepEqual(await readStandaloneModelRouterOverride(path), {
-    schema_version: 1,
-    profiles: { reasoning: { model: "anthropic/claude-opus-4-1" } },
+    schema_version: 2,
+    models: { reasoning: { model: "anthropic/claude-opus-4-1" } },
   })
 })
 
@@ -779,8 +891,8 @@ test("setup registers DEFAULT_CONFIG when there are no options and no env overri
 test("setup merges a project override from OPENCODE_MODEL_ROUTER_CONFIG over the defaults", async (t) => {
   const path = await withTempSandbox(t, {
     model_router: {
-      schema_version: 1,
-      profiles: {
+      schema_version: 2,
+      models: {
         reasoning: { model: "anthropic/claude-opus-4-1", variant: "high" },
       },
       agents: {
@@ -815,8 +927,8 @@ test("setup merges a project override from OPENCODE_MODEL_ROUTER_CONFIG over the
 
 test("setup merges a standalone global override over the defaults", async (t) => {
   const globalPath = await withTempSandbox(t, {
-    schema_version: 1,
-    profiles: {
+    schema_version: 2,
+    models: {
       reasoning: { model: "anthropic/claude-opus-4-1", variant: "high" },
     },
     agents: { reasoner: "reasoning" },
@@ -844,7 +956,7 @@ test("setup merges a standalone global override over the defaults", async (t) =>
 
 test("setup applies workspace overrides after global overrides", async (t) => {
   const globalPath = await withTempSandbox(t, {
-    profiles: {
+    models: {
       reasoning: { model: "anthropic/claude-opus-4-1" },
       extraction: { model: "xai/grok-4" },
     },
@@ -852,7 +964,7 @@ test("setup applies workspace overrides after global overrides", async (t) => {
   })
   const workspacePath = await withTempSandbox(t, {
     model_router: {
-      profiles: { reasoning: { model: "google/gemini-2.5-pro" } },
+      models: { reasoning: { model: "google/gemini-2.5-pro" } },
       default_agent: "orchestrator",
     },
   })
@@ -883,21 +995,36 @@ test("setup validates global cross-references before workspace overrides", async
   })
   const workspacePath = await withTempSandbox(t, {
     model_router: {
-      profiles: { "workspace-only": { model: "openai/gpt-5.6-luna" } },
+      models: { "workspace-only": { model: "openai/gpt-5.6-luna" } },
     },
   })
   await withRouterEnv(globalPath, workspacePath, async () => {
     const ctx = { options: undefined, agent: { transform: async () => {}, reload: async () => {} } }
-    await assert.rejects(defaultExport.setup(ctx), /references missing profile "workspace-only"/)
+    await assert.rejects(defaultExport.setup(ctx), /names undefined model "workspace-only"/)
   })
 })
 
 test("setup propagates a malformed override as a thrown error", async (t) => {
   const path = await withTempSandbox(t, {
-    model_router: { schema_version: 2 },
+    model_router: { schema_version: 1 },
   })
   await withRouterEnv(undefined, path, async () => {
     const ctx = { options: undefined, agent: { transform: async () => {}, reload: async () => {} } }
-    await assert.rejects(defaultExport.setup(ctx), /unsupported schema_version/)
+    await assert.rejects(defaultExport.setup(ctx), /unsupported schema_version: 1/)
+  })
+})
+
+test("setup rejects a v1 model_router block and names the rename", async (t) => {
+  // A stale project or global file must say what to change. Silently reading a
+  // half-parsed layer would route some agents and not others.
+  const path = await withTempSandbox(t, {
+    model_router: {
+      schema_version: 1,
+      profiles: { custom: { model: "openai/gpt-5.6-sol" } },
+    },
+  })
+  await withRouterEnv(undefined, path, async () => {
+    const ctx = { options: undefined, agent: { transform: async () => {}, reload: async () => {} } }
+    await assert.rejects(defaultExport.setup(ctx), /"profiles" is not read at schema_version 2/)
   })
 })

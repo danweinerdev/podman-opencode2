@@ -75,7 +75,7 @@
         "effect": { "enum": ["allow", "deny", "ask"] }
       }
     },
-    "profile": {
+    "modelSpec": {
       "type": "object",
       "additionalProperties": false,
       "required": ["model"],
@@ -95,14 +95,14 @@
     "routerConfig": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema_version", "profiles", "agents"],
+      "required": ["schema_version", "agents"],
       "properties": {
-        "schema_version": { "const": 1 },
+        "schema_version": { "const": 2 },
         "pin_default_agent_model": { "type": "boolean" },
-        "profiles": {
+        "models": {
           "type": "object",
-          "minProperties": 1,
-          "additionalProperties": { "$ref": "#/$defs/profile" }
+          "propertyNames": { "pattern": "^[a-z0-9][a-z0-9.-]*$" },
+          "additionalProperties": { "$ref": "#/$defs/modelSpec" }
         },
         "agents": {
           "type": "object",
@@ -110,8 +110,10 @@
             "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
           },
           "additionalProperties": {
-            "type": "string",
-            "minLength": 1
+            "anyOf": [
+              { "type": "string", "minLength": 1 },
+              { "$ref": "#/$defs/modelSpec" }
+            ]
           }
         },
         "default_agent": { "type": "string", "minLength": 1 }
