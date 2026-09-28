@@ -1375,6 +1375,30 @@ def main(argv: Sequence[str] | None = None) -> NoReturn:
         "label=disable",
     ]
 
+    # Optional syscall-filter policy for the main sandbox. Relative profiles
+    # belong to the invocation/config directory, independently of a redirected
+    # workspace, and Podman receives the canonical host path.
+    seccomp = config.get("seccomp")
+    if seccomp is not None:
+        if not isinstance(seccomp, str):
+            die("seccomp must be a string or null")
+        if not seccomp.strip():
+            die("seccomp must not be empty or whitespace")
+        if seccomp == "unconfined":
+            run_flags += ["--security-opt", "seccomp=unconfined"]
+        else:
+            seccomp_path = (
+                seccomp if os.path.isabs(seccomp) else invocation_root + "/" + seccomp
+            )
+            if not os.path.exists(seccomp_path):
+                die(f"seccomp profile does not exist: {seccomp_path}")
+            if not os.path.isfile(seccomp_path):
+                die(f"seccomp profile is not a regular file: {seccomp_path}")
+            run_flags += [
+                "--security-opt",
+                f"seccomp={os.path.realpath(seccomp_path)}",
+            ]
+
     if containers_enabled:
         uid = id_output("-u")
         gid = id_output("-g")

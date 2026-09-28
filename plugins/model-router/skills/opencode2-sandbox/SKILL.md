@@ -153,6 +153,19 @@ the launcher from the host workspace root.
   key, while its runtime contents take effect immediately on the next launch.
   Removing the file removes the mount on the next launch. Secrets belong in
   Podman secrets rather than this catalog.
+- `seccomp` controls syscall filtering for the main sandbox only. Missing or
+  `null` emits no seccomp flag and preserves the container engine default;
+  `"unconfined"` emits `--security-opt seccomp=unconfined`, disabling syscall
+  filtering and materially weakening the sandbox. Any other nonempty string is
+  a custom regular-file profile path. Relative paths resolve from the host
+  invocation/config directory, not from a redirected `workspace`, and the
+  launcher gives Podman the canonical absolute path. Wrong types (including
+  booleans), empty or whitespace-only strings, missing paths, and directories
+  are rejected. Do not put security options in `runtime_args`; its whitelist is
+  unchanged. Older launchers may silently ignore this unknown top-level field,
+  so update the launcher before relying on it. The setting never applies to
+  `oc2-verify` workers, whose broker retains its own fixed container security
+  policy.
 - `network`, `capabilities`, and the restricted `runtime_args` list control the
   Podman sandbox. Allowed runtime arguments are `--add-host=`, `--pids-limit=`,
   and `--ulimit=` forms only.
