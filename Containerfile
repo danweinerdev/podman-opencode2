@@ -207,6 +207,11 @@ COPY examples/local-providers.json.example /opt/opencode/sandbox/local-providers
 RUN chmod 0755 /opt/opencode/sandbox/opencode-container /opt/opencode/sandbox/oc2-verify \
     && chmod 0644 /opt/opencode/sandbox/.opencode-sandbox.json.example \
         /opt/opencode/sandbox/local-providers.json.example
+# Sentinel: marks this image, so tools can tell they run inside the sandbox and
+# must read the launcher's read-only config mount, never the writable workspace
+# copy. Root-owned in a root-owned directory, so the agent can neither remove nor
+# forge it; the verify worker image does not carry it.
+RUN touch /.opencode-sandbox && chmod 0444 /.opencode-sandbox
 
 # --- Baked agents + commands under XDG_CONFIG_HOME ---------------------------
 # Agent markdown definitions carry their own prompts and permissions; the
