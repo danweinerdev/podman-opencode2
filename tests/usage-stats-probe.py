@@ -9,13 +9,13 @@ import argparse
 import importlib.util
 import json
 import os
-from pathlib import Path
 import subprocess
 import tempfile
 import threading
 import time
-from http.server import ThreadingHTTPServer
 import urllib.request
+from http.server import ThreadingHTTPServer
+from pathlib import Path
 
 
 def load(name, filename):
@@ -157,7 +157,7 @@ def main():
                         typ = event.get('type', '')
                         if 'step' in typ:
                             session['history_usage'].append(event)
-                    session['history_event_types'] = sorted(set(e.get('type','') for e in hist.get('data',hist.get('events',[]))))
+                    session['history_event_types'] = sorted({e.get('type','') for e in hist.get('data',hist.get('events',[]))})
             checks = {
                 'runtime_pin': result['runtime'] == 'opencode2 v0.0.0-beta-19234',
                 'message_restart_recovery': result['restart_messages_equal'],

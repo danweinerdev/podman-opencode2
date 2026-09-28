@@ -10,7 +10,7 @@ LOCAL_IMAGE = "opencode2:latest"
 
 
 def run(cmd):
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if result.returncode != 0:
         sys.exit(f"error: {' '.join(cmd)} failed:\n{result.stderr.strip()}")
     return result.stdout.strip()

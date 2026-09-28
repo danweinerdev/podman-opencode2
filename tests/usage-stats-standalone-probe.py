@@ -73,7 +73,7 @@ def sh(args, env=None, cwd='/workspace', timeout=120, stdin=subprocess.DEVNULL):
     """Run a command, return (exit_code, combined_output_tail)."""
     try:
         proc = subprocess.run(args, env=env, cwd=cwd, timeout=timeout,
-                              stdin=stdin, capture_output=True, text=True)
+                              stdin=stdin, capture_output=True, text=True, check=False)
         return proc.returncode, (proc.stdout + proc.stderr)[-4000:]
     except subprocess.TimeoutExpired as e:
         out = ((e.stdout or b'') + (e.stderr or b'')).decode(errors='replace')
@@ -222,7 +222,7 @@ def main():
 
     def discover_run(tmpdir, run_index):
         """Start one standalone CLI, attribute the loopback listener, probe auth."""
-        cli, env, log = start_standalone(tmpdir)
+        cli, _env, log = start_standalone(tmpdir)
         run = {'run': run_index, 'port': None, 'port_addr': None, 'server_child': None,
                'server_child_fds': None, 'auth': {}, 'child_environ_password': None,
                'cli_environ_password': None, 'server_exited_with_cli': None}
