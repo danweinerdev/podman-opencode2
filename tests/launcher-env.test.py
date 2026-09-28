@@ -317,6 +317,100 @@ class Suite:
         self.has_line(env, "EMPTY_FORWARD_SET=x")
         self.has_line(env, "EMPTY_FORWARD=")
 
+    def _seccomp_config(self) -> None:
+        def workspace(name: str, seccomp: object = ...) -> Path:
+            root = self.tmp / f"seccomp-{name}"
+            root.mkdir()
+            config: dict[str, object] = {
+                "image": "opencode2:test",
+                "workspace": ".",
+                "command": ["/bin/true"],
+            }
+            if seccomp is not ...:
+                config["seccomp"] = seccomp
+            write_json(root / ".opencode-sandbox.json", config)
+            return root
+
+        # Missing and null retain the engine's default seccomp policy: the
+        # launcher's existing label security option is the only one emitted.
+        for name, value in (("missing", ...), ("null", None)):
+            root = workspace(name, value)
+            self.run_ok(root)
+            self.no_substring(self.argv(), "seccomp=")
+
+        root = workspace("unconfined", "unconfined")
+        self.run_ok(root)
+        self.has_line(self.argv(), "seccomp=unconfined")
+
+        # A relative profile is rooted at the invocation/config directory, not
+        # at any configured workspace redirect, and Podman gets its real path.
+        root = workspace("relative", "profiles/filter.json")
+        profile = root / "profiles" / "filter.json"
+        profile.parent.mkdir()
+        profile.write_text("{}\n", encoding="utf-8")
+        redirected = self.tmp / "seccomp-redirected-workspace"
+        redirected.mkdir()
+        self.set_config(root / ".opencode-sandbox.json", workspace=str(redirected))
+        self.run_ok(root)
+        self.has_line(self.argv(), f"seccomp={profile.resolve()}")
+
+        absolute_profile = self.tmp / "absolute-seccomp.json"
+        absolute_profile.write_text("{}\n", encoding="utf-8")
+        absolute_link = self.tmp / "absolute-seccomp-link.json"
+        absolute_link.symlink_to(absolute_profile)
+        root = workspace("absolute", str(absolute_link))
+        self.run_ok(root)
+        self.has_line(self.argv(), f"seccomp={absolute_profile.resolve()}")
+
+        for name, value in (
+            ("boolean", False),
+            ("number", 1),
+            ("array", ["profile.json"]),
+            ("object", {"profile": "profile.json"}),
+        ):
+            root = workspace(f"invalid-{name}", value)
+            self.run_fail(
+                root,
+                f"launcher accepted {name} seccomp value",
+                stderr_contains="seccomp must be a string or null",
+            )
+
+        for name, value in (("empty", ""), ("whitespace", " \t\n")):
+            root = workspace(name, value)
+            self.run_fail(
+                root,
+                f"launcher accepted {name} seccomp value",
+                stderr_contains="seccomp must not be empty or whitespace",
+            )
+
+        root = workspace("missing-profile", "profiles/missing.json")
+        self.run_fail(
+            root,
+            "launcher accepted a missing seccomp profile",
+            stderr_contains="seccomp profile does not exist",
+        )
+
+        root = workspace("directory-profile", "profiles")
+        (root / "profiles").mkdir()
+        self.run_fail(
+            root,
+            "launcher accepted a directory as a seccomp profile",
+            stderr_contains="seccomp profile is not a regular file",
+        )
+
+        # The dedicated field does not widen runtime_args: generic security
+        # options remain outside its intentionally narrow pass-through list.
+        root = workspace("runtime-arg")
+        self.set_config(
+            root / ".opencode-sandbox.json",
+            runtime_args=["--security-opt=seccomp=unconfined"],
+        )
+        self.run_fail(
+            root,
+            "launcher accepted a generic security option in runtime_args",
+            stderr_contains="runtime_args entry is not allowed",
+        )
+
     def _containers_socket_selection(self) -> None:
         # Opting into host container-engine access prefers the user Podman
         # socket over Docker, manages both client variables, and mirrors the
@@ -1643,6 +1737,7 @@ def main() -> None:
     try:
         suite = Suite(tmp)
         suite._basic_env_forwarding()
+        suite._seccomp_config()
         suite._containers_socket_selection()
         suite._containers_rootless_docker()
         suite._containers_non_boolean()

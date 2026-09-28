@@ -11,6 +11,7 @@ Start small and add only the settings you need:
   "image": "opencode2:latest",
   "workspace": ".",
   "containers": false,
+  "seccomp": null,
   "env": { "set": { "TZ": "UTC" } }
 }
 ```
@@ -38,6 +39,7 @@ adapt its model routes, secret selections, and volume name before using it.
 | `model_router` | Project model overrides; see [model router](MODEL_ROUTER.md). |
 | `network` | Optional Podman network mode, such as `slirp4netns`. |
 | `capabilities` | Extra capabilities, such as `SYS_PTRACE` for debugging. |
+| `seccomp` | Main-sandbox syscall policy. Missing or `null` keeps the container engine default; `"unconfined"` disables seccomp filtering; any other nonempty string is a profile path resolved from this config's directory. |
 | `runtime_args` | Only `--add-host=`, `--pids-limit=`, and `--ulimit=` entries are allowed. |
 | `command` | Defaults to `["opencode2", "--standalone"]`. The image built
   from this repository ships its own `CMD` with `--auto`; see
@@ -180,6 +182,22 @@ group need a Podman OCI runtime that supports `--group-add keep-groups`.
 
 The launcher runs with `--rm`, `--init`, `--userns=keep-id`, `--pull=never`,
 and `--security-opt label=disable`. It adds an interactive TTY only when needed.
+
+`seccomp` changes syscall filtering for the main sandbox only. Omit it or set it
+to `null` to preserve the container engine's default profile. Set it to
+`"unconfined"` to pass `--security-opt seccomp=unconfined`, which disables that
+filter and materially weakens the sandbox. Any other nonempty string names a
+custom regular-file profile; relative paths resolve from the directory where the
+launcher was invoked (the directory containing `.opencode-sandbox.json`), and
+the launcher passes Podman the profile's absolute canonical path. Empty values,
+wrong types, missing paths, and directories are rejected.
+
+This field requires a launcher version that supports it. Older launchers do not
+reject unknown top-level fields and may silently ignore `seccomp`, leaving the
+engine default in effect. It is deliberately separate from `runtime_args`, whose
+security-option filtering remains unchanged. It also does not alter `oc2-verify`
+workers: the verification broker uses its own fixed container security policy and
+does not consume this main-sandbox setting.
 
 The baked OpenCode config and plugin directories stay root-owned. Project
 `opencode.json` files and external Claude/agent skill scans are disabled.
