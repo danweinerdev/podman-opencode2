@@ -11,7 +11,6 @@ import importlib.machinery
 import importlib.util
 import json
 import os
-import re
 import shutil
 import socket
 import subprocess
@@ -230,12 +229,14 @@ class Suite:
         extra_env: dict[str, str] | None = None,
         stdin: int | None = None,
         input_text: str | None = None,
-        stderr_contains: tuple[str, ...] = (),
+        stderr_contains: str | tuple[str, ...] = (),
     ) -> subprocess.CompletedProcess:
         proc = self.run(cwd, args, via_path, extra_env, stdin, input_text)
         if proc.returncode == 0:
             fail(reject)
-        for needle in stderr_contains:
+        # A bare string is one message, not a set of characters to find.
+        needles = (stderr_contains,) if isinstance(stderr_contains, str) else stderr_contains
+        for needle in needles:
             if needle not in proc.stderr:
                 sys.stderr.write(proc.stderr)
                 fail(f"expected {needle!r} in launcher stderr")

@@ -20,6 +20,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import NoReturn
 
 LOCATION = "location%5Bdirectory%5D=%2Fworkspace"
 MOCK_PROVIDER = Path(__file__).resolve().parent / "mock-model-router-provider.py"
@@ -29,7 +30,7 @@ AUTH: str
 MOCK: subprocess.Popen | None = None
 
 
-def fail(message: str) -> None:
+def fail(message: str) -> NoReturn:
     print(message, file=sys.stderr)
     sys.exit(1)
 
@@ -48,8 +49,9 @@ def api(method: str, url: str, body: bytes | None = None,
         return None
 
 
-def api_json(method: str, url: str, **kwargs: object) -> dict:
-    raw = api(method, url, **kwargs)
+def api_json(method: str, url: str, body: bytes | None = None,
+             content_type: str | None = None) -> dict:
+    raw = api(method, url, body, content_type)
     if raw is None:
         fail(f"API call failed: {method} {url}")
     return json.loads(raw.decode())
