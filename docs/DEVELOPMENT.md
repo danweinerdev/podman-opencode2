@@ -123,11 +123,20 @@ bin/oc2-verify -- ruff check .
 
 The workspace is mounted read-only at `/src`, copied to `/tmp/w`, and the command
 runs against the copy; the container starts `--rm`, so its writable layer is
-discarded on exit. Only the workspace is ever mounted — no engine socket, no host
-paths — and the environment is a fixed minimal set, so provider credentials held
-by the agent container do not reach workspace code. Container *creation* is
+discarded on exit. Only the workspace is ever mounted — no engine socket, no other
+host paths — and the environment is a fixed minimal set, so provider credentials
+held by the agent container do not reach workspace code. Container *creation* is
 serialized under a lock because nested engine calls race; runs themselves proceed
 in parallel, and four concurrent checks complete in about 0.7s each.
+
+The one exception is a linked worktree whose Git common directory is a `.bare`
+enclosing it (`<root>/.bare` plus checkouts such as `<root>/main` or
+`<root>/feat/x`). Its `.bare` is also mounted read-only and copied into scratch
+beside the checkout, with both worktree pointers rewritten in the copy, so Git
+works in the worker without following a host path. The `.git` pointer alone
+cannot choose that mount: it must resolve to `.bare/worktrees/<name>` under the
+checkout's own root with no symlinks in the chain, and that metadata must point
+back at this checkout. Any other `.git` file is refused.
 
 Configuration lives in the `verify` block of `.opencode-sandbox.json`: `image`,
 `network` (default `none`, so a check needing the network must opt in),

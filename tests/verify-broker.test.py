@@ -13,6 +13,7 @@ Silent on success; raises with a diff on failure, matching tests/launcher-env.te
 
 from __future__ import annotations
 
+import contextlib
 import importlib.machinery
 import importlib.util
 import json
@@ -91,6 +92,129 @@ def test_scratch_is_a_copy_not_the_mount() -> None:
     check("cp -a /src/. /tmp/w/" in script, "the command must run against a copy, not the read-only mount")
     check("cd /tmp/w" in script, "the command must run inside the scratch copy")
     check(script.index("cp -a") < script.index("exec"), "the copy must complete before the command runs")
+
+
+def make_linked(root: Path, checkout: str = "main", name: str = "main",
+                pointer: str | None = None) -> tuple[Path, Path]:
+    """A `<root>/.bare` common directory with one worktree, as `git worktree add` leaves it."""
+    workspace = root / checkout
+    workspace.mkdir(parents=True)
+    metadata = root / ".bare" / "worktrees" / name
+    metadata.mkdir(parents=True)
+    if pointer is None:
+        pointer = f"gitdir: {os.path.relpath(metadata, workspace)}\n"
+    (workspace / ".git").write_text(pointer)
+    (metadata / "commondir").write_text("../..\n")
+    (metadata / "gitdir").write_text(str(workspace / ".git") + "\n")
+    return workspace, metadata
+
+
+def rejected(workspace: Path) -> bool:
+    with open(os.devnull, "w") as sink, contextlib.redirect_stderr(sink):
+        try:
+            verify.workspace_git_common(str(workspace))
+        except SystemExit as error:
+            return error.code == verify.USAGE_ERROR
+    return False
+
+
+def test_linked_checkout_mount_and_copy() -> None:
+    with tempfile.TemporaryDirectory() as root:
+        workspace, metadata = make_linked(Path(root))
+        common = str(metadata.parent.parent)
+        for pointer in ("gitdir: ../.bare/worktrees/main\n", f"gitdir: {metadata}\n"):
+            (workspace / ".git").write_text(pointer)
+            linked = verify.workspace_git_common(str(workspace))
+            check(linked == verify.LinkedGit(common, "main", "main"),
+                  f"valid linked checkout should use only its enclosing .bare: {pointer} -> {linked}")
+            script = verify.worker_script(["git", "status"], linked)
+            argv = verify.build_argv("image", "2g", "2", "none", str(workspace), script, linked.common)
+            mounts = [argv[i + 1] for i, part in enumerate(argv) if part == "-v"]
+            check(mounts == [f"{workspace}:/src:ro", f"{common}:/git-common:ro"],
+                  f"only checkout and its .bare may be mounted RO: {mounts}")
+            check("cp -a /src/. /tmp/w/main/" in script and
+                  "cp -a /git-common/. /tmp/w/.bare/" in script and
+                  "cd /tmp/w/main && exec git status" in script,
+                  f"linked checkout and metadata must be copied before git runs: {script}")
+            check("printf '%s\\n' 'gitdir: ../.bare/worktrees/main' > /tmp/w/main/.git" in script and
+                  "printf '%s\\n' /tmp/w/main/.git > /tmp/w/.bare/worktrees/main/gitdir" in script,
+                  f"copied metadata must point to scratch, not to the host: {script}")
+
+
+def test_any_worktree_of_the_bare_is_accepted() -> None:
+    # Git names the metadata directory after the checkout, suffixed on collision,
+    # and `git worktree add feat/x` nests the checkout; both must work.
+    with tempfile.TemporaryDirectory() as root:
+        workspace, metadata = make_linked(Path(root), "feat/verify-sandbox", "verify-sandbox1")
+        linked = verify.workspace_git_common(str(workspace))
+        check(linked == verify.LinkedGit(str(metadata.parent.parent), "feat/verify-sandbox", "verify-sandbox1"),
+              f"nested, renamed worktree should be accepted: {linked}")
+        script = verify.worker_script(["true"], linked)
+        check("printf '%s\\n' 'gitdir: ../../.bare/worktrees/verify-sandbox1' > /tmp/w/feat/verify-sandbox/.git"
+              in script and "cd /tmp/w/feat/verify-sandbox && exec true" in script,
+              f"scratch must mirror the nested layout: {script}")
+    with tempfile.TemporaryDirectory() as root:
+        # worktree.useRelativePaths writes a relative backlink.
+        workspace, metadata = make_linked(Path(root), "review")
+        (metadata / "gitdir").write_text("../../../review/.git\n")
+        check(not rejected(workspace), "relative backlink to this checkout must be accepted")
+
+
+def test_unexpected_git_metadata_is_rejected() -> None:
+    for pointer in ("gitdir: ../other/worktrees/main\n", "gitdir: ../../secret\n",
+                    "gitdir: /tmp/elsewhere\n", "gitdir: ../.bare/worktrees/main\nextra\n", "garbage\n",
+                    "gitdir: ../.bare/worktrees/main", "gitdir: ../.bare\n"):
+        with tempfile.TemporaryDirectory() as root:
+            workspace, _ = make_linked(Path(root), pointer=pointer)
+            check(rejected(workspace), f"must refuse unexpected git pointer {pointer!r}")
+    with tempfile.TemporaryDirectory() as root:
+        workspace, metadata = make_linked(Path(root))
+        (metadata / "commondir").write_text("../../../elsewhere\n")
+        check(rejected(workspace), "must refuse unexpected common directory pointer")
+        (metadata / "commondir").write_text("../..\n")
+        (metadata / "gitdir").write_text("/other/repo/.git\n")
+        check(rejected(workspace), "must refuse unexpected reverse git pointer")
+        (metadata / "gitdir").unlink()
+        (metadata / "gitdir").symlink_to(workspace / ".git")
+        check(rejected(workspace), "must refuse symlinked backlink before rewriting it")
+    with tempfile.TemporaryDirectory() as root:
+        # Another worktree's metadata cannot be borrowed: its backlink names that checkout.
+        make_linked(Path(root), "main")
+        workspace = Path(root) / "impostor"
+        workspace.mkdir()
+        (workspace / ".git").write_text("gitdir: ../.bare/worktrees/main\n")
+        check(rejected(workspace), "must refuse metadata belonging to another checkout")
+    with tempfile.TemporaryDirectory() as root:
+        workspace, metadata = make_linked(Path(root))
+        (metadata / "gitdir").unlink()
+        metadata.rename(metadata.with_name("elsewhere"))
+        metadata.symlink_to(metadata.with_name("elsewhere"), target_is_directory=True)
+        check(rejected(workspace), "must refuse symlinked metadata directory")
+    with tempfile.TemporaryDirectory() as outer:
+        # A .bare that does not enclose the checkout cannot be named, even with a
+        # backlink that agrees: that would let a pointer choose any host directory.
+        foreign = Path(outer) / "foreign"
+        _, metadata = make_linked(foreign)
+        workspace = Path(outer) / "repo" / "main"
+        workspace.mkdir(parents=True)
+        (workspace / ".git").write_text(f"gitdir: {metadata}\n")
+        (metadata / "gitdir").write_text(str(workspace / ".git") + "\n")
+        check(rejected(workspace), "must refuse a .bare outside the checkout's root")
+    with tempfile.TemporaryDirectory() as root:
+        workspace = Path(root) / ".bare" / "inner"
+        workspace.mkdir(parents=True)
+        (workspace / ".git").write_text("gitdir: ../worktrees/inner\n")
+        check(rejected(workspace), "a checkout inside .bare itself must be refused")
+
+
+def test_ordinary_checkout_still_needs_only_workspace() -> None:
+    with tempfile.TemporaryDirectory() as root:
+        workspace = Path(root) / "repo"
+        (workspace / ".git").mkdir(parents=True)
+        check(verify.workspace_git_common(str(workspace)) is None,
+              "ordinary checkout must not require external metadata")
+        check(not rejected(workspace), "ordinary checkout must remain accepted")
+        check(rejected(Path(root)), "missing .git must be rejected")
 
 
 # --- Argument fidelity -------------------------------------------------------

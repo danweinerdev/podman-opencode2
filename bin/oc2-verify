@@ -8,13 +8,16 @@ long, how much output — is caller-supplied and cannot widen that decision.
 
 Guarantees this tool makes, and how:
   * The workspace enters the worker read-only (`-v <workspace>:/src:ro`) and is
-    copied into the worker's own throwaway layer before the command runs. The
-    command gets a writable tree; the real one cannot be written.
+    copied into the worker's own throwaway layer before the command runs. For a
+    linked worktree of an enclosing `.bare`, that validated Git common directory
+    is additionally mounted read-only and copied into scratch.
+    The command gets a writable tree; the real one cannot be written.
   * The worker is started `--rm` from a pinned image with `--pull=never`, so its
     rootfs is discarded on exit and nothing is fetched at run time.
-  * No host path other than the workspace is ever mounted, and the container
-    engine socket is never mounted. A worker that could mount host paths
-    read-write would not be isolated; this is the reason the broker exists.
+  * No host path other than the workspace and its validated `.bare` Git
+    directory is ever mounted; the container engine socket is never mounted.
+    A worker that could mount host paths read-write would not be isolated;
+    this is the reason the broker exists.
   * The environment is a fixed minimal set. Provider credentials that the agent
     container carries are not forwarded into a container running repo code.
   * Container *creation* is serialized under a lock. Nested engine calls race
@@ -51,7 +54,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import Any, Final
+from typing import Any, Final, NamedTuple
 
 SANDBOX_CONFIG: Final[str] = os.environ.get("OPENCODE_SANDBOX_CONFIG", "/run/opencode/sandbox.json")
 DEFAULT_IMAGE: Final[str] = "localhost/opencode2-verify:latest"
@@ -64,6 +67,7 @@ DEFAULT_OUTPUT_CAP_BYTES: Final[int] = 200_000
 # command runs against the copy, never against /src.
 SRC_TARGET: Final[str] = "/src"
 SCRATCH: Final[str] = "/tmp/w"
+GIT_TARGET: Final[str] = "/git-common"
 
 # Deliberately short. Everything a repo build might need is in the image; the
 # agent container's provider keys, session tokens, and OpenCode runtime vars are
@@ -153,8 +157,68 @@ def describe_command(command: str | list[str]) -> str:
     return command
 
 
-def worker_script(command: str | list[str]) -> str:
-    """Build the worker's shell script, preserving argument boundaries exactly.
+class LinkedGit(NamedTuple):
+    """A linked worktree whose Git common directory is a `.bare` enclosing it."""
+
+    common: str    # host path of `<root>/.bare`, mounted read-only
+    checkout: str  # the workspace relative to `<root>`
+    name: str      # its metadata directory, `.bare/worktrees/<name>`
+
+
+def read_git_line(path: str, what: str) -> str:
+    """One newline-terminated line of Git metadata, refused if it is anything else."""
+    if os.path.islink(path) or not os.path.isfile(path):
+        die(f"invalid {what}: {path}")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            content = handle.read()
+    except (OSError, UnicodeError) as error:
+        die(f"cannot read {what}: {error}")
+    if not content.endswith("\n") or content.count("\n") != 1:
+        die(f"malformed {what}: {path}")
+    return content[:-1]
+
+
+def workspace_git_common(workspace: str) -> LinkedGit | None:
+    """Allow only a real .git directory or a linked worktree of an enclosing `.bare`.
+
+    The layout is `<root>/.bare` as the common directory with every worktree
+    checked out somewhere under `<root>`. The `.git` pointer selects which
+    worktree metadata to check, but it is never trusted as a mount source on its
+    own: it must resolve lexically to `<root>/.bare/worktrees/<name>` for a
+    `<root>` enclosing the workspace, no directory in that chain may be a symlink,
+    and the metadata must point back at exactly this workspace. Relative and
+    absolute pointers are both accepted, as Git writes either.
+    """
+    git = os.path.join(workspace, ".git")
+    if os.path.isdir(git) and not os.path.islink(git):
+        return None
+    if not os.path.isfile(git) or os.path.islink(git):
+        die(f"run from the repository root; no .git under {workspace}")
+    pointer = read_git_line(git, "Git pointer")
+    if not pointer.startswith("gitdir: "):
+        die(f"malformed Git pointer: {git}")
+    metadata = os.path.normpath(os.path.join(workspace, pointer.removeprefix("gitdir: ")))
+    worktrees = os.path.dirname(metadata)
+    common = os.path.dirname(worktrees)
+    root = os.path.dirname(common)
+    if (os.path.basename(worktrees) != "worktrees" or os.path.basename(common) != ".bare"
+            or not workspace.startswith(root.rstrip(os.sep) + os.sep)
+            or workspace == common or workspace.startswith(common + os.sep)):
+        die(f"Git pointer does not name a worktree of an enclosing .bare: {pointer}")
+    for directory in (common, worktrees, metadata):
+        if os.path.islink(directory) or not os.path.isdir(directory):
+            die(f"invalid Git metadata directory: {directory}")
+    if read_git_line(os.path.join(metadata, "commondir"), "Git commondir") != "../..":
+        die(f"unexpected Git commondir under {metadata}")
+    backlink = read_git_line(os.path.join(metadata, "gitdir"), "Git backlink")
+    if os.path.normpath(os.path.join(metadata, backlink)) != git:
+        die(f"Git worktree metadata {metadata} belongs to another checkout: {backlink}")
+    return LinkedGit(common, os.path.relpath(workspace, root), os.path.basename(metadata))
+
+
+def worker_script(command: str | list[str], linked: LinkedGit | None = None) -> str:
+    """Copy into scratch (including linked metadata) and preserve argv boundaries.
 
     Two modes, matching how the caller named the work:
       * list (from `-- cmd args...`): each element is quoted, so an argument with
@@ -169,12 +233,28 @@ def worker_script(command: str | list[str]) -> str:
         body = "exec " + " ".join(shlex.quote(part) for part in command)
     else:
         body = "( " + command + " )"
-    return f"mkdir -p {SCRATCH} && cp -a {SRC_TARGET}/. {SCRATCH}/ && cd {SCRATCH} && {body}"
+    if linked is not None:
+        # Mirror the layout under scratch and rewrite both pointers in the *copy*,
+        # so Git never follows a host path from scratch.
+        checkout = f"{SCRATCH}/{linked.checkout}"
+        metadata = f"{SCRATCH}/.bare/worktrees/{linked.name}"
+        pointer = "gitdir: " + os.path.relpath(metadata, checkout)
+        quote = shlex.quote
+        prepare = (f"mkdir -p {quote(checkout)} {SCRATCH}/.bare && "
+                   f"cp -a {SRC_TARGET}/. {quote(checkout + '/')} && "
+                   f"cp -a {GIT_TARGET}/. {SCRATCH}/.bare/ && "
+                   f"printf '%s\\n' {quote(pointer)} > {quote(checkout + '/.git')} && "
+                   f"printf '%s\\n' {quote(checkout + '/.git')} > {quote(metadata + '/gitdir')} && "
+                   f"cd {quote(checkout)}")
+    else:
+        prepare = f"mkdir -p {SCRATCH} && cp -a {SRC_TARGET}/. {SCRATCH}/ && cd {SCRATCH}"
+    return f"{prepare} && {body}"
 
 
-def build_argv(image: str, memory: str, cpus: str, network: str, workspace: str, script: str) -> list[str]:
+def build_argv(image: str, memory: str, cpus: str, network: str, workspace: str, script: str,
+               git_common: str | None = None) -> list[str]:
     """The privileged part: what the worker can see. Kept pure so tests can pin it."""
-    return [
+    argv = [
         "podman",
         "create",
         "--name",
@@ -192,6 +272,10 @@ def build_argv(image: str, memory: str, cpus: str, network: str, workspace: str,
         cpus,
         "-v",
         f"{workspace}:{SRC_TARGET}:ro",
+    ]
+    if git_common is not None:
+        argv += ["-v", f"{git_common}:{GIT_TARGET}:ro"]
+    return argv + [
         "--entrypoint",
         "sh",
         image,
@@ -269,8 +353,7 @@ def main() -> None:
     cap = config.get("output_cap_bytes") or DEFAULT_OUTPUT_CAP_BYTES
 
     workspace = os.path.realpath(os.getcwd())
-    if not os.path.isdir(os.path.join(workspace, ".git")):
-        die(f"run from the repository root; no .git under {workspace}")
+    linked = workspace_git_common(workspace)
 
     # Refuse rather than start a worker the caller cannot trust: an image that is
     # not already local would be pulled at run time by an unreviewed reference.
@@ -278,7 +361,8 @@ def main() -> None:
     if exists.returncode != 0:
         die(f"worker image {image} is not available locally (pull=never)", START_FAILED)
 
-    argv = build_argv(image, memory, cpus, network, workspace, worker_script(command))
+    argv = build_argv(image, memory, cpus, network, workspace,
+                      worker_script(command, linked), linked.common if linked else None)
     argv[4:4] = env_for_worker()
 
     lock = acquire_lock()
