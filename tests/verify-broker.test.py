@@ -251,6 +251,57 @@ def test_environment_is_minimal() -> None:
 
 # --- Configuration -----------------------------------------------------------
 
+def test_config_source_follows_the_sentinel() -> None:
+    with tempfile.TemporaryDirectory() as root:
+        workspace = Path(root) / "repo"
+        workspace.mkdir()
+        (workspace / ".opencode-sandbox.json").write_text('{"verify": {"network": "pasta"}}')
+        sentinel = Path(root) / ".opencode-sandbox"
+        check(verify.sandbox_config_path(str(workspace), str(sentinel)) ==
+              str(workspace / ".opencode-sandbox.json"),
+              "on the host the project's own config must be read")
+        sentinel.touch()
+        os.environ["OPENCODE_SANDBOX_CONFIG"] = str(workspace / ".opencode-sandbox.json")
+        try:
+            chosen = verify.sandbox_config_path(str(workspace), str(sentinel))
+        finally:
+            del os.environ["OPENCODE_SANDBOX_CONFIG"]
+        check(chosen == "/run/opencode/sandbox.json",
+              f"inside the image only the launcher's RO mount may be read, never the workspace: {chosen}")
+
+
+def test_unreadable_config_is_an_error_not_defaults() -> None:
+    with tempfile.TemporaryDirectory() as root:
+        check(verify.load_verify_config(str(Path(root) / "absent.json")) == {},
+              "a config that does not exist means defaults")
+        hidden = Path(root) / "denied"
+        hidden.mkdir()
+        (hidden / "sandbox.json").write_text('{"verify": {"checks": {"x": "true"}}}')
+        hidden.chmod(0o000)
+        try:
+            with open(os.devnull, "w") as sink, contextlib.redirect_stderr(sink):
+                try:
+                    verify.load_verify_config(str(hidden / "sandbox.json"))
+                    refused = False
+                except SystemExit:
+                    refused = True
+        finally:
+            hidden.chmod(0o700)
+        check(refused or os.geteuid() == 0,
+              "a config that exists but cannot be read must refuse, not fall back to defaults")
+
+
+def test_image_carries_the_sentinel() -> None:
+    containerfile = (REPO / "Containerfile").read_text()
+    verify_containerfile = (REPO / "Containerfile.verify").read_text()
+    check("RUN touch /.opencode-sandbox && chmod 0444 /.opencode-sandbox" in containerfile,
+          "the base image must bake the read-only sandbox sentinel")
+    check(containerfile.index("/.opencode-sandbox ") < containerfile.index("\nUSER "),
+          "the sentinel must be created as root, before the image drops privileges")
+    check(".opencode-sandbox\n" not in verify_containerfile and "touch /.opencode-sandbox" not in verify_containerfile,
+          "the verify worker is not the sandbox and must not carry the sentinel")
+
+
 def with_config(payload: dict[str, Any]) -> dict[str, Any]:
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
         json.dump(payload, handle)

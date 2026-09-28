@@ -13,7 +13,7 @@ Everything here is the behavior of the shipped image; you do not need to read
 | What | Where |
 | --- | --- |
 | Verification broker | `/opt/opencode/sandbox/oc2-verify` (**not on `PATH`**; call it by full path) |
-| Sandbox config, as the broker reads it | `/run/opencode/sandbox.json` (read-only mount of the project's `.opencode-sandbox.json`) |
+| Sandbox config, as the broker reads it | `/run/opencode/sandbox.json` (read-only mount of the project's `.opencode-sandbox.json`); the `/.opencode-sandbox` sentinel makes this the only source in the container, so editing the workspace copy changes nothing until the next launch |
 | Project agent definitions, in the container | `/opt/opencode/config/opencode/agents` (read-only mount of the project's `.agents`) |
 | Image agents | `/opt/opencode/config/opencode/agent` |
 | Disposable worker image | `localhost/opencode2-verify:latest` (`make verify-image` on the host) |

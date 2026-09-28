@@ -146,6 +146,15 @@ a worker missing the toolchain reports a clean run while having executed nothing
 which is the failure mode this tool exists to avoid. `--json` returns
 `status`, `exit_code`, `duration_seconds`, and `output` for citation in findings.
 
+Which copy of that file is read depends on where the broker runs. The base image
+carries a root-owned sentinel, `/.opencode-sandbox`. When it is present the broker
+reads only the launcher's read-only mount at `/run/opencode/sandbox.json` (or
+defaults, when the project has no config and nothing is mounted); it never reads
+the workspace's `.opencode-sandbox.json`, which the agent can edit, and takes no
+environment override. On the host there is no sentinel, so it reads
+`./.opencode-sandbox.json` from the repository root and the named checks work
+without the launcher.
+
 `tests/model-router-dispatch.test.py` cannot run in the worker by design: it
 drives a real container engine, which the worker does not have. Every read-only
 worker that is granted a command runner — the review lanes, `reasoner`,

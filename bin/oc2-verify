@@ -25,8 +25,11 @@ Guarantees this tool makes, and how:
     is where that happens, so only creation holds the lock and runs proceed in
     parallel.
 
-Configuration comes from the sandbox config the launcher already bind-mounts
-read-only at /run/opencode/sandbox.json, `verify` block. The launcher reads
+Configuration is the sandbox config's `verify` block. Inside the image (marked
+by the /.opencode-sandbox sentinel) it is read only from the launcher's
+read-only mount at /run/opencode/sandbox.json, never from the workspace copy the
+agent can edit; on the host it is the repository's own .opencode-sandbox.json,
+so checks run without the launcher. The launcher reads
 config keys individually and does not reject unknown top-level keys, so this
 tool validates the block itself and refuses rather than silently falling back to
 defaults on a typo.
@@ -56,7 +59,9 @@ import tempfile
 import time
 from typing import Any, Final, NamedTuple
 
-SANDBOX_CONFIG: Final[str] = os.environ.get("OPENCODE_SANDBOX_CONFIG", "/run/opencode/sandbox.json")
+SENTINEL: Final[str] = "/.opencode-sandbox"
+MOUNTED_CONFIG: Final[str] = "/run/opencode/sandbox.json"
+PROJECT_CONFIG: Final[str] = ".opencode-sandbox.json"
 DEFAULT_IMAGE: Final[str] = "localhost/opencode2-verify:latest"
 DEFAULT_TIMEOUT_SECONDS: Final[int] = 300
 DEFAULT_MEMORY: Final[str] = "2g"
@@ -84,19 +89,36 @@ def die(message: str, code: int = USAGE_ERROR) -> None:
     raise SystemExit(code)
 
 
-def load_verify_config(path: str = SANDBOX_CONFIG) -> dict[str, Any]:
+def sandbox_config_path(workspace: str, sentinel: str = SENTINEL) -> str:
+    """Inside the image, only the launcher's mount; on the host, the project's file.
+
+    The workspace copy is writable by the agent, so inside the image it must
+    never be read, not even as a fallback: it would let the caller choose the
+    worker's image, network, and checks. No environment override either, for the
+    same reason. The launcher mounts the config only when the project has one, so
+    an absent mount means defaults, exactly as it does on the host.
+    """
+    if os.path.lexists(sentinel):
+        return MOUNTED_CONFIG
+    return os.path.join(workspace, PROJECT_CONFIG)
+
+
+def load_verify_config(path: str) -> dict[str, Any]:
     """Read and validate the `verify` block. Missing file means pure defaults.
 
     An unreadable or malformed block is an error, not a silent default: a typo
     that quietly dropped `image` would run checks in the wrong toolchain and
     report success. The path is a parameter rather than a module global so this
-    stays a pure read that tests can point at a fixture.
+    stays a pure read that tests can point at a fixture. Only a file that is
+    truly absent means defaults: os.path.exists() also answers False when the
+    path cannot be looked up (a denied mount), which would be exactly that
+    silent fallback.
     """
-    if not os.path.exists(path):
-        return {}
     try:
         with open(path, encoding="utf-8") as handle:
             document = json.load(handle)
+    except FileNotFoundError:
+        return {}
     except (OSError, json.JSONDecodeError) as error:
         die(f"cannot read {path}: {error}")
     if not isinstance(document, dict):
@@ -334,11 +356,13 @@ def main() -> None:
     parser.add_argument("dash_command", nargs=argparse.REMAINDER, help="command to run, after --")
     args = parser.parse_args()
 
-    config = load_verify_config()
+    workspace = os.path.realpath(os.getcwd())
+    config_path = sandbox_config_path(workspace)
+    config = load_verify_config(config_path)
     checks = config.get("checks", {})
     if args.list:
         if not checks:
-            print("no checks configured (verify.checks in the sandbox config)")
+            print(f"no checks configured (verify.checks in {config_path})")
             return
         for name in sorted(checks):
             print(f"{name}\t{checks[name]}")
@@ -352,7 +376,6 @@ def main() -> None:
     network = config.get("network", "none")
     cap = config.get("output_cap_bytes") or DEFAULT_OUTPUT_CAP_BYTES
 
-    workspace = os.path.realpath(os.getcwd())
     linked = workspace_git_common(workspace)
 
     # Refuse rather than start a worker the caller cannot trust: an image that is
