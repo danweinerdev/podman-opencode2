@@ -14,7 +14,7 @@ logins and sessions are saved in a separate volume for each project.
 - **Consistent environment:** use a Fedora-based runtime with bundled tools and skills.
   The development image adds Python tooling and a container client.
 
-This project uses a pinned **OpenCode2 preview**. Version pins live in the
+This project uses a pinned **OpenCode2** release. Version pins live in the
 [Containerfile](Containerfile).
 
 ## Quick start

@@ -333,8 +333,10 @@ class Suite:
 
         # Missing and null retain the engine's default seccomp policy: the
         # launcher's existing label security option is the only one emitted.
-        for name, value in (("missing", ...), ("null", None)):
-            root = workspace(name, value)
+        # (A distinct loop variable: mypy would otherwise infer `value` from
+        # this loop and reject the later loops' string/int/list/dict values.)
+        for name, placeholder in (("missing", ...), ("null", None)):
+            root = workspace(name, placeholder)
             self.run_ok(root)
             self.no_substring(self.argv(), "seccomp=")
 
@@ -375,8 +377,8 @@ class Suite:
                 stderr_contains="seccomp must be a string or null",
             )
 
-        for name, value in (("empty", ""), ("whitespace", " \t\n")):
-            root = workspace(name, value)
+        for name, text in (("empty", ""), ("whitespace", " \t\n")):
+            root = workspace(name, text)
             self.run_fail(
                 root,
                 f"launcher accepted {name} seccomp value",

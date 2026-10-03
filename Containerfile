@@ -15,7 +15,7 @@
 #   /opt/opencode/config/opencode/agent/*.md      baked agent definitions
 #   /opt/opencode/config/opencode/command/*.md    baked slash commands
 #   /etc/opencode/container-config.json           baked OPENCODE_CONFIG
-#   /etc/opencode/container-config.schema.json    pinned preview schema
+#   /etc/opencode/container-config.schema.json    pinned config schema
 #
 # Writable OpenCode data/state/cache land under the image user's home
 # (~/.local/share|state, ~/.cache); no host state is assumed.
@@ -31,7 +31,7 @@ ENV GOFLAGS=-buildvcs=false
 # portable .opencode-plugin tree (plugin.json + skills/ + shared/) alongside it.
 # Its collaboration prompts are rendered by the skills into the restricted
 # native workers, so the separate Claude-oriented agent catalog is not copied.
-ARG SDD_PLANNER_REF=7627e0ccb782d6a7f165307c033b65ec4d3de4e6
+ARG SDD_PLANNER_REF=7a741799aa757ea8e602bff2b2dd7746f1dd5b4e
 RUN set -eux; \
     git clone --filter=blob:none --no-tags \
         https://github.com/danweinerdev/claude-sdd-planner.git /tmp/claude-sdd-planner; \
@@ -124,7 +124,7 @@ FROM docker.io/library/fedora:44
 ARG USER_UID=1000
 ARG USER_GID=1000
 ARG USERNAME=dev
-ARG OPENCODE2_VERSION=0.0.0-beta-19234
+ARG OPENCODE2_VERSION=2.0.22
 # This opaque cache key records only the launcher-validated host catalog's
 # digest. The catalog bytes are never available to the image build.
 ARG LOCAL_PROVIDERS_SHA256=absent
@@ -149,17 +149,17 @@ RUN dnf install -y --setopt=install_weak_deps=False \
     python3 -m pip install --no-cache-dir --root-user-action ignore \
         PyYAML;
 
-# OpenCode2 CLI, pinned via the @opencode-ai/cli npm package. Its postinstall
-# script materializes the platform binary from the platform-specific optional
-# dependency, so install with scripts disabled and run postinstall.mjs
-# explicitly — then verify the binary reports the pinned version and that no
-# legacy `opencode` executable exists.
+# OpenCode2 CLI, pinned via the @opencode/cli npm package (the formal v2
+# release line; both the `opencode` and `opencode2` executables are the same
+# binary). Its postinstall script materializes the platform binary from the
+# platform-specific optional dependency, so install with scripts disabled and
+# run postinstall.mjs explicitly — then verify the binary reports the pinned
+# version.
 RUN set -eux; \
-    npm install -g @opencode-ai/cli@"${OPENCODE2_VERSION}" --ignore-scripts; \
-    node "$(npm root -g)/@opencode-ai/cli/postinstall.mjs"; \
-    [ "$(opencode2 --version)" = "opencode2 v${OPENCODE2_VERSION}" ]; \
-    rm -rf /tmp/opencode; \
-    ! command -v opencode >/dev/null 2>&1
+    npm install -g @opencode/cli@"${OPENCODE2_VERSION}" --ignore-scripts; \
+    node "$(npm root -g)/@opencode/cli/postinstall.mjs"; \
+    [ "$(opencode2 --version)" = "opencode v${OPENCODE2_VERSION}" ]; \
+    rm -rf /tmp/opencode
 
 # Create an unprivileged user whose UID/GID match the host caller so
 # bind-mounted workspace files keep correct ownership under --userns=keep-id.
@@ -186,8 +186,8 @@ COPY --from=mcp-builder /opt/build/search-plugin/.opencode-plugin       /opt/ope
 COPY --from=sdd-builder /opt/build/sdd-plugin/.opencode-plugin          /opt/opencode/plugins/sdd
 
 # The native v2 model-router plugin, built from this repository. Its runtime
-# dependency (@opencode-ai/plugin@1.18.25, pinned in package.json) is installed
-# here so `import "@opencode-ai/plugin/v2/promise"` resolves in-container.
+# dependency (@opencode/plugin@2.0.22, pinned in package.json) is installed
+# here so `import "@opencode/plugin"` resolves in-container.
 COPY plugins/model-router /opt/opencode/plugins/model-router
 RUN cd /opt/opencode/plugins/model-router \
     && npm install --omit=dev --ignore-scripts --no-audit --no-fund
@@ -241,14 +241,17 @@ RUN chmod 0755 /opt/opencode/config/opencode \
         /opt/opencode/config/opencode/agent \
         /opt/opencode/config/opencode/command
 
-# Encapsulation: the baked config is authoritative; project config and external
-# (host) skill scans are disabled so the container never reaches for host
-# state. Data/state/cache default to the image user's home.
+# Encapsulation: the baked config is authoritative and project config is
+# disabled so the container never reaches for host state. Data/state/cache
+# default to the image user's home. OPENCODE_DISABLE_PROJECT_CONFIG keeps the
+# runtime from reading project configs (and their .claude/.agents trees) from
+# the mounted workspace. The v2 runtime has no external/Claude-skill scans to
+# disable: its skill sources are the config directory, the config's `skills`
+# entries, and the image user's (empty) home, so no further skill-scan
+# switches exist.
 ENV OPENCODE_CONFIG=/etc/opencode/container-config.json \
     XDG_CONFIG_HOME=/opt/opencode/config \
     OPENCODE_DISABLE_PROJECT_CONFIG=1 \
-    OPENCODE_DISABLE_EXTERNAL_SKILLS=1 \
-    OPENCODE_DISABLE_CLAUDE_CODE_SKILLS=1 \
     OPENCODE_DISABLE_AUTOUPDATE=1 \
     PATH=/opt/mcp/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 

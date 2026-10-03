@@ -6,8 +6,8 @@ measured on. Re-check an entry after a runtime upgrade: the dispatch integration
 test (`tests/model-router-dispatch.test.py`) fails when the behavior below
 changes, which is the prompt to update or delete the entry.
 
-Measured on `opencode2 v0.0.0-beta-19234`, the version baked into the image as of
-2026-09-25, with providers declared through `@ai-sdk/openai-compatible`.
+Measured on `opencode v2.0.22`, the version baked into the image as of
+2026-10-03, with providers declared through `@ai-sdk/openai-compatible`.
 
 ## Agent `request` options never reach an openai-compatible provider
 

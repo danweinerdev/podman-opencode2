@@ -1,10 +1,10 @@
 # opencode-model-router (v2)
 
 Native v2 model-routing plugin for **OpenCode2**. It is built exclusively on the
-`@opencode-ai/plugin/v2/promise` API and uses the `ctx.agent.transform` hook to
-assign worker agents native `AgentV2Info.model` (`ModelRef`) values and optional
-request headers/body, plus the default agent. The native v2 `subagent` tool then
-runs each worker on its assigned model directly.
+`@opencode/plugin` API and uses the `ctx.agent.transform` hook to assign worker
+agents native `Agent.Info.model` (`ModelRef`) values and optional request
+headers/body, plus the default agent. The native v2 `subagent` tool then runs
+each worker on its assigned model directly.
 
 There is **no** v1 hook function, no `tool.execute.before/after` interception,
 no SDK child-session dispatch, and no placeholder/return-ok relay. This is a
@@ -13,7 +13,7 @@ deliberate v2-only design: routing is configuration, not interception.
 ## Module shape
 
 ```js
-export default { id, setup }   // @opencode-ai/plugin/v2/promise `define(...)`
+export default { id, setup }   // @opencode/plugin `Plugin.define(...)`
 ```
 
 The plugin's config is assembled in three layers, in increasing precedence:

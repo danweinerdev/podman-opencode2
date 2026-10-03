@@ -21,9 +21,9 @@ import defaultExport, {
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 
 /**
- * A minimal in-memory `AgentDraft` that mirrors the `@opencode-ai/plugin/v2`
- * `AgentDraft` interface (list/get/default/update/remove) against a Map of
- * `AgentV2Info`-shaped records. Used to prove `applyAgentConfig` mutates only
+ * A minimal in-memory `AgentDraft` that mirrors the `@opencode/plugin`
+ * `AgentEditor` interface (list/get/default/update/remove) against a Map of
+ * `Agent.Info`-shaped records. Used to prove `applyAgentConfig` mutates only
  * through the public draft surface.
  */
 function makeDraft(agents) {
@@ -95,11 +95,11 @@ async function withTempSandbox(t, json) {
   return path
 }
 
-test("default export is the v2/promise { id, setup } shape", () => {
+test("default export is the { id, setup } shape", () => {
   assert.equal(typeof defaultExport, "object")
   assert.equal(defaultExport.id, "opencode-model-router")
   assert.equal(typeof defaultExport.setup, "function")
-  // The v2/promise contract is exactly { id, setup }: no v1 `server` hook.
+  // The v2 promise contract is exactly { id, setup }: no v1 `server` hook.
   assert.equal("server" in defaultExport, false)
   assert.equal("tui" in defaultExport, false)
 })

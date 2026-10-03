@@ -5,7 +5,7 @@
     "containerfile": "Containerfile",
     "context": ".",
     "args": {
-      "OPENCODE2_VERSION": "0.0.0-beta-17823"
+      "OPENCODE2_VERSION": "2.0.22"
     }
   },
   "workspace": ".",
