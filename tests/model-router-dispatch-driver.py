@@ -99,7 +99,8 @@ def dispatch(mode: str) -> str:
                  content_type="application/json")
     if prompt is None:
         fail(f"prompting the {mode} session failed")
-    if api("POST", f"{BASE_URL}/api/session/{session}/wait", body=b"") is None:
+    # v2 moved session wait under /api/experimental/.
+    if api("POST", f"{BASE_URL}/api/experimental/session/{session}/wait", body=b"") is None:
         fail(f"waiting for the {mode} session failed")
     completed = api_json("GET", f"{BASE_URL}/api/session/{session}")
     data = completed.get("data", {})
@@ -147,9 +148,10 @@ def main() -> None:
         start_mock(args.parent_port, args.worker_port,
                    tmp / "ready.json", tmp / "requests.jsonl")
 
+        # v2 replaced /api/health with /api/info (server identity + readiness).
         poll_until("opencode server health", 200,
-                   lambda: api("GET", f"{BASE_URL}/api/health") is not None)
-        if api("GET", f"{BASE_URL}/api/health") is None:
+                   lambda: api("GET", f"{BASE_URL}/api/info") is not None)
+        if api("GET", f"{BASE_URL}/api/info") is None:
             fail("opencode server did not become healthy")
 
         parent_agent: dict | None = None
@@ -194,7 +196,7 @@ def main() -> None:
 
             poll_until("extractor child session", 200, extractor_present)
             child = next(c for c in children if c.get("agent") == "extractor")
-            if api("POST", f"{BASE_URL}/api/session/{child['id']}/wait", body=b"") is None:
+            if api("POST", f"{BASE_URL}/api/experimental/session/{child['id']}/wait", body=b"") is None:
                 fail(f"waiting for the extractor child of {parent} failed")
             final = children_for(parent)
             if not any(c.get("parentID") == parent and c.get("agent") == "extractor"
@@ -220,7 +222,7 @@ def main() -> None:
             fail("mock worker provider saw a request for the wrong model")
 
         # Request options are pinned to what the runtime forwards, not to what
-        # the router asks for. Measured on opencode2 v0.0.0-beta-19234: the
+        # the router asks for. Measured on opencode v2.0.22: the
         # agent `request` object (here `x-router-route` and `router_marker`,
         # both set by the sandbox model_router block) never reaches an
         # @ai-sdk/openai-compatible provider, while the provider's own

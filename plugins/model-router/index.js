@@ -1,13 +1,13 @@
 /**
  * opencode-model-router — native v2 plugin for OpenCode2.
  *
- * This plugin is intentionally v2-only. It uses the
- * `@opencode-ai/plugin/v2/promise` API (`default export { id, setup }`) and the
- * agent-transform hook to assign a native `AgentV2Info.model` `ModelRef` (and
- * optional request headers/body) to each agent, keyed by agent id. The native
- * v2 `subagent` tool then uses the selected agent's model directly, so this module
- * performs no tool-execution interception (no execute-before/after hooks), no
- * SDK child-session relay, and no decoy/return-ok flow.
+ * This plugin is intentionally v2-only. It uses the `@opencode/plugin` API
+ * (`default export { id, setup }` via `Plugin.define`) and the agent-transform
+ * hook to assign a native `Agent.Info.model` `ModelRef` (and optional request
+ * headers/body) to each agent, keyed by agent id. The native v2 `subagent`
+ * tool then uses the selected agent's model directly, so this module performs
+ * no tool-execution interception (no execute-before/after hooks), no SDK
+ * child-session relay, and no decoy/return-ok flow.
  *
  * Config resolution: the baked plugin tuple `options` provide the full default
  * config. `OPENCODE_MODEL_ROUTER_GLOBAL_CONFIG` may name a launcher-mounted
@@ -40,7 +40,7 @@ import { readdir, readFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { resolve } from "node:path"
 
-import { define } from "@opencode-ai/plugin/v2/promise"
+import { Plugin } from "@opencode/plugin"
 
 export const SCHEMA_VERSION = 2
 
@@ -461,7 +461,7 @@ async function declaredAgentIDs() {
   return ids
 }
 
-export const plugin = define({
+export const plugin = Plugin.define({
   id: "opencode-model-router",
   setup: async (ctx) => {
     const options = ctx.options

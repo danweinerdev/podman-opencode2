@@ -70,7 +70,7 @@ See [Containerfile](../Containerfile) for dependency versions and source refs.
 | `/opt/opencode/config/opencode/command/` | Code-graph slash commands |
 | `/opt/opencode/config/opencode/opencode.json` | Optional local-provider catalog mount |
 | `/etc/opencode/container-config.json` | Baked config selected by `OPENCODE_CONFIG` |
-| `/etc/opencode/container-config.schema.json` | Schema for the pinned preview config |
+| `/etc/opencode/container-config.schema.json` | Schema for the pinned container config |
 
 The global provider filename must be `opencode.json`; an arbitrary
 `provider.json` fragment is not loaded. For router internals, see the
