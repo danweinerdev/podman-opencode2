@@ -242,6 +242,10 @@ class Suite:
 
     def base_env(self, extra: dict[str, str] | None = None) -> dict[str, str]:
         env = dict(os.environ)
+        # The host's XDG base directories would point the launcher at the real
+        # home instead of the test's; derive them from HOME unless a test sets them.
+        for name in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
+            env.pop(name, None)
         env["HOME"] = str(self.test_home)
         env["PATH"] = f"{self.bin}:{env.get('PATH', '')}"
         env["ARGV_LOG"] = str(self.argv_log)
