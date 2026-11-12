@@ -100,10 +100,12 @@ the launcher from the host workspace root.
   launcher mounts read-only at `/opt/opencode/config/opencode/agents`, the agent
   directory it scans in addition to the one the image bakes. It defaults to
   `.agents`; `false` skips the pickup and a path replaces the directory. These
-  entries are additions and may not reuse a container or runtime agent id
-  (`aid-orchestrator`, `aid-mechanic`, `build`, and the rest): a same-id file
+  entries are additions and may not reuse an OpenCode agent id (`build`, `plan`,
+  `general`, `explore`, `compaction`, `title`, `summary`): a same-id file
   substitutes its own prompt and concatenates permission rules, silently widening
-  the agent it shadowed, so the launch is refused. Entries must be regular files
+  the agent it shadowed, so the launch is refused. The image's ai-devtools agents
+  are ai-devtools' responsibility: at the current pin a project `.agents/aid-*.md`
+  overrides the baked agent. Entries must be regular files
   named `<agent-id>.md` with no subdirectories. Each file must open with a closed
   `---` frontmatter fence, since the runtime otherwise registers it as an unnamed
   primary agent whose prompt is its own frontmatter. A `review-*` id is treated as

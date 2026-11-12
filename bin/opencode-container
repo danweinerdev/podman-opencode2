@@ -306,31 +306,20 @@ CAPABILITY_REFUSALS: Final[dict[str, str]] = {
 # --- Workspace agent definitions ----------------------------------------------
 # A workspace may supply additional agent definitions (review lanes, project
 # specialists). They are mounted into a second agent directory the runtime also
-# scans, beside the ones the image bakes, so they are additive: the container's
-# own agents stay in place. Ids are reserved rather than merged because a
-# same-id definition is not an override: the later file replaces the agent's
-# system prompt and the two permission rule sets are concatenated, so a project
-# file reusing a baked id silently widens that baked agent's permissions.
+# scans, so they are additive. OpenCode's own ids are reserved rather than
+# merged because a same-id definition is not an override: the later file
+# replaces the agent's system prompt and the two permission rule sets are
+# concatenated, so a project file reusing one silently widens that agent's
+# permissions.
 PROJECT_AGENTS_DEFAULT_DIR: Final[str] = ".agents"
 PROJECT_AGENTS_TARGET: Final[str] = "/opt/opencode/config/opencode/agents"
 MAX_PROJECT_AGENTS: Final[int] = 64
 AGENT_ID_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 
-# The ids the pinned ai-devtools plugin registers (dist/opencode/agents/*.md at
-# AI_DEVTOOLS_REF). A same-id project definition would replace the agent's
-# prompt and widen its permissions, so these stay reserved.
-BAKED_AGENT_IDS: Final[tuple[str, ...]] = (
-    "aid-orchestrator",
-    "aid-explorer",
-    "aid-mechanic",
-    "aid-oracle",
-    "aid-designer",
-    "aid-creator",
-    "aid-craftsman",
-    "aid-sage",
-)
-# OpenCode's own visible and hidden agents, which a same-id definition would
-# likewise override-and-widen.
+# OpenCode's own visible and hidden agents. A same-id definition would replace
+# the agent's prompt and widen its permissions, so these stay reserved. The
+# ai-devtools agents belong to ai-devtools, which will protect them from a
+# project override itself; that protection is not enforced at this pin.
 RUNTIME_AGENT_IDS: Final[tuple[str, ...]] = (
     "build",
     "plan",
@@ -340,7 +329,7 @@ RUNTIME_AGENT_IDS: Final[tuple[str, ...]] = (
     "title",
     "summary",
 )
-RESERVED_AGENT_IDS: Final[frozenset[str]] = frozenset(BAKED_AGENT_IDS + RUNTIME_AGENT_IDS)
+RESERVED_AGENT_IDS: Final[frozenset[str]] = frozenset(RUNTIME_AGENT_IDS)
 
 # Project reviewers are named to this convention. The launcher warns when one
 # of them declares no review gates, because its findings would silently
@@ -788,8 +777,8 @@ def discover_project_agents(
     Returns `(absolute source directory, [(agent id, declared gates)])` for a
     directory worth mounting, or None when there is nothing to mount. Declared
     gates are None when the definition named none. `agents` overrides the default
-    `.agents` directory and `false` disables the pickup; neither can reach the
-    container's own definitions, which stay reserved.
+    `.agents` directory and `false` disables the pickup; neither can reach
+    OpenCode's own definitions, which stay reserved.
 
     Fails closed on anything the runtime would otherwise half-load: a nested path
     becomes an invalid agent id, and an id collision silently rewrites a
@@ -842,8 +831,8 @@ def discover_project_agents(
             die(f"invalid agent name (letters, digits, '.', '_' or '-'): {requested}/{name}")
         if agent_id in RESERVED_AGENT_IDS:
             die(
-                f"agent {agent_id} redefines a container agent, which would replace "
-                f"its prompt and widen its permissions; rename it or set "
+                f"agent {agent_id} redefines an OpenCode agent, which would "
+                f"replace its prompt and widen its permissions; rename it or set "
                 f'"agents": false'
             )
         gates, declared = read_review_gates(child.path, f"{requested}/{name}")

@@ -34,24 +34,12 @@ ENV GOFLAGS=-buildvcs=false
 # Makefile release target uses, so `aid version` reports the plugin version.
 # renovate: repo=danweinerdev/ai-devtools branch=main
 ARG AI_DEVTOOLS_REF=abba5934875176cdc895d9d2ec520b7e276f18f3
-# The agent roster the pinned ai-devtools ref must define. AI_DEVTOOLS_REF
-# bumps fail here when they add or remove an agent; keep this list in step with
-# BAKED_AGENT_IDS in bin/opencode-container, which tests/image-config.test.py
-# enforces.
-ARG AI_DEVTOOLS_AGENTS="aid-craftsman aid-creator aid-designer aid-explorer aid-mechanic aid-oracle aid-orchestrator aid-sage"
 RUN set -eux; \
     git clone --filter=blob:none --no-tags \
         https://github.com/danweinerdev/ai-devtools.git /tmp/ai-devtools; \
     cd /tmp/ai-devtools; \
     git fetch --depth 1 origin "${AI_DEVTOOLS_REF}"; \
     git checkout FETCH_HEAD; \
-    actual_agents="$(cd dist/opencode/agents && for f in *.md; do printf '%s\n' "${f%.md}"; done | sort)"; \
-    expected_agents="$(printf '%s\n' ${AI_DEVTOOLS_AGENTS} | sort)"; \
-    if [ "${actual_agents}" != "${expected_agents}" ]; then \
-        printf 'ai-devtools agent roster changed at AI_DEVTOOLS_REF=%s\nexpected: %s\nactual: %s\n' \
-            "${AI_DEVTOOLS_REF}" "${expected_agents}" "${actual_agents}" >&2; \
-        exit 1; \
-    fi; \
     version="$(sed -n 's/^ *"version": *"\([^"]*\)".*/\1/p' package.json | head -n 1)"; \
     mkdir -p /opt/build/bin /opt/build/ai-devtools-plugin/.opencode-plugin; \
     CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${version}" \

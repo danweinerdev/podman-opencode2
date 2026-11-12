@@ -233,32 +233,6 @@ def load_launcher() -> object:
     return module
 
 
-def launcher_baked_agent_ids() -> tuple[str, ...]:
-    module = load_launcher()
-    agents = getattr(module, "BAKED_AGENT_IDS", None)
-    if not isinstance(agents, tuple) or not all(isinstance(agent, str) for agent in agents):
-        fail("bin/opencode-container does not define BAKED_AGENT_IDS as a tuple of strings")
-    return agents
-
-
-def check_ai_devtools_agents(source: str, baked: tuple[str, ...]) -> None:
-    # The build asserts that the checked-out ai-devtools ref defines exactly the
-    # agents in this ARG, so a ref bump that changes the roster fails the build.
-    # This check keeps the ARG in step with the ids the launcher reserves.
-    match = re.search(r'^ARG\s+AI_DEVTOOLS_AGENTS="([^"]*)"\s*$', source, re.MULTILINE)
-    if match is None:
-        fail('Containerfile does not declare ARG AI_DEVTOOLS_AGENTS="..."')
-    agents = match.group(1).split()
-    if len(agents) != len(set(agents)):
-        fail(f"AI_DEVTOOLS_AGENTS contains duplicate ids: {agents}")
-    if sorted(agents) != sorted(baked):
-        fail(
-            "AI_DEVTOOLS_AGENTS drifted from the launcher's BAKED_AGENT_IDS:\n"
-            f"  Containerfile: {sorted(agents)}\n"
-            f"  launcher:      {sorted(baked)}"
-        )
-
-
 def final_stage(source: str) -> str:
     start = source.rfind("FROM docker.io/library/fedora:44")
     if start == -1:
@@ -477,7 +451,6 @@ def main() -> None:
     check_mcp_servers(config)
     check_policy_asset_permissions(source)
     check_runtime_tools(source)
-    check_ai_devtools_agents(source, launcher_baked_agent_ids())
     check_nested_podman(source, load_launcher())
 
 

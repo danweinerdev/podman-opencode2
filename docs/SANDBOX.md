@@ -98,11 +98,15 @@ and the runtime registers one with unparseable frontmatter as an unnamed primary
 agent carrying its own frontmatter as its prompt. Hidden files are ignored, and a
 hidden `.md` warns instead of vanishing quietly.
 
-These definitions are additions, never replacements. An id that already belongs
-to a container agent or to OpenCode itself (`aid-orchestrator`, `aid-mechanic`,
-`build`, `plan`, and the rest) stops the launch with a message: a same-id
-definition does not cleanly override, it substitutes its own prompt and
-concatenates permission rules, which silently widens the agent it shadowed.
+These definitions are additions, never replacements. An id OpenCode itself uses
+(`build`, `plan`, `general`, `explore`, and the hidden agents) stops the launch
+with a message: a same-id definition does not cleanly override, it substitutes its
+own prompt and concatenates permission rules, which silently widens the agent it
+shadowed.
+
+The image's ai-devtools agents are not reserved here. Protecting them from a
+project override is ai-devtools' job, and it is not yet enforced at the pin this
+image uses, so a project `.agents/aid-*.md` currently overrides the baked agent.
 
 Two things to know about a new agent:
 
