@@ -32,6 +32,7 @@ ENV GOFLAGS=-buildvcs=false
 # plugin's runtime files: package.json plus everything its `files` list ships.
 # The build passes -X main.version=<package.json version>, the same ldflag its
 # Makefile release target uses, so `aid version` reports the plugin version.
+# renovate: repo=danweinerdev/ai-devtools branch=main
 ARG AI_DEVTOOLS_REF=abba5934875176cdc895d9d2ec520b7e276f18f3
 # The agent roster the pinned ai-devtools ref must define. AI_DEVTOOLS_REF
 # bumps fail here when they add or remove an agent; keep this list in step with
@@ -94,6 +95,7 @@ RUN set -eux; \
 # (code-graph.js + skills/ + commands/). Clone the branch tip then fetch the
 # pinned ref so a plain commit SHA works without server-side
 # uploadpack.allowReachableSHA1InWant.
+# renovate: repo=danweinerdev/code-graph-mcp branch=main
 ARG CODE_GRAPH_MCP_REF=9bb7b6bf47c12f48cdce57b2762881692b6c60b3
 RUN set -eux; \
     git clone --filter=blob:none --no-tags \
@@ -107,6 +109,7 @@ RUN set -eux; \
     cp -a opencode-plugin /opt/build/code-graph-plugin/
 
 # lldb-debug-mcp: pinned server binary + its .opencode-plugin skill tree.
+# renovate: repo=danweinerdev/lldb-debug-mcp branch=main
 ARG DEBUG_MCP_REF=a032c18f2f52c9f2b5a3c43f22917cef9e6264dc
 RUN set -eux; \
     git clone --filter=blob:none --no-tags \
@@ -121,6 +124,7 @@ RUN set -eux; \
 
 # search-mcp: pinned server binary + its .opencode-plugin tree
 # (search-mcp.js + skills/ + commands/).
+# renovate: repo=danweinerdev/search-mcp branch=main
 ARG SEARCH_MCP_REF=89891c8a8fdcaea6b8ab28e60441c01227f54306
 RUN set -eux; \
     git clone --filter=blob:none --no-tags \
@@ -141,6 +145,7 @@ FROM docker.io/library/fedora:44
 ARG USER_UID=1000
 ARG USER_GID=1000
 ARG USERNAME=dev
+# renovate: datasource=npm depName=@opencode/cli
 ARG OPENCODE2_VERSION=2.2.6
 # This opaque cache key records only the launcher-validated host catalog's
 # digest. The catalog bytes are never available to the image build.
