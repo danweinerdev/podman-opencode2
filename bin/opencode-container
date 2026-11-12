@@ -45,12 +45,14 @@ import json
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
 import textwrap
 from collections.abc import Iterator, Sequence
+from types import FrameType
 from typing import Any, Final, Literal, NoReturn
 
 if sys.version_info < (3, 10):
@@ -76,7 +78,35 @@ BAKED_ROOTS: Final[tuple[str, ...]] = (
     "/src",
     "/workspace",
 )
-# containers mode does not create the generated /workspace/<hash> mount, so a
+# System directories a user mount may never shadow in any mode: replacing the
+# interpreter, the startup script, or the runtime beneath them would break the
+# sandbox before its command runs. /usr/local/libexec is named separately for
+# the entrypoint, though it is already below /usr.
+SYSTEM_ROOTS: Final[tuple[str, ...]] = (
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/lib",
+    "/lib64",
+    "/etc",
+    "/usr/local/libexec",
+)
+
+# Mount targets reserved on top of SYSTEM_ROOTS even though Podman would happily
+# create them: the kernel's own virtual filesystems, and paths the image's
+# filesystem is a symlink to (/var/run and /var/lock into /run, /var/lib/rpm
+# into /usr). The host resolves a target through its own symlinks, which need
+# not match the image's, so these are checked as written and as the host
+# resolves them.
+MOUNT_TARGET_RESERVED_ROOTS: Final[tuple[str, ...]] = (
+    "/sys",
+    "/proc",
+    "/dev",
+    "/var/run",
+    "/var/lock",
+    "/var/lib/rpm",
+)
+# Host-engine mode does not create the generated /workspace/<hash> mount, so a
 # host workspace that genuinely lives below /workspace can be mirrored safely.
 CONTAINERS_WORKSPACE_RESERVED_ROOTS: Final[tuple[str, ...]] = (
     "/etc/opencode",
@@ -88,9 +118,9 @@ CONTAINERS_WORKSPACE_RESERVED_ROOTS: Final[tuple[str, ...]] = (
 )
 
 GLOBAL_GIT_CONFIG_TARGET: Final[str] = "/run/opencode/gitconfig"
-ROUTER_GLOBAL_TARGET: Final[str] = "/run/opencode/model-router-global.json"
-# The only model-router schema_version this image's router reads.
-ROUTER_SCHEMA_VERSION: Final[int] = 2
+# ai-devtools resolves model routing from $XDG_CONFIG_HOME/opencode/aid.json,
+# which is /opt/opencode/config/opencode/aid.json in the container.
+GLOBAL_AID_CONFIG_TARGET: Final[str] = "/opt/opencode/config/opencode/aid.json"
 SANDBOX_TARGET: Final[str] = "/run/opencode/sandbox.json"
 CONTAINER_SOCKET_TARGET: Final[str] = "/run/opencode-container-engine.sock"
 LOCAL_PROVIDERS_TARGET: Final[str] = "/opt/opencode/config/opencode/opencode.json"
@@ -100,6 +130,70 @@ LOCAL_PROVIDERS_LABEL: Final[str] = "io.opencode.local-providers-sha256"
 # `make` does — means the builder never recorded catalog provenance.
 PROVIDER_DIGEST_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
 OPENCODE_DATA_MOUNT: Final[str] = "/var/lib/opencode-data"
+# The image's ENTRYPOINT: the cgroup/privilege prelude. Nested mode pins it
+# explicitly so a derived image's own ENTRYPOINT cannot skip the prelude.
+ENTRYPOINT_TARGET: Final[str] = "/usr/local/libexec/opencode-entrypoint"
+# Where nested mode delivers project-supplied environment variables. The
+# prelude starts as root, so those values must not reach it through `-e`; the
+# launcher mounts this fixed path read-only and the image's loader applies the
+# file to the agent process after the drop. It sits below BAKED_ROOTS, so no
+# user mount can shadow it.
+AGENT_ENV_TARGET: Final[str] = "/run/opencode/agent-env"
+# The launcher-owned variable that carries the configured capability names to
+# the prelude. It is not project-settable: every OPENCODE_* name is reserved.
+AGENT_CAPS_VAR: Final[str] = "OPENCODE_AGENT_CAPABILITIES"
+# Set to "1" by an image that delivers the project environment through the
+# read-only file and loader above. An image built before that route existed
+# would start the agent without its configured variables, so nested mode
+# refuses it.
+AGENT_ENV_LABEL: Final[str] = "io.opencode.agent-env"
+
+# --- Container-engine modes -----------------------------------------------------
+# `containers` selects how the sandbox reaches a container engine:
+#   "nested" the image's own rootless Podman engine, with no host socket; the
+#            default (unset), and what true also selects
+#   "host"   the host's Podman/Docker socket is mounted; only ever explicit,
+#            because it hands the sandbox the host's engine
+#   "off"    no engine (false): the engine-free profile
+ContainersMode = Literal["off", "host", "nested"]
+# The nested engine's graph root: a per-project volume, so inner images and
+# containers persist across sessions without touching the host's store. The
+# image's /etc/containers/storage.conf points rootless_storage_path below it.
+NESTED_STORAGE_MOUNT: Final[str] = "/var/lib/opencode-containers"
+# Set to "1" by an image built with NESTED_PODMAN=1 (the Containerfile default).
+NESTED_PODMAN_LABEL: Final[str] = "io.opencode.nested-podman"
+# The outer container's user namespace must hold 65,536 ids for the image's
+# subordinate ranges (every id 1..65535 but the user's own) to be mappable.
+NESTED_MIN_SUBIDS: Final[int] = 65536
+# Every refusal of the default nested engine names both ways out, so a user on
+# a host or image that cannot run it is not left to guess.
+NESTED_REFUSAL_HINT: Final[str] = (
+    'set "containers": false in .opencode-sandbox.json for no engine, or '
+    '"containers": "host" to mount the host engine socket (which exposes the '
+    "host engine to the sandbox)"
+)
+# What nested mode adds to the outer container, each for an observed failure
+# without it: CAP_SYS_ADMIN in the bounding set (setuid newuidmap cannot write
+# an inner id map), an unmasked /proc/sys (crun writes ping_group_range), and
+# /dev/net/tun (pasta networking). `--user 0` runs the image's entrypoint
+# prelude as root so it can delegate the cgroup before dropping to the image
+# user; without the delegation inner --memory/--cpus are silently ignored.
+# Native overlay serves the inner store, so /dev/fuse is not passed.
+NESTED_RUN_FLAGS: Final[tuple[str, ...]] = (
+    "--user",
+    "0",
+    # Pin the startup script so a derived image that replaces ENTRYPOINT still
+    # runs the cgroup prelude and privilege drop; the command args follow as
+    # the CMD, exactly as before.
+    "--entrypoint",
+    ENTRYPOINT_TARGET,
+    "--cap-add",
+    "SYS_ADMIN",
+    "--security-opt",
+    "systempaths=unconfined",
+    "--device",
+    "/dev/net/tun",
+)
 
 # Provider API keys auto-forwarded when set in the host environment. This is
 # the common multi-provider list plus AZURE_OPENAI_API_KEY. Unset variables are
@@ -154,6 +248,61 @@ ALLOWED_RUNTIME_ARG_PREFIXES: Final[tuple[str, ...]] = (
     "--ulimit=",
 )
 
+# --- Capability policy --------------------------------------------------------
+# A capability is allowed only if it cannot bypass file permission checks,
+# change uid/gid, or act on processes or kernel state outside the agent's own.
+# The allow-list is the useful set that still fits that rule (NET_ADMIN and
+# NET_RAW only reach the sandbox's own network namespace). Everything else is
+# refused with the rule it breaks, so a config asking for container root fails
+# at launch instead of being quietly granted.
+ALLOWED_CAPABILITIES: Final[frozenset[str]] = frozenset({
+    "IPC_LOCK",
+    "NET_ADMIN",
+    "NET_BIND_SERVICE",
+    "NET_BROADCAST",
+    "NET_RAW",
+    "SYS_NICE",
+    "SYS_RESOURCE",
+})
+# Refused names, each with the rule from above that it would break.
+CAPABILITY_REFUSALS: Final[dict[str, str]] = {
+    # File permission checks.
+    "CHOWN": "it can change a file's owner, bypassing file permissions",
+    "DAC_OVERRIDE": "it bypasses file read, write and execute permissions",
+    "DAC_READ_SEARCH": "it bypasses file read and directory search permissions",
+    "FOWNER": "it bypasses ownership checks on write and mode changes",
+    "FSETID": "it can keep setuid/setgid bits on write, bypassing permissions",
+    "SETFCAP": "it can set file capabilities, bypassing file permissions",
+    "LINUX_IMMUTABLE": "it can set immutable and append-only file attributes",
+    # uid/gid.
+    "SETGID": "it can change a process's gid",
+    "SETPCAP": "it can change another process's capabilities",
+    "SETUID": "it can change a process's uid",
+    # Processes and kernel state outside the agent's own.
+    "AUDIT_CONTROL": "it can configure kernel auditing",
+    "AUDIT_READ": "it can read the kernel audit log",
+    "AUDIT_WRITE": "it can write the kernel audit log",
+    "BLOCK_SUSPEND": "it can block host suspend",
+    "BPF": "it can load kernel BPF programs",
+    "CHECKPOINT_RESTORE": "it can checkpoint and restore other processes",
+    "KILL": "it can signal processes outside the agent's own",
+    "LEASE": "it can take leases on files outside the agent's own",
+    "MAC_ADMIN": "it can administer a mandatory access control policy",
+    "MAC_OVERRIDE": "it can override a mandatory access control policy",
+    "MKNOD": "it can create device nodes",
+    "PERFMON": "it can observe host-wide performance state",
+    "SYSLOG": "it can read kernel logs and set the console log level",
+    "SYS_ADMIN": "it can administer namespaces, mounts and host kernel state",
+    "SYS_BOOT": "it can reboot the host",
+    "SYS_MODULE": "it can load kernel modules",
+    "SYS_PACCT": "it can enable process accounting",
+    "SYS_PTRACE": "it can inspect and control other processes",
+    "SYS_RAWIO": "it can access raw I/O ports and devices",
+    "SYS_TIME": "it can set the host clock",
+    "SYS_TTY_CONFIG": "it can configure terminals outside the agent's own",
+    "WAKE_ALARM": "it can wake or reboot the host",
+}
+
 # --- Workspace agent definitions ----------------------------------------------
 # A workspace may supply additional agent definitions (review lanes, project
 # specialists). They are mounted into a second agent directory the runtime also
@@ -167,21 +316,18 @@ PROJECT_AGENTS_TARGET: Final[str] = "/opt/opencode/config/opencode/agents"
 MAX_PROJECT_AGENTS: Final[int] = 64
 AGENT_ID_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 
-# The ids the image bakes at /opt/opencode/config/opencode/agent/. This mirrors
-# the plugin's BAKED_AGENTS, and tests/launcher-env.test.py asserts it matches
-# plugins/model-router/agents/, so it cannot silently drift from the image.
+# The ids the pinned ai-devtools plugin registers (dist/opencode/agents/*.md at
+# AI_DEVTOOLS_REF). A same-id project definition would replace the agent's
+# prompt and widen its permissions, so these stay reserved.
 BAKED_AGENT_IDS: Final[tuple[str, ...]] = (
-    "orchestrator",
-    "engineer",
-    "reasoner",
-    "extractor",
-    "bulk-researcher",
-    "bounded-editor",
-    "implementer",
-    "review-plan-drift",
-    "review-quality",
-    "review-spec-compliance",
-    "review-blind-spots",
+    "aid-orchestrator",
+    "aid-explorer",
+    "aid-mechanic",
+    "aid-oracle",
+    "aid-designer",
+    "aid-creator",
+    "aid-craftsman",
+    "aid-sage",
 )
 # OpenCode's own visible and hidden agents, which a same-id definition would
 # likewise override-and-widen.
@@ -196,8 +342,9 @@ RUNTIME_AGENT_IDS: Final[tuple[str, ...]] = (
 )
 RESERVED_AGENT_IDS: Final[frozenset[str]] = frozenset(BAKED_AGENT_IDS + RUNTIME_AGENT_IDS)
 
-# Container agents grant worker dispatch to this prefix, so a workspace agent
-# outside it still registers but cannot be launched as a worker.
+# Project reviewers are named to this convention. The launcher warns when one
+# of them declares no review gates, because its findings would silently
+# contribute to no gate.
 REVIEW_DISPATCH_PREFIX: Final[str] = "review-"
 # A project reviewer names, in its frontmatter, which review gates it
 # contributes to. The gate vocabulary is closed by the review tooling, whose
@@ -211,11 +358,28 @@ REVIEW_GATE_IDS: Final[frozenset[str]] = frozenset({
     "review_blind_spots",
 })
 
-# How an environment variable reaches the container: "pass" forwards the
-# process value by name (secrets stay out of argv), "set" carries a literal.
+# How an environment variable reaches the agent: "pass" forwards the process's
+# value by name (secrets stay out of argv), "set" carries a literal. Nested
+# mode writes both to the agent environment file, because its prelude runs as
+# root before the drop and must not inherit them.
 EnvMode = Literal["pass", "set"]
 
+# Variables bash itself declares readonly. The image's loader is bash, so
+# `export NAME=value` for any of these fails after the container has started
+# with "readonly variable", too late to name the config entry. The list is
+# `readonly -p` in the image's bash (5.3). GROUPS is special but assignable
+# there, so it is not refused.
+BASH_READONLY_ENV_VARS: Final[frozenset[str]] = frozenset({
+    "BASHOPTS",
+    "BASH_VERSINFO",
+    "EUID",
+    "PPID",
+    "SHELLOPTS",
+    "UID",
+})
+
 TEMP_FILES: list[str] = []
+TEMP_DIRS: list[str] = []
 PODMAN_PATH: str | None = None
 
 
@@ -236,6 +400,12 @@ def cleanup_temp_files() -> None:
         except OSError:
             pass
     TEMP_FILES.clear()
+    for path in TEMP_DIRS:
+        try:
+            os.rmdir(path)
+        except OSError:
+            pass
+    TEMP_DIRS.clear()
 
 
 atexit.register(cleanup_temp_files)
@@ -401,42 +571,112 @@ def is_reserved_env_name(name: str) -> bool:
     )
 
 
-# --- Host discovery -----------------------------------------------------------
-def require_router_v2(document: dict[str, Any], where: str) -> None:
-    """Refuse a router layer this image's router cannot read, before anything starts.
+def refuse_bash_readonly_env(name: str) -> None:
+    """Refuse a name bash declares readonly: the loader could not export it."""
+    if name in BASH_READONLY_ENV_VARS:
+        die(
+            f"environment variable {name} is readonly in the image's bash and "
+            "cannot be set for the agent"
+        )
 
-    The plugin rejects these as well, but its failure mode is a disabled plugin:
-    every agent then follows the session model and a single log line is the only
-    sign anything was wrong. A router file left on the retired shape is a mistake
-    worth stopping the launch over.
+
+def normalize_capability(name: str) -> str:
+    """The canonical spelling of a capability: upper case, no CAP_ prefix."""
+    return name.upper().removeprefix("CAP_")
+
+
+def agent_env_payload(env_map: dict[str, str]) -> bytes:
+    """The agent environment file: NUL-separated KEY=VALUE, no escaping.
+
+    NUL is the only separator an environment value cannot contain, so a value
+    with spaces, `=`, or newlines survives the round trip. The image's loader
+    reads it with `read -d ''` and passes the entries straight to `export`.
+    Values are encoded with the filesystem codec, which round-trips a host
+    environment value that is not valid UTF-8 (Python represents those bytes
+    with surrogates) instead of failing the launch.
     """
-    if "profiles" in document:
-        die(
-            f'{where} uses "profiles", which the router no longer reads: rename it to '
-            f'"models" and set "schema_version" to {ROUTER_SCHEMA_VERSION}'
-        )
-    version = document.get("schema_version", ROUTER_SCHEMA_VERSION)
-    if version != ROUTER_SCHEMA_VERSION:
-        die(
-            f"{where} has unsupported schema_version {version!r}; "
-            f"the router reads {ROUTER_SCHEMA_VERSION}"
-        )
+    return b"".join(
+        os.fsencode(name) + b"=" + os.fsencode(value) + b"\0"
+        for name, value in env_map.items()
+    )
 
 
-def find_global_router(config_home: str) -> str | None:
-    path = config_home + "/opencode2/model-router.json"
+def agent_env_directory() -> str:
+    """A private launcher-owned directory outside the workspace.
+
+    $XDG_RUNTIME_DIR is the natural place for a file that may carry
+    credentials; hosts without a usable one fall back to the system temporary
+    directory. mkdtemp creates it 0700.
+    """
+    candidates: tuple[str | None, ...] = (
+        os.environ.get("XDG_RUNTIME_DIR") or None,
+        None,
+    )
+    for candidate in candidates:
+        try:
+            return tempfile.mkdtemp(prefix="opencode-container.", dir=candidate)
+        except OSError:
+            continue
+    die("unable to create a private directory for the agent environment file")
+
+
+def write_agent_env_file(env_map: dict[str, str]) -> str:
+    """Write the agent's environment outside the workspace; return its path.
+
+    The file is launcher-owned (0600), may carry credentials, and is removed
+    once the run finishes. The payload is encoded before the file exists, and
+    the path is registered for cleanup as soon as it does, so no error between
+    the two leaves a file behind.
+    """
+    payload = agent_env_payload(env_map)
+    directory = agent_env_directory()
+    TEMP_DIRS.append(directory)
+    path = os.path.join(directory, "agent-env")
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except OSError:
+        die("unable to create the agent environment file")
+    TEMP_FILES.append(path)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+    except OSError:
+        die("unable to write the agent environment file")
+    return path
+
+
+# --- Host discovery -----------------------------------------------------------
+def find_global_aid_config(config_home: str) -> str | None:
+    """Validate and return the global ai-devtools routing config's canonical path.
+
+    The host path is `<config_home>/opencode2/aid.json`, mounted into the
+    container where ai-devtools reads it. Only the single-JSON-object shape is
+    checked here; aid validates its own schema.
+    """
+    path = config_home + "/opencode2/aid.json"
     if not os.path.lexists(path):
         return None
     if not os.path.isfile(path):
-        die(f"global model-router config is not a regular file: {path}")
+        die(f"global aid config is not a regular file: {path}")
     try:
         with open(path, "rb") as handle:
             raw = handle.read()
     except OSError:
-        die(f"unable to read global model-router config: {path}")
-    document = parse_single_json_object(raw, "global model-router config", path)
-    require_router_v2(document, path)
+        die(f"unable to read global aid config: {path}")
+    parse_single_json_object(raw, "global aid config", path)
     return os.path.realpath(path)
+
+
+def warn_retired_router_config(config_home: str) -> None:
+    """Point a leftover global router file at its replacement, without stopping."""
+    path = config_home + "/opencode2/model-router.json"
+    if not os.path.lexists(path):
+        return
+    warn(
+        f"{path} is no longer read: the embedded model router is gone; "
+        f"model routing now lives in .opencode/aid.json or "
+        f"{config_home}/opencode2/aid.json"
+    )
 
 
 def find_global_git_config(home: str) -> str | None:
@@ -552,8 +792,8 @@ def discover_project_agents(
     container's own definitions, which stay reserved.
 
     Fails closed on anything the runtime would otherwise half-load: a nested path
-    becomes an id the model router rejects, which disables agent routing for the
-    whole container, and an id collision silently rewrites a container agent.
+    becomes an invalid agent id, and an id collision silently rewrites a
+    container agent.
     """
     setting = config.get("agents", None)
     if setting is None or setting is True:
@@ -607,17 +847,11 @@ def discover_project_agents(
                 f'"agents": false'
             )
         gates, declared = read_review_gates(child.path, f"{requested}/{name}")
-        if not declared:
-            if agent_id.startswith(REVIEW_DISPATCH_PREFIX):
-                warn(
-                    f"{requested}/{name} names no {REVIEW_GATES_KEY}; its findings "
-                    f"contribute to no review gate"
-                )
-            else:
-                warn(
-                    f"{requested}/{name} is outside the {REVIEW_DISPATCH_PREFIX}* "
-                    f"convention: container agents will not launch it as a worker"
-                )
+        if not declared and agent_id.startswith(REVIEW_DISPATCH_PREFIX):
+            warn(
+                f"{requested}/{name} names no {REVIEW_GATES_KEY}; its findings "
+                f"contribute to no review gate"
+            )
         entries.append((agent_id, gates if declared else None))
 
     if len(entries) > MAX_PROJECT_AGENTS:
@@ -625,6 +859,90 @@ def discover_project_agents(
     if not entries:
         return None
     return (source, entries)
+
+
+def parse_containers_mode(config: dict[str, Any]) -> ContainersMode:
+    """Resolve the `containers` setting; anything outside the four forms fails.
+
+    Unset and true both select the nested engine, so a project that never
+    mentions containers still gets one inside the sandbox. The host engine is
+    reachable only by asking for it.
+    """
+    value = config.get("containers", None)
+    if value is None or value is True or value == "nested":
+        return "nested"
+    if value is False:
+        return "off"
+    if value == "host":
+        return "host"
+    die('containers must be false, true, "host", or "nested"')
+
+
+def host_subid_count(user: str, uid: str, groups: bool) -> int:
+    """Total subordinate uids (or gids, with groups) the host grants this user.
+
+    Prefers getsubids, which also sees NSS-provided ranges; falls back to
+    /etc/subuid or /etc/subgid, whose entries name the user or its numeric id.
+    """
+    getsubids = shutil.which("getsubids")
+    total = 0
+    if getsubids is not None:
+        proc = subprocess.run(
+            [getsubids, *(["-g"] if groups else []), user],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            errors="replace",
+            check=False,
+        )
+        if proc.returncode != 0:
+            return 0
+        # "<index>: <owner> <start> <count>" per range.
+        for line in proc.stdout.splitlines():
+            fields = line.split()
+            if len(fields) == 4 and fields[3].isdigit():
+                total += int(fields[3])
+        return total
+    path = "/etc/subgid" if groups else "/etc/subuid"
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            lines = handle.read().splitlines()
+    except OSError:
+        return 0
+    for line in lines:
+        fields = line.strip().split(":")
+        if len(fields) == 3 and fields[0] in (user, uid) and fields[2].isdigit():
+            total += int(fields[2])
+    return total
+
+
+def require_nested_support(image: str) -> None:
+    """Refuse nested mode where the inner engine could not map its id ranges."""
+    user = id_output("-un")
+    uid = id_output("-u")
+    for groups, kind, path in ((False, "uid", "/etc/subuid"), (True, "gid", "/etc/subgid")):
+        count = host_subid_count(user, uid, groups)
+        if count < NESTED_MIN_SUBIDS:
+            die(
+                f'containers "nested" (the default) needs at least {NESTED_MIN_SUBIDS} '
+                f"subordinate {kind}s for host user {user}, found {count} (see {path}); "
+                f"the inner engine's id ranges would not fit in the sandbox's user "
+                f"namespace; to proceed, {NESTED_REFUSAL_HINT}"
+            )
+    if podman_image_label(image, NESTED_PODMAN_LABEL) != "1":
+        die(
+            f'containers "nested" (the default) needs an image built with the nested '
+            f"Podman engine, but image {image} does not carry "
+            f'{NESTED_PODMAN_LABEL}="1"; rebuild it with NESTED_PODMAN=1 (the '
+            f"Containerfile default); to proceed, {NESTED_REFUSAL_HINT}"
+        )
+    if podman_image_label(image, AGENT_ENV_LABEL) != "1":
+        die(
+            f'containers "nested" (the default) needs an image that delivers the '
+            f"project environment after its root start, but image {image} does not "
+            f'carry {AGENT_ENV_LABEL}="1": the image predates project-env delivery; '
+            f"rebuild it; to proceed, {NESTED_REFUSAL_HINT}"
+        )
 
 
 def discover_container_socket(uid: str) -> str | None:
@@ -785,7 +1103,9 @@ def build_parser() -> argparse.ArgumentParser:
             $PWD/.opencode-sandbox.json (schema_version 1) when present. Without
             that config it warns and uses the baked defaults: image
             opencode2:latest, the current directory as the workspace, and
-            "opencode2 --standalone".
+            "opencode2 --standalone". The `containers` setting defaults to
+            "nested" (the image's own engine); false turns the engine off and
+            "host" mounts the host engine socket instead.
             """
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1125,7 +1445,8 @@ def main(argv: Sequence[str] | None = None) -> NoReturn:
     state_home = xdg_path("XDG_STATE_HOME", home + "/.local/state")
     cache_home = xdg_path("XDG_CACHE_HOME", home + "/.cache")
 
-    global_router = find_global_router(config_home)
+    global_aid_config = find_global_aid_config(config_home)
+    warn_retired_router_config(config_home)
     global_git_config = find_global_git_config(home)
     local_providers = find_local_providers(config_home)
     host_state = host_state_roots(config_home, data_home, state_home, cache_home, home)
@@ -1149,33 +1470,27 @@ def main(argv: Sequence[str] | None = None) -> NoReturn:
             die(f"sandbox config must be a JSON object: {config_path}")
     else:
         config = {}
-        if global_router is not None:
-            warn(
-                f"no .opencode-sandbox.json found; using image {DEFAULT_IMAGE}, "
-                f"workspace {invocation_root}, and user-global routing config"
-            )
-        else:
-            warn(
-                f"no .opencode-sandbox.json found; using image {DEFAULT_IMAGE}, "
-                f"workspace {invocation_root}, and baked routing defaults"
-            )
+        warn(
+            f"no .opencode-sandbox.json found; using image {DEFAULT_IMAGE} "
+            f"and workspace {invocation_root}"
+        )
 
     schema_version = jq_or(config.get("schema_version"), 1)
     if jq_string(schema_version) != "1":
         die(f"unsupported schema_version: {jq_string(schema_version)}")
 
-    router_block = config.get("model_router")
-    if router_block is not None:
-        if not isinstance(router_block, dict):
-            die("model_router must be an object")
-        require_router_v2(router_block, f"{config_path} model_router")
+    if "model_router" in config:
+        die(
+            f'{config_path} still has a "model_router" block; the embedded model '
+            f"router is gone: model routing now lives in .opencode/aid.json or "
+            f"{config_home}/opencode2/aid.json"
+        )
 
-    containers_enabled = False
-    if "containers" in config:
-        containers = config["containers"]
-        if not isinstance(containers, bool):
-            die("containers must be a boolean")
-        containers_enabled = containers
+    containers_mode = parse_containers_mode(config)
+    # Only the host socket needs the host-path workspace mirror and its guards:
+    # the nested engine resolves bind paths inside the sandbox container itself.
+    host_engine = containers_mode == "host"
+    nested_engine = containers_mode == "nested"
 
     image = jq_or(config.get("image"), DEFAULT_IMAGE)
     if not isinstance(image, str):
@@ -1205,8 +1520,9 @@ def main(argv: Sequence[str] | None = None) -> NoReturn:
         context = invocation_root + "/" + context
 
     # Workspace is mounted at /src for compatibility and normally at a stable,
-    # CWD-derived path for OpenCode2's project/session identity. containers mode
-    # uses the canonical host path instead so nested bind mounts remain meaningful.
+    # CWD-derived path for OpenCode2's project/session identity. Host-engine
+    # mode uses the canonical host path instead so bind mounts sent through the
+    # host socket remain meaningful.
     workspace = jq_or(config.get("workspace"), "")
     if not isinstance(workspace, str):
         die("workspace must be a string")
@@ -1220,8 +1536,8 @@ def main(argv: Sequence[str] | None = None) -> NoReturn:
     workspace = os.path.realpath(workspace)
     if paths_overlap(workspace, *host_state):
         die(f"workspace {workspace} overlaps host OpenCode/.agents/.claude/.mcp state")
-    if global_router is not None and paths_overlap(workspace, global_router):
-        die(f"workspace {workspace} overlaps the user-global model-router config")
+    if global_aid_config is not None and paths_overlap(workspace, global_aid_config):
+        die(f"workspace {workspace} overlaps the user-global aid config")
     if global_git_config is not None and paths_overlap(workspace, global_git_config):
         die(f"workspace {workspace} overlaps the user-global Git config")
     if local_providers is not None and paths_overlap(workspace, local_providers[0]):
@@ -1230,7 +1546,7 @@ def main(argv: Sequence[str] | None = None) -> NoReturn:
     # The CWD-derived project identity stays stable even when the launcher
     # itself lives elsewhere on PATH.
     project_key = hashlib.sha256(invocation_root.encode("utf-8")).hexdigest()[:16]
-    if containers_enabled:
+    if host_engine:
         # Bind paths sent through a mounted host container-engine socket are
         # resolved by the host daemon. Mirror the workspace's canonical host
         # path so $PWD-based nested mounts name a path that exists on that host.
@@ -1251,7 +1567,7 @@ def main(argv: Sequence[str] | None = None) -> NoReturn:
         pass  # other absolute workdirs are used as-is
     else:
         workdir = container_workspace + "/" + workdir
-    if containers_enabled:
+    if host_engine:
         workdir = os.path.realpath(workdir)
         if workdir != container_workspace and not workdir.startswith(container_workspace + "/"):
             die(f"containers workdir {workdir} must stay within workspace {container_workspace}")
@@ -1399,12 +1715,15 @@ def main(argv: Sequence[str] | None = None) -> NoReturn:
                 f"seccomp={os.path.realpath(seccomp_path)}",
             ]
 
-    if containers_enabled:
+    if host_engine:
         uid = id_output("-u")
         gid = id_output("-g")
         socket_source = discover_container_socket(uid)
         if socket_source is None:
-            die("containers is enabled, but no accessible Podman user or Docker socket was found")
+            die(
+                'containers "host" is set, but no accessible Podman user or Docker '
+                "socket was found"
+            )
         run_flags += ["-v", f"{socket_source}:{CONTAINER_SOCKET_TARGET}"]
 
         # Either engine can grant socket access through a supplementary host
@@ -1422,6 +1741,14 @@ def main(argv: Sequence[str] | None = None) -> NoReturn:
         ):
             run_flags += ["--group-add", "keep-groups"]
 
+    if nested_engine:
+        require_nested_support(image)
+        run_flags += [
+            *NESTED_RUN_FLAGS,
+            "-v",
+            f"opencode2-containers-{project_key}:{NESTED_STORAGE_MOUNT}",
+        ]
+
     # The pinned preview stores credentials and sessions under XDG data and UI
     # preferences under XDG state. Keep both isolated in one reusable named
     # volume.
@@ -1437,15 +1764,26 @@ def main(argv: Sequence[str] | None = None) -> NoReturn:
     if data_volume:
         if not VOLUME_NAME_RE.fullmatch(data_volume):
             die(f"invalid persistence.data_volume: {data_volume}")
-        if containers_enabled and paths_overlap(container_workspace, OPENCODE_DATA_MOUNT):
+        if host_engine and paths_overlap(container_workspace, OPENCODE_DATA_MOUNT):
             die(f"containers workspace {container_workspace} overlaps the OpenCode data mount")
+        # :U chowns the volume to the container's starting user. Nested mode
+        # starts as root, so there it would recursively hand the user's data to
+        # root; the image's user-owned mount point is copied up instead, and a
+        # volume used in the other modes is already owned by the image user.
         run_flags += [
             "-v",
-            f"{data_volume}:{OPENCODE_DATA_MOUNT}:U",
+            f"{data_volume}:{OPENCODE_DATA_MOUNT}" + ("" if nested_engine else ":U"),
             "-e",
             f"XDG_DATA_HOME={OPENCODE_DATA_MOUNT}",
             "-e",
             f"XDG_STATE_HOME={OPENCODE_DATA_MOUNT}/state",
+            # Purely informational values for the entrypoint's post-drop
+            # writability check: nested mode cannot use :U, so a volume first
+            # used by another user needs naming in its error message.
+            "-e",
+            f"OPENCODE_DATA_MOUNT={OPENCODE_DATA_MOUNT}",
+            "-e",
+            f"OPENCODE_DATA_VOLUME={data_volume}",
         ]
 
     # TTY only when interactive (stdin and stdout are both a terminal).
@@ -1469,12 +1807,10 @@ def main(argv: Sequence[str] | None = None) -> NoReturn:
             "-e",
             f"GIT_CONFIG_GLOBAL={GLOBAL_GIT_CONFIG_TARGET}",
         ]
-    if global_router is not None:
+    if global_aid_config is not None:
         run_flags += [
             "-v",
-            f"{global_router}:{ROUTER_GLOBAL_TARGET}:ro",
-            "-e",
-            f"OPENCODE_MODEL_ROUTER_GLOBAL_CONFIG={ROUTER_GLOBAL_TARGET}",
+            f"{global_aid_config}:{GLOBAL_AID_CONFIG_TARGET}:ro",
         ]
     if local_providers is not None:
         run_flags += [
@@ -1485,8 +1821,6 @@ def main(argv: Sequence[str] | None = None) -> NoReturn:
         run_flags += [
             "-v",
             f"{config_path}:{SANDBOX_TARGET}:ro",
-            "-e",
-            f"OPENCODE_MODEL_ROUTER_CONFIG={SANDBOX_TARGET}",
         ]
 
     # Workspace agent definitions, mounted into the agent directory the runtime
@@ -1514,17 +1848,38 @@ def main(argv: Sequence[str] | None = None) -> NoReturn:
     if network:
         run_flags += ["--network", network]
 
-    # Capabilities.
+    # Capabilities: the launcher's allow-list applies in every mode, then
+    # Podman. A capability that escapes the agent's own files, ids, processes
+    # or kernel state is refused by name rather than granted.
     capabilities = config.get("capabilities")
     if capabilities is None or capabilities is False:
         capabilities = []
     if not isinstance(capabilities, list):
         die("capabilities must be an array")
+    configured_capabilities: list[str] = []
     for capability in capabilities:
         if not isinstance(capability, str):
             die("capabilities entries must be strings")
-        if capability:
-            run_flags += ["--cap-add", capability]
+        if not capability:
+            continue
+        normalized = normalize_capability(capability)
+        refusal = CAPABILITY_REFUSALS.get(normalized)
+        if refusal is not None:
+            die(f"capabilities: {normalized} is not allowed: {refusal}")
+        if normalized not in ALLOWED_CAPABILITIES:
+            die(
+                f"capabilities: unknown capability {normalized} "
+                f"(allowed: {', '.join(sorted(ALLOWED_CAPABILITIES))})"
+            )
+        configured_capabilities.append(normalized)
+        run_flags += ["--cap-add", normalized]
+    if nested_engine:
+        # The prelude puts these on the inheritable and ambient sets while it
+        # drops to the image user, so the agent keeps exactly this set and
+        # nothing it could not otherwise regain. Always passed, even when empty:
+        # an image ENV could otherwise supply the list, and the prelude refuses
+        # any name outside its own copy of the allow-list.
+        run_flags += ["-e", f"{AGENT_CAPS_VAR}={','.join(configured_capabilities)}"]
 
     # Restricted runtime arguments: only a small allow-list of passthrough flags.
     runtime_args = config.get("runtime_args")
@@ -1563,8 +1918,8 @@ def main(argv: Sequence[str] | None = None) -> NoReturn:
         abs_source = os.path.realpath(source_path)
         if paths_overlap(abs_source, *host_state):
             die(f"mount source {abs_source} overlaps host OpenCode/.agents/.claude/.mcp state")
-        if global_router is not None and paths_overlap(abs_source, global_router):
-            die(f"mount source {abs_source} overlaps the user-global model-router config")
+        if global_aid_config is not None and paths_overlap(abs_source, global_aid_config):
+            die(f"mount source {abs_source} overlaps the user-global aid config")
         if global_git_config is not None and paths_overlap(abs_source, global_git_config):
             die(f"mount source {abs_source} overlaps the user-global Git config")
         if local_providers is not None and paths_overlap(abs_source, local_providers[0]):
@@ -1577,16 +1932,24 @@ def main(argv: Sequence[str] | None = None) -> NoReturn:
             target = jq_string(target)
         if not target.startswith("/"):
             die(f"mount target must be absolute: {target}")
+        literal_target = target
         target = os.path.realpath(target)
         if paths_overlap(target, *BAKED_ROOTS):
             die(f"mount target {target} shadows a baked config/plugin path")
-        if containers_enabled and paths_overlap(target, container_workspace):
+        if paths_overlap(target, *SYSTEM_ROOTS):
+            die(f"mount target {target} shadows a container system path")
+        if host_engine and paths_overlap(target, container_workspace):
             die(
                 f"mount target {target} overlaps the containers workspace mirror "
                 f"{container_workspace}"
             )
-        if containers_enabled and paths_overlap(target, CONTAINER_SOCKET_TARGET):
+        if host_engine and paths_overlap(target, CONTAINER_SOCKET_TARGET):
             die(f"mount target {target} shadows the managed container-engine socket")
+        if nested_engine and paths_overlap(target, NESTED_STORAGE_MOUNT):
+            die(f"mount target {target} shadows the nested engine's storage volume")
+        for reserved in (target, literal_target):
+            if paths_overlap(reserved, *MOUNT_TARGET_RESERVED_ROOTS):
+                die(f"mount target {literal_target} shadows a container system path")
 
         flag = f"{abs_source}:{target}"
         if jq_string(jq_or(entry.get("read_only"), False)) == "true":
@@ -1633,6 +1996,7 @@ def main(argv: Sequence[str] | None = None) -> NoReturn:
             die(f"invalid environment variable name: {name}")
         if is_reserved_env_name(name):
             die(f"reserved environment variable: {name}")
+        refuse_bash_readonly_env(name)
         # A Podman secret is the less-exposed source and wins over inherited or
         # literal values targeting the same provider variable.
         if name in secret_targets:
@@ -1642,7 +2006,7 @@ def main(argv: Sequence[str] | None = None) -> NoReturn:
 
     for name in PROVIDER_ENV_VARS:
         if name in os.environ:
-            add_env(name, "", "pass")
+            add_env(name, os.environ[name], "pass")
 
     env_config = config.get("env")
     if env_config is None or env_config is False:
@@ -1661,8 +2025,9 @@ def main(argv: Sequence[str] | None = None) -> NoReturn:
             continue
         if is_reserved_env_name(name):
             die(f"reserved environment variable in env.pass: {name}")
+        refuse_bash_readonly_env(name)
         if name in os.environ:
-            add_env(name, "", "pass")
+            add_env(name, os.environ[name], "pass")
 
     env_set = env_config.get("set")
     if env_set is None or env_set is False:
@@ -1674,7 +2039,7 @@ def main(argv: Sequence[str] | None = None) -> NoReturn:
             die(f"env.set value for {name} must be a string")
         add_env(name, value, "set")
 
-    if containers_enabled:
+    if host_engine:
         # These values describe the launcher-managed socket and deliberately
         # override conflicting env.pass/env.set entries when container-engine
         # access is opted in.
@@ -1682,13 +2047,21 @@ def main(argv: Sequence[str] | None = None) -> NoReturn:
         add_env("CONTAINER_HOST", container_socket_uri, "set")
         add_env("DOCKER_HOST", container_socket_uri, "set")
 
-    for name, mode in env_mode.items():
-        if mode == "pass":
-            # Let Podman inherit the value from this process without embedding a
-            # secret in the visible command-line arguments.
-            run_flags += ["-e", name]
-        else:
-            run_flags += ["-e", f"{name}={env_map[name]}"]
+    if nested_engine and env_map:
+        # The prelude starts as root, before the drop. Passing these as `-e`
+        # would put project-supplied values in the prelude's own environment;
+        # a read-only file plus a loader after the drop keeps them with the
+        # agent process only. Values round-trip through NUL separation.
+        agent_env_path = write_agent_env_file(env_map)
+        run_flags += ["-v", f"{agent_env_path}:{AGENT_ENV_TARGET}:ro"]
+    else:
+        for name, mode in env_mode.items():
+            if mode == "pass":
+                # Let Podman inherit the value from this process without
+                # embedding a secret in the visible command-line arguments.
+                run_flags += ["-e", name]
+            else:
+                run_flags += ["-e", f"{name}={env_map[name]}"]
 
     # --- Linked worktree metadata --------------------------------------------------
     # Linked worktrees and submodules store a gitdir pointer in .git. Validate it
@@ -1737,20 +2110,24 @@ def main(argv: Sequence[str] | None = None) -> NoReturn:
     ):
         if paths_overlap(git_common_dir, *host_state):
             die(f"git metadata directory {git_common_dir} overlaps host OpenCode/.agents/.claude/.mcp state")
-        if global_router is not None and paths_overlap(git_common_dir, global_router):
-            die(f"git metadata directory {git_common_dir} overlaps the user-global model-router config")
+        if global_aid_config is not None and paths_overlap(git_common_dir, global_aid_config):
+            die(f"git metadata directory {git_common_dir} overlaps the user-global aid config")
         if global_git_config is not None and paths_overlap(git_common_dir, global_git_config):
             die(f"git metadata directory {git_common_dir} overlaps the user-global Git config")
         if local_providers is not None and paths_overlap(git_common_dir, local_providers[0]):
             die(f"git metadata directory {git_common_dir} overlaps the local provider catalog")
         if paths_overlap(git_common_dir, *BAKED_ROOTS):
             die(f"git metadata directory {git_common_dir} shadows a baked config/plugin path")
-        if containers_enabled and paths_overlap(git_common_dir, container_workspace):
+        if paths_overlap(git_common_dir, *SYSTEM_ROOTS):
+            die(f"git metadata directory {git_common_dir} shadows a container system path")
+        if host_engine and paths_overlap(git_common_dir, container_workspace):
             die(f"git metadata directory {git_common_dir} overlaps the containers workspace mirror")
         if data_volume and paths_overlap(git_common_dir, OPENCODE_DATA_MOUNT):
             die(f"git metadata directory {git_common_dir} overlaps the OpenCode data mount")
-        if containers_enabled and paths_overlap(git_common_dir, CONTAINER_SOCKET_TARGET):
+        if host_engine and paths_overlap(git_common_dir, CONTAINER_SOCKET_TARGET):
             die(f"git metadata directory {git_common_dir} shadows the managed container-engine socket")
+        if nested_engine and paths_overlap(git_common_dir, NESTED_STORAGE_MOUNT):
+            die(f"git metadata directory {git_common_dir} shadows the nested engine's storage volume")
         run_flags += ["-v", f"{git_common_dir}:{git_common_dir}"]
 
     # --- Command selection ---------------------------------------------------------
@@ -1780,9 +2157,32 @@ def main(argv: Sequence[str] | None = None) -> NoReturn:
             cmd = default_command if default_command is not None else list(DEFAULT_COMMAND)
 
     # --- Run ------------------------------------------------------------------------
-    cleanup_temp_files()
+    # A child process rather than execv: the agent environment file (and any
+    # other launcher temp state) must be gone once the run finishes. SIGINT
+    # still reaches Podman through the foreground process group; SIGTERM and
+    # SIGHUP aimed at this process are forwarded below.
     podman = podman_executable()
-    os.execv(podman, [podman, "run", *run_flags, image, *cmd])
+    proc = subprocess.Popen([podman, "run", *run_flags, image, *cmd])
+
+    def forward(signum: int, _frame: FrameType | None) -> None:
+        # A terminal signals the whole foreground group, but a supervisor aims
+        # SIGTERM/SIGHUP at this process alone; pass those to Podman so the
+        # container is not left behind when the launcher is asked to stop.
+        try:
+            proc.send_signal(signum)
+        except ProcessLookupError:
+            pass
+
+    forwarded = (signal.SIGTERM, signal.SIGHUP)
+    previous = {signum: signal.signal(signum, forward) for signum in forwarded}
+    try:
+        returncode = proc.wait()
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+        cleanup_temp_files()
+    # Report a signal as the shell would have seen it under execv.
+    sys.exit(returncode if returncode >= 0 else 128 - returncode)
 
 
 if __name__ == "__main__":

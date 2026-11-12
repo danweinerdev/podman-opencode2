@@ -5,11 +5,11 @@
     "containerfile": "Containerfile",
     "context": ".",
     "args": {
-      "OPENCODE2_VERSION": "2.0.22"
+      "OPENCODE2_VERSION": "2.2.6"
     }
   },
   "workspace": ".",
-  "containers": false,
+  "containers": "nested",
   "mounts": [],
   "agents": ".agents",
   "env": {
@@ -22,20 +22,8 @@
   "persistence": {
     "data_volume": "my-project-opencode2-data"
   },
-  "model_router": {
-    "schema_version": 2,
-    "pin_default_agent_model": false,
-    "models": {
-      "reasoning": { "model": "anthropic/claude-opus-4-1", "variant": "high" }
-    },
-    "agents": {
-      "reasoner": "reasoning",
-      "implementer": "implementation",
-      "review-adr": { "model": "anthropic/claude-opus-4-1" }
-    }
-  },
   "network": "slirp4netns",
-  "capabilities": ["SYS_PTRACE"],
+  "capabilities": ["NET_RAW"],
   "runtime_args": [
     "--add-host=host.containers.internal:host-gateway",
     "--pids-limit=2048",

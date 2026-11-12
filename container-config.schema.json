@@ -75,57 +75,13 @@
         "effect": { "enum": ["allow", "deny", "ask"] }
       }
     },
-    "modelSpec": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["model"],
-      "properties": {
-        "model": { "$ref": "#/$defs/model" },
-        "variant": { "type": "string", "minLength": 1 },
-        "request": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "headers": { "type": "object" },
-            "body": { "type": "object" }
-          }
-        }
-      }
-    },
-    "routerConfig": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["schema_version", "agents"],
-      "properties": {
-        "schema_version": { "const": 2 },
-        "pin_default_agent_model": { "type": "boolean" },
-        "models": {
-          "type": "object",
-          "propertyNames": { "pattern": "^[a-z0-9][a-z0-9.-]*$" },
-          "additionalProperties": { "$ref": "#/$defs/modelSpec" }
-        },
-        "agents": {
-          "type": "object",
-          "propertyNames": {
-            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
-          },
-          "additionalProperties": {
-            "anyOf": [
-              { "type": "string", "minLength": 1 },
-              { "$ref": "#/$defs/modelSpec" }
-            ]
-          }
-        },
-        "default_agent": { "type": "string", "minLength": 1 }
-      }
-    },
     "plugin": {
       "type": "object",
       "additionalProperties": false,
       "required": ["package"],
       "properties": {
         "package": { "type": "string", "minLength": 1 },
-        "options": { "$ref": "#/$defs/routerConfig" }
+        "options": { "type": "object" }
       }
     }
   }

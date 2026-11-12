@@ -1,0 +1,47 @@
+#!/bin/bash
+# opencode-agent-env — apply the launcher's agent environment and exec.
+#
+# In nested mode the launcher starts this image as root, so it cannot deliver
+# project-supplied variables with `podman run -e`: the startup script would
+# inherit them before it drops to the image user. It writes them instead to a
+# NUL-separated KEY=VALUE file (the only separator an environment value cannot
+# contain), mounts it read-only at the fixed path below, and the entrypoint
+# runs this loader after the drop.
+#
+# Nothing here is sourced or evaluated: each entry is handed to `export` as one
+# literal argument, so spaces, `=`, newlines and shell metacharacters in a value
+# round-trip unchanged. The launcher validates the names before writing them.
+#
+# Usage: opencode-agent-env CMD [ARG...]
+set -eu
+
+AGENT_ENV=/run/opencode/agent-env
+
+[ "$#" -gt 0 ] || {
+    printf 'opencode-agent-env: no command to run\n' >&2
+    exit 1
+}
+
+if [ -e "$AGENT_ENV" ]; then
+    while IFS= read -r -d '' entry; do
+        name=${entry%%=*}
+        case $entry in
+            *=*) ;;
+            *)
+                printf 'opencode-agent-env: malformed entry in %s\n' "$AGENT_ENV" >&2
+                exit 1
+                ;;
+        esac
+        case $name in
+            '' | [0-9]* | *[!A-Za-z0-9_]*)
+                printf 'opencode-agent-env: invalid variable name in %s\n' \
+                    "$AGENT_ENV" >&2
+                exit 1
+                ;;
+        esac
+        # shellcheck disable=SC2163  # the entry is NAME=value, not a variable name
+        export "$entry"
+    done <"$AGENT_ENV"
+fi
+
+exec "$@"

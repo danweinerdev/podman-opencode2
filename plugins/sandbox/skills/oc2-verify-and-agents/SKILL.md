@@ -1,6 +1,6 @@
 ---
 name: oc2-verify-and-agents
-description: Add and check custom review agents in a project's agents directory, and run workspace verification through the oc2-verify broker, from inside this sandbox. Use when writing a project review lane, naming review gates, granting a lane the verification broker, running lint/test/type checks in a disposable worker, or debugging a launch that refuses its agents. Not for launcher, mount, or routing setup, which opencode2-sandbox covers.
+description: Add and check custom review agents in a project's agents directory, and run workspace verification through the oc2-verify broker, from inside this sandbox. Use when writing a project review lane, naming review gates, running lint/test/type checks in a disposable worker, or debugging a launch that refuses its agents. Not for launcher, mount, or model routing setup, which opencode2-sandbox covers.
 ---
 
 # Custom review agents and the verification broker
@@ -15,9 +15,9 @@ Everything here is the behavior of the shipped image; you do not need to read
 | Verification broker | `/opt/opencode/sandbox/oc2-verify` (**not on `PATH`**; call it by full path) |
 | Sandbox config, as the broker reads it | `/run/opencode/sandbox.json` (read-only mount of the project's `.opencode-sandbox.json`); the `/.opencode-sandbox` sentinel makes this the only source in the container, so editing the workspace copy changes nothing until the next launch |
 | Project agent definitions, in the container | `/opt/opencode/config/opencode/agents` (read-only mount of the project's `.agents`) |
-| Image agents | `/opt/opencode/config/opencode/agent` |
-| Disposable worker image | `localhost/opencode2-verify:latest` (`make verify-image` on the host) |
-| Deeper reference | `docs/SANDBOX.md`, `docs/DEVELOPMENT.md`, `docs/MODEL_ROUTER.md` |
+| Image agent directory | `/opt/opencode/config/opencode/agent` (root-owned; the ai-devtools plugin registers its `aid-*` agents at load time) |
+| Disposable worker image | `localhost/opencode2-verify:latest` (`make verify-image` on the host); in nested mode it must first be in the sandbox's inner image store |
+| Deeper reference | `docs/SANDBOX.md`, `docs/DEVELOPMENT.md` |
 
 ## Running a check
 
@@ -25,7 +25,7 @@ Everything here is the behavior of the shipped image; you do not need to read
 /opt/opencode/sandbox/oc2-verify --list                 # configured check names
 /opt/opencode/sandbox/oc2-verify --check lint           # one named check
 /opt/opencode/sandbox/oc2-verify -- ruff check .        # any command, argv is preserved
-/opt/opencode/sandbox/oc2-verify --json --check plugin  # machine-readable result
+/opt/opencode/sandbox/oc2-verify --json --check image-config  # machine-readable result
 /opt/opencode/sandbox/oc2-verify --timeout 900 --check types
 ```
 
@@ -42,6 +42,13 @@ Exit codes tell you what happened:
 | `2` | usage or config error (nothing started) |
 | `124` | wall-clock timeout; partial output is still reported |
 | `125` | the worker could not be started: image not local, engine failure, lock dir unwritable |
+
+The broker needs a container engine: the default nested mode or `"host"`. With
+`containers` set to `false` it exits `125` without running the check. In nested
+mode the engine's store is private and nothing is pulled: the worker image has to
+be seeded once per project volume by `podman save` on the host to a file in the
+workspace, then `podman load -i` here. `docs/DEVELOPMENT.md`, "The worker image in
+nested mode", has the commands.
 
 `--json` prints `status`, `exit_code`, `duration_seconds`, `image`, `network`,
 `command`, `output_truncated`, and `output`. Without it, output goes to stdout and
@@ -99,7 +106,7 @@ and report success.
       "compile": "python3 -m py_compile bin/opencode-container bin/oc2-verify",
       "config": "jq empty container-config.json container-config.schema.json examples/*.example",
       "launcher": "./tests/launcher-env.test.py",
-      "plugin": "cd plugins/model-router && node --test"
+      "image-config": "./tests/image-config.test.py"
     }
   }
 }
@@ -121,23 +128,19 @@ agent whose id is the filename without `.md`.
 Rules the launcher enforces at launch, by refusing to start:
 
 - Ids are letters, digits, `.`/`_`/`-`; entries are regular `.md` files with no
-  subdirectories. A nested path would create an id the router rejects, which
-  disables routing for every agent, so it is refused instead.
-- A reserved id is refused: the eleven image agents (`orchestrator`, `engineer`,
-  `reasoner`, `extractor`, `bulk-researcher`, `bounded-editor`, `implementer`,
-  `review-plan-drift`, `review-quality`, `review-spec-compliance`,
-  `review-blind-spots`) and OpenCode's own (`build`, `plan`, `general`, `explore`,
+  subdirectories. A nested path is refused because each entry must be one file.
+- A reserved id is refused: the image's ai-devtools agents (`aid-orchestrator`,
+  `aid-explorer`, `aid-mechanic`, `aid-oracle`, `aid-designer`, `aid-creator`,
+  `aid-craftsman`, `aid-sage`) and OpenCode's own (`build`, `plan`, `general`, `explore`,
   `compaction`, `title`, `summary`). A same-id file would replace the image agent's
-  prompt and append its own permission rules after the deny-first set, silently
+  prompt and append its own permission rules after the agent's own, silently
   widening a read-only lane.
 - At most 64 definitions. Hidden `.md` files are skipped with a warning.
 - Each file must open with a `---` fence that is later closed. Without a fence the
   runtime registers an unnamed *primary* agent whose prompt is its own frontmatter.
 
-Name it `review-*`. Only that prefix is dispatchable: the primary agents carry
-`{ action: subagent, resource: "review-*", effect: allow }` after their deny-all
-rule. Any other name still registers, but the primary will not launch it as a
-worker, and the launcher warns that it sits outside the convention.
+Name it `review-*` to keep it in the review-lane convention. Any other name still
+registers; it is simply not treated as a review lane.
 
 ### Template
 
@@ -154,42 +157,39 @@ permissions:
   - { action: grep, resource: "*", effect: ask }
   - { action: "search_*", resource: "*", effect: allow }
   - { action: shell, resource: "git --no-pager diff --no-ext-diff --no-textconv *", effect: ask }
-  - { action: shell, resource: "/opt/opencode/sandbox/oc2-verify *", effect: allow }
 ---
 You are the `review-adr` lane for this project: check the diff under review
 against the accepted decisions in `docs/adr/`. Report only what you observed, with
 file and line. Do not edit files or broaden the lane.
 ```
 
-The deny-all-first order is not decoration: the later matching rule wins, which is
-why the shipped lanes open with the deny-all and put every grant after it. A rule
-written before the deny-all has no effect. Keep `oc2-verify` allowed and
-`grep`/`git diff` at `ask` to mirror the shipped lanes.
+The deny-all-first order is not decoration: the later matching rule wins, so open
+with the deny-all and put every grant after it. A rule written before the deny-all
+has no effect. Keep `grep`/`git diff` at `ask` if you want the lane to pause for
+them; the image's own agents do not ask. No agent in this image is granted the
+verification broker by name, but the baked aid-* agents allow every shell command,
+so when one runs `/opt/opencode/sandbox/oc2-verify` it is not prompted. A project
+lane runs on its own permissions; add a narrower rule if you want it gated.
 
-Give the lane a model with a `model_router.agents` entry — `model_router.agents`
-maps any agent id to either a shared `models` name or an inline
-`{"model": "provider/model-id", "variant": "…"}`. See the `opencode2-sandbox` skill
-for layering. A routed id that never registers logs one warning and leaves every
-agent un-routed, so check the filename against the entry.
+Project agents run on the session model unless `aid.json` maps them. `agents`
+accepts any agent id, so a project reviewer can be routed like a baked agent.
 
 ### Review gates
 
 `review-gates` is a list drawn from exactly `review_plan_drift`, `review_quality`,
-`review_spec_compliance`, `review_blind_spots`. The vocabulary is closed by the
-review tooling, so any other name is treated as a typo and refused at launch.
+`review_spec_compliance`, `review_blind_spots`. The launcher closes the vocabulary,
+so any other name is treated as a typo and refused at launch.
 
-- `[]` means "advisory only": findings are reported, attached to no gate.
-- A `review-*` file that omits the key warns, because its findings would otherwise
-  be dropped at synthesis.
-- A contribution merges **into** the named gate's evidence, which must still
-  include the standard lane's own run and must name the contributing reviewer. A
-  contribution never becomes a gate of its own, and a project cannot lower what a
-  gate requires or substitute its own reviewer for a required lane.
+- `[]` means "advisory only": the declaration names no gate.
+- A `review-*` file that omits the key warns.
+- The launcher records each declaration and prints the resulting contribution map
+  at launch. Nothing in this image acts on the gates by itself, so they are project
+  metadata until a consumer is installed.
 
-One known quirk, recorded in `docs/UPSTREAM_ISSUES.md`: any unknown frontmatter key
-makes the runtime copy the raw frontmatter into that agent's `request.body`. On the
-shipped runtime that object never reaches a provider, so `review-gates` is safe
-today; re-read that file before trusting body params on a newer runtime.
+One known quirk, recorded in `docs/UPSTREAM_ISSUES.md`: an unknown frontmatter key
+without a native `permissions` array makes the runtime copy the raw frontmatter
+into that agent's `request.body`. On `2.2.6` the config side is confirmed; provider
+delivery is still unmeasured, so re-read that file before trusting body params.
 
 ## Checking that your agent works
 
@@ -199,10 +199,12 @@ today; re-read that file before trusting body params on a newer runtime.
    A refusal here is the fastest signal you get; it names the file and the rule.
 2. Inside the container, confirm the mount: `ls /opt/opencode/config/opencode/agents`.
 3. Ask the primary to dispatch it, e.g. "dispatch review-adr over the working
-   tree". A denial means the name does not match `review-*`.
-4. `/opt/opencode/sandbox/oc2-verify --list` confirms which checks the lane can
-   run, and `/opt/opencode/sandbox/oc2-verify --check <name>` confirms the worker
-   image and toolchain are present before you rely on either in a review.
+   tree". If it will not start, check the launcher's lines and the registry below.
+4. `/opt/opencode/sandbox/oc2-verify --list` confirms which checks are configured
+   and `/opt/opencode/sandbox/oc2-verify --check <name>` confirms the worker image
+   and toolchain are present before you rely on either in a review. No agent is
+   granted the broker by name; the baked aid-* agents' allow-all shell rule runs it
+   without a prompt.
 
 The deep check, if a lane behaves oddly: start a private server and read the agent
 registry.
@@ -221,13 +223,15 @@ background service to talk to, and it fails with "Server process exited".
 
 - A project cannot add a *skill* at run time: skill roots are baked into the image
   and project config is disabled. A derived image adds one with
-  `COPY my-skill /opt/opencode/plugins/model-router/skills/` (see
+  `COPY my-skill /opt/opencode/plugins/sandbox/skills/` (see
   `docs/DEVELOPMENT.md`, "Extend the runtime").
 - Agent definitions enter the container as a read-only mount, and the launcher
   validates the whole set at launch. Restart the container after editing a
   definition rather than expecting a mid-session reload; a lane cannot rewrite its
   own permissions from inside.
-- A lane cannot create a fifth review gate, cannot become a gate, and cannot widen
-  an image agent. Those are enforced, not conventional.
-- The broker is the only sanctioned way for a lane to execute project commands.
-  Do not add a mount or engine access to get around it.
+- A lane can name only the four gate ids, and it cannot widen an image agent.
+  Those are enforced, not conventional.
+- The broker is the sanctioned way to run project commands in a disposable
+  worker. No agent is granted it by name; the baked aid-* agents allow shell
+  commands, so calling it is not prompted. Do not add a mount or engine access
+  to get around it.

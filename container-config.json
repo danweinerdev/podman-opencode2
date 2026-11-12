@@ -2,7 +2,7 @@
   "$schema": "./container-config.schema.json",
   "share": "disabled",
   "autoupdate": false,
-  "default_agent": "orchestrator",
+  "default_agent": "aid-orchestrator",
   "permissions": [
     { "action": "external_directory", "resource": "/opt/opencode/sandbox/*", "effect": "allow" },
     { "action": "read", "resource": "/opt/opencode/sandbox/*", "effect": "allow" },
@@ -18,8 +18,7 @@
     "/opt/opencode/plugins/code-graph/skills",
     "/opt/opencode/plugins/debug/skills",
     "/opt/opencode/plugins/search/skills",
-    "/opt/opencode/plugins/sdd/skills",
-    "/opt/opencode/plugins/model-router/skills"
+    "/opt/opencode/plugins/sandbox/skills"
   ],
   "mcp": {
     "servers": {
@@ -42,32 +41,7 @@
   },
   "plugins": [
     {
-      "package": "file:///opt/opencode/plugins/model-router",
-      "options": {
-        "schema_version": 2,
-        "pin_default_agent_model": false,
-        "models": {
-          "orchestration": { "model": "openai/gpt-5.6-sol" },
-          "reasoning": { "model": "deepseek/deepseek-v4-pro", "variant": "high" },
-          "implementation": { "model": "deepseek/deepseek-v4-pro", "variant": "max" },
-          "extraction": { "model": "openai/gpt-5.6-luna" },
-          "review": { "model": "deepseek/deepseek-v4-flash" }
-        },
-        "agents": {
-          "orchestrator": "orchestration",
-          "engineer": "implementation",
-          "reasoner": "reasoning",
-          "implementer": "implementation",
-          "extractor": "extraction",
-          "bulk-researcher": "extraction",
-          "bounded-editor": "reasoning",
-          "review-plan-drift": "review",
-          "review-quality": "review",
-          "review-spec-compliance": "review",
-          "review-blind-spots": "review"
-        },
-        "default_agent": "orchestrator"
-      }
+      "package": "file:///opt/opencode/plugins/ai-devtools"
     }
   ]
 }
