@@ -27,21 +27,19 @@ jobs:
           python-version: "3.13"
       - name: Install pinned lint and type tools
         run: python -m pip install -r requirements.txt
-      # The same commands as .opencode-sandbox.json verify.checks.
+      # The same commands as the repository's development checks.
       - name: Lint
         run: ruff check .
       - name: Types
         run: mypy .
       - name: Compile
-        run: python3 -m py_compile bin/opencode-container bin/oc2-verify
+        run: python3 -m py_compile bin/opencode-container
       - name: Config
         run: jq empty container-config.json container-config.schema.json examples/*.example
       - name: Shell scripts
         run: shellcheck image/*
       - name: Launcher
         run: ./tests/launcher-env.test.py
-      - name: Verify broker
-        run: ./tests/verify-broker.test.py
       - name: Image config
         run: ./tests/image-config.test.py
 

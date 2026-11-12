@@ -7,8 +7,6 @@ environment the mock recorded.
 """
 
 import hashlib
-import importlib.machinery
-import importlib.util
 import json
 import os
 import shutil
@@ -20,13 +18,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 LAUNCHER = ROOT / "bin" / "opencode-container"
-
-# Contract value: the container directory the runtime scans for agent
-# definitions in addition to the one the image bakes.
-AGENTS_TARGET = "/opt/opencode/config/opencode/agents"
-
-# A minimal definition the launcher accepts: fenced frontmatter and a body.
-AGENT_BODY = "---\ndescription: Lane.\nmode: subagent\n---\nBody.\n"
 
 MOCK_PODMAN = """\
 #!/usr/bin/env python3
@@ -389,8 +380,6 @@ class Suite:
         self.has_line(argv, "OPENAI_API_KEY")
         self.has_line(argv, "EMPTY_FORWARD")
         self.has_line(argv, "TZ=UTC")
-        self.has_line(argv, f"{self.workspace}/.opencode-sandbox.json:/run/opencode/sandbox.json:ro")
-        self.no_substring(argv, "OPENCODE_MODEL_ROUTER")
         # Engine-free mode starts as the image user, so there is no pre-drop
         # window: values stay `-e` and no agent environment file is written.
         self.no_substring(argv, ":/run/opencode/agent-env:ro")
@@ -1281,304 +1270,6 @@ class Suite:
 
     # --- workspace agent definitions -------------------------------------------
 
-    def _new_agents_workspace(self, name: str, **changes: object) -> Path:
-        """An isolated workspace with a minimal sandbox config, for agents cases.
-
-        Self-contained on purpose: the shared workspace config accumulates
-        mutations across sections, and its `workspace` redirect would move the
-        agent source out from under the assertions.
-        """
-        workspace = self.tmp / name
-        workspace.mkdir()
-        base: dict[str, object] = {
-            "schema_version": 1,
-            "image": "opencode2:test",
-            "workspace": ".",
-            "containers": False,
-            "mounts": [],
-            "command": ["/bin/true"],
-        }
-        write_json(workspace / ".opencode-sandbox.json", base | changes)
-        return workspace
-
-    def _agents_default_pickup(self) -> None:
-        # `.agents/*.md` in the workspace is mounted into the second agent
-        # directory the runtime scans, so it registers as additional agents.
-        workspace = self._new_agents_workspace("agents-default")
-        agents = workspace / ".agents"
-        agents.mkdir()
-        (agents / "review-adr.md").write_text(
-            "---\ndescription: Lane.\nmode: subagent\n---\nBody.\n", encoding="utf-8"
-        )
-        (agents / "review-schema.md").write_text(
-            "---\ndescription: Lane.\nmode: subagent\n---\nBody.\n", encoding="utf-8"
-        )
-        proc = self.run_ok(workspace)
-        self.has_line(self.argv(), f"{agents}:{AGENTS_TARGET}:ro")
-        self.has_substring([proc.stdout], "workspace agents: 2 definition(s)")
-
-    def _agents_absent_is_silent(self) -> None:
-        # No `.agents` directory: no mount, no notice. This is every project that
-        # has not adopted workspace agent definitions.
-        workspace = self._new_agents_workspace("agents-absent")
-        proc = self.run_ok(workspace)
-        self.no_substring(self.argv(), AGENTS_TARGET)
-        if "workspace agents:" in proc.stdout:
-            fail(f"unexpected agent notice: {proc.stdout}")
-
-    def _agents_disabled(self) -> None:
-        workspace = self._new_agents_workspace("agents-off", agents=False)
-        agents = workspace / ".agents"
-        agents.mkdir()
-        (agents / "review-adr.md").write_text("Body.\n", encoding="utf-8")
-        self.run_ok(workspace)
-        self.no_substring(self.argv(), AGENTS_TARGET)
-
-    def _agents_explicit_true_uses_the_default(self) -> None:
-        # `"agents": true` is an explicit opt-in to the default directory.
-        workspace = self._new_agents_workspace("agents-true", agents=True)
-        agents = workspace / ".agents"
-        agents.mkdir()
-        (agents / "review-adr.md").write_text(AGENT_BODY, encoding="utf-8")
-        self.run_ok(workspace)
-        self.has_line(self.argv(), f"{agents}:{AGENTS_TARGET}:ro")
-
-    def _agents_custom_directory(self) -> None:
-        # `agents` replaces the default directory; it never reaches the baked set.
-        workspace = self._new_agents_workspace("agents-dir", agents=".claude/agents")
-        agents = workspace / ".claude" / "agents"
-        agents.mkdir(parents=True)
-        (agents / "review-adr.md").write_text(AGENT_BODY, encoding="utf-8")
-        self.run_ok(workspace)
-        self.has_line(self.argv(), f"{agents}:{AGENTS_TARGET}:ro")
-
-    def _agents_missing_override_directory(self) -> None:
-        # An explicit setting that is absent is a mistake, not a silent opt-out.
-        workspace = self._new_agents_workspace("agents-missing", agents="team-agents")
-        self.run_fail(
-            workspace,
-            "a missing agents override must fail",
-            stderr_contains=("agents directory does not exist",),
-        )
-
-    def _agents_bad_setting(self) -> None:
-        workspace = self._new_agents_workspace("agents-bad", agents=["review-adr"])
-        self.run_fail(
-            workspace,
-            "a non-string agents setting must fail",
-            stderr_contains=("agents must be a directory path or false",),
-        )
-
-    def _agents_rejects_runtime_id(self) -> None:
-        # A same-id definition replaces the OpenCode agent's prompt and unions
-        # its permission rules, so it is refused rather than treated as an override.
-        for agent_id in ("build",):
-            workspace = self._new_agents_workspace(f"agents-id-{agent_id}")
-            agents = workspace / ".agents"
-            agents.mkdir()
-            (agents / f"{agent_id}.md").write_text("Body.\n", encoding="utf-8")
-            self.run_fail(
-                workspace,
-                f"a redefined OpenCode agent {agent_id} must fail",
-                stderr_contains=("redefines an OpenCode agent",),
-            )
-
-    def _agents_accepts_aid_definition(self) -> None:
-        # ai-devtools owns protecting its own agents from a project override; at
-        # the current pin the launcher does not reserve them, so a same-id file
-        # is mounted like any other project agent.
-        workspace = self._new_agents_workspace("agents-aid")
-        agents = workspace / ".agents"
-        agents.mkdir()
-        (agents / "aid-mechanic.md").write_text(AGENT_BODY, encoding="utf-8")
-        proc = self.run_ok(workspace)
-        self.has_line(self.argv(), f"{agents}:{AGENTS_TARGET}:ro")
-        self.has_substring([proc.stdout], "workspace agents: 1 definition(s)")
-
-    def _agents_rejects_unusable_entries(self) -> None:
-        # A definition must be a regular `<agent-id>.md` file directly under the
-        # agents directory: a nested path is not a definition, an invalid name
-        # is rejected, and a symlink can leave the workspace.
-        cases = (
-            ("nested directory", "dir", "team", "must be regular files"),
-            ("non-Markdown file", "file", "notes.txt", "must be a Markdown file"),
-            ("invalid name", "file", "review adr.md", "invalid agent name"),
-            ("symlink", "link", "elsewhere.md", "must be regular files"),
-        )
-        for label, kind, entry, reject in cases:
-            workspace = self._new_agents_workspace(f"agents-entry-{kind}-{entry}")
-            agents = workspace / ".agents"
-            agents.mkdir()
-            (agents / "review-adr.md").write_text(AGENT_BODY, encoding="utf-8")
-            if kind == "dir":
-                (agents / entry).mkdir()
-            elif kind == "file":
-                (agents / entry).write_text("Body.\n", encoding="utf-8")
-            else:
-                outside = self.tmp / "elsewhere.md"
-                outside.write_text("Body.\n", encoding="utf-8")
-                (agents / entry).symlink_to(outside)
-            self.run_fail(
-                workspace,
-                f"{label} entry must fail",
-                stderr_contains=(reject,),
-            )
-
-    def _agents_skips_hidden_files(self) -> None:
-        # Bookkeeping files are not definitions; a hidden `.md` is skipped loudly,
-        # because it looks like a definition and would otherwise vanish silently.
-        workspace = self._new_agents_workspace("agents-hidden")
-        agents = workspace / ".agents"
-        agents.mkdir()
-        (agents / "review-adr.md").write_text(AGENT_BODY, encoding="utf-8")
-        (agents / ".gitignore").write_text("*.bak\n", encoding="utf-8")
-        (agents / ".review-typo.md").write_text("Body.\n", encoding="utf-8")
-        proc = self.run_ok(workspace)
-        self.has_line(self.argv(), f"{agents}:{AGENTS_TARGET}:ro")
-        self.has_substring([proc.stdout], "workspace agents: 1 definition(s)")
-        self.has_substring([proc.stderr], "skipping hidden agent file")
-
-    def _agents_gate_contributions_are_reported(self) -> None:
-        # A reviewer names the gates it feeds, inline or as a block list, and the
-        # launcher reports the map so the contract is legible at launch.
-        workspace = self._new_agents_workspace("agents-gates")
-        agents = workspace / ".agents"
-        agents.mkdir()
-        (agents / "review-adr.md").write_text(
-            "---\ndescription: ADR conformance.\nmode: subagent\n"
-            "review-gates: [review_quality, review_blind_spots, review_quality]\n---\nBody.\n",
-            encoding="utf-8",
-        )
-        (agents / "review-schema.md").write_text(
-            "---\ndescription: Schema drift.\nmode: subagent\nreview-gates:\n"
-            "  - review_spec_compliance\n---\nBody.\n",
-            encoding="utf-8",
-        )
-        proc = self.run_ok(workspace)
-        self.has_substring(
-            [proc.stdout],
-            "review contributions: review-adr -> review_quality, review_blind_spots; "
-            "review-schema -> review_spec_compliance",
-        )
-        if "names no review-gates" in proc.stderr:
-            fail(f"declared gates must not warn: {proc.stderr}")
-
-    def _agents_rejects_unknown_gate(self) -> None:
-        # The gate vocabulary is closed by the review tooling; a name outside it is
-        # a typo that would silently contribute to nothing.
-        workspace = self._new_agents_workspace("agents-gate-unknown")
-        agents = workspace / ".agents"
-        agents.mkdir()
-        (agents / "review-adr.md").write_text(
-            "---\nmode: subagent\nreview-gates: [review_made_up]\n---\nBody.\n",
-            encoding="utf-8",
-        )
-        self.run_fail(
-            workspace,
-            "an unknown review gate must fail",
-            stderr_contains=("unknown review gate(s) review_made_up",),
-        )
-
-    def _agents_rejects_scalar_gate(self) -> None:
-        workspace = self._new_agents_workspace("agents-gate-scalar")
-        agents = workspace / ".agents"
-        agents.mkdir()
-        (agents / "review-adr.md").write_text(
-            "---\nmode: subagent\nreview-gates: review_quality\n---\nBody.\n",
-            encoding="utf-8",
-        )
-        self.run_fail(
-            workspace,
-            "a scalar review-gates value must fail",
-            stderr_contains=("must be a list of review gates",),
-        )
-
-    def _agents_empty_gates_is_explicitly_advisory(self) -> None:
-        # `[]` is a deliberate "contributes to no gate", so it warns about neither.
-        workspace = self._new_agents_workspace("agents-gate-empty")
-        agents = workspace / ".agents"
-        agents.mkdir()
-        (agents / "review-notes.md").write_text(
-            "---\nmode: subagent\nreview-gates: []\n---\nBody.\n", encoding="utf-8"
-        )
-        proc = self.run_ok(workspace)
-        for noise in ("names no review-gates", "review contributions:"):
-            if noise in proc.stderr + proc.stdout:
-                fail(f"an explicit empty gate list must be quiet about {noise!r}")
-
-    def _agents_undeclared_gates_warns(self) -> None:
-        # A reviewer that could feed a gate but names none would have its findings
-        # silently dropped at synthesis.
-        workspace = self._new_agents_workspace("agents-gate-missing")
-        agents = workspace / ".agents"
-        agents.mkdir()
-        (agents / "review-adr.md").write_text(AGENT_BODY, encoding="utf-8")
-        proc = self.run_ok(workspace)
-        if "names no review-gates" not in proc.stderr:
-            fail(f"an undeclared gate list must warn: {proc.stderr}")
-
-    def _agents_outside_convention_is_silent(self) -> None:
-        # aid's agents do not restrict subagent dispatch, so an id outside the
-        # `review-*` convention is no longer a worker-dispatch problem: it still
-        # mounts and the launcher says nothing about dispatch.
-        workspace = self._new_agents_workspace("agents-convention")
-        agents = workspace / ".agents"
-        agents.mkdir()
-        (agents / "migration-planner.md").write_text(AGENT_BODY, encoding="utf-8")
-        proc = self.run_ok(workspace)
-        self.has_line(self.argv(), f"{agents}:{AGENTS_TARGET}:ro")
-        if "outside the review-* convention" in proc.stderr:
-            fail(f"an id outside review-* must not warn about dispatch: {proc.stderr}")
-
-    def _agents_rejects_unfenced_frontmatter(self) -> None:
-        # Nothing else checks these files: the runtime registers a document with no
-        # parseable frontmatter as an unnamed primary agent whose prompt is its own
-        # frontmatter text.
-        for label, body, reject in (
-            ("no fence", "Just a prompt.\n", "must open with"),
-            ("unclosed fence", "---\nmode: subagent\nNo closing fence\n", "never closed"),
-        ):
-            workspace = self._new_agents_workspace(f"agents-fence-{label.split()[0]}")
-            agents = workspace / ".agents"
-            agents.mkdir()
-            (agents / "review-adr.md").write_text(body, encoding="utf-8")
-            self.run_fail(
-                workspace,
-                f"{label} must fail",
-                stderr_contains=(reject,),
-            )
-
-    def _agents_source_is_protected_state(self) -> None:
-        # The override must not point at host agent state the container may not reach.
-        host_agents = self.test_home / ".agents"
-        host_agents.mkdir()
-        (host_agents / "review-adr.md").write_text("Body.\n", encoding="utf-8")
-        workspace = self._new_agents_workspace("agents-host-state", agents=str(host_agents))
-        self.run_fail(
-            workspace,
-            "host .agents state must be refused",
-            stderr_contains=("overlaps host OpenCode/.agents/.claude/.mcp state",),
-        )
-        shutil.rmtree(host_agents, ignore_errors=True)
-
-    def _agents_reserved_ids_are_runtime_ids(self) -> None:
-        # Only OpenCode's own ids are reserved now. The ai-devtools agents belong
-        # to ai-devtools, so the launcher must not keep reserving any of them.
-        loader = importlib.machinery.SourceFileLoader("launcher", str(LAUNCHER))
-        spec = importlib.util.spec_from_loader("launcher", loader)
-        assert spec is not None and spec.loader is not None
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        if sorted(module.RESERVED_AGENT_IDS) != sorted(module.RUNTIME_AGENT_IDS):
-            fail(
-                "launcher RESERVED_AGENT_IDS drifted from OpenCode's own ids:\n"
-                f"  reserved: {sorted(module.RESERVED_AGENT_IDS)}\n"
-                f"  runtime:  {sorted(module.RUNTIME_AGENT_IDS)}"
-            )
-        for agent_id in module.RESERVED_AGENT_IDS:
-            if not module.AGENT_ID_RE.fullmatch(agent_id):
-                fail(f"reserved id is not a valid agent name: {agent_id}")
-
     def _setup_default_workspace(self) -> tuple[Path, Path]:
         home = self.tmp / "default-home"
         workspace = self.tmp / "default-workspace"
@@ -1609,7 +1300,6 @@ class Suite:
         self.has_line(argv, f"opencode2-data-{key}:/var/lib/opencode-data")
         self.no_substring(argv, "opencode-data:U")
         self.no_substring(argv, "/run/opencode-container-engine.sock")
-        self.no_substring(argv, "/run/opencode/sandbox.json")
         self.no_substring(argv, "/opt/opencode/config/opencode/aid.json")
         self.no_substring(argv, "/run/opencode/gitconfig")
         return home, workspace
@@ -1673,7 +1363,6 @@ class Suite:
         argv = self.argv()
         self.has_line(argv,
                       f"{real}/opencode2/aid.json:/opt/opencode/config/opencode/aid.json:ro")
-        self.no_substring(argv, "OPENCODE_MODEL_ROUTER")
         self.no_line(argv, f"{real}/opencode2:/opt/opencode/config/opencode")
         return real, link
 
@@ -1698,18 +1387,16 @@ class Suite:
                       extra_env={"HOME": str(default_home), "XDG_CONFIG_HOME": str(link)},
                       stderr_contains="overlaps the user-global aid config")
 
-    def _global_aid_and_sandbox_mounted(self, real: Path, link: Path,
-                                        default_home: Path, default_workspace: Path) -> None:
-        # The global aid file and the workspace sandbox control file are
-        # independent and both mount, with no router env var pairing them.
+    def _global_aid_config_with_workspace_config(self, real: Path, link: Path,
+                                                 default_home: Path,
+                                                 default_workspace: Path) -> None:
+        # The global aid file mounts independently of a workspace sandbox config.
         write_json(default_workspace / ".opencode-sandbox.json", {})
         self.run_ok(default_workspace, via_path=True,
                     extra_env={"HOME": str(default_home), "XDG_CONFIG_HOME": str(link)})
         argv = self.argv()
         self.has_line(argv,
                       f"{real}/opencode2/aid.json:/opt/opencode/config/opencode/aid.json:ro")
-        self.has_line(argv, f"{default_workspace}/.opencode-sandbox.json:/run/opencode/sandbox.json:ro")
-        self.no_substring(argv, "OPENCODE_MODEL_ROUTER")
 
     def _global_aid_git_metadata_overlap(self) -> None:
         # Linked-worktree metadata is mounted writable at its host path, so a
@@ -1755,45 +1442,6 @@ class Suite:
                       stderr_contains="global aid config is not a regular file")
         shutil.rmtree(aid)
 
-    def _model_router_block_refused(self, default_home: Path,
-                                    default_workspace: Path) -> None:
-        # The embedded model router is gone, so any leftover block is refused:
-        # silently ignoring it would leave a project routed by nothing.
-        workspace = self.tmp / "router-block-workspace"
-        workspace.mkdir()
-        env = {"HOME": str(default_home)}
-        for document in (
-            {"model_router": {"schema_version": 2, "agents": {"reasoner": "reasoning"}}},
-            {"model_router": "nope"},
-        ):
-            write_json(workspace / ".opencode-sandbox.json", document)
-            self.run_fail(workspace, "launcher accepted a retired model_router block",
-                          via_path=True, extra_env=env,
-                          stderr_contains=(
-                              '"model_router" block',
-                              ".opencode/aid.json",
-                              f"{default_home}/.config/opencode2/aid.json",
-                          ))
-
-    def _leftover_global_router_warns(self, default_home: Path,
-                                      default_workspace: Path) -> None:
-        # A leftover global router file no longer does anything; say so once,
-        # with the replacement path, but launch anyway.
-        config = default_home / ".config" / "opencode2"
-        config.mkdir(parents=True, exist_ok=True)
-        legacy = config / "model-router.json"
-        legacy.write_text("{}\n", encoding="utf-8")
-        proc = self.run_ok(default_workspace, via_path=True,
-                           extra_env={"HOME": str(default_home)})
-        if proc.stderr.count("is no longer read") != 1:
-            fail(f"leftover model-router.json must warn exactly once: {proc.stderr}")
-        for needle in ("model-router.json", ".opencode/aid.json",
-                       f"{config}/aid.json"):
-            if needle not in proc.stderr:
-                fail(f"leftover model-router.json warning omits {needle!r}: {proc.stderr}")
-        self.no_substring(self.argv(), "model-router.json")
-        legacy.unlink()
-
     def _partial_config(self, default_home: Path, default_workspace: Path) -> None:
         # A present partial config inherits the same defaults and is mounted so
         # the sandbox sees its own control file.
@@ -1804,8 +1452,6 @@ class Suite:
             fail("launcher warned despite a present sandbox config")
         argv = self.argv()
         self.has_line(argv, "opencode2:latest")
-        self.has_line(argv, f"{default_workspace}/.opencode-sandbox.json:/run/opencode/sandbox.json:ro")
-        self.no_substring(argv, "OPENCODE_MODEL_ROUTER")
 
     def _podman_secrets(self, default_home: Path, default_workspace: Path) -> None:
         # Existing user-global Podman secrets are not injected without project
@@ -2422,26 +2068,6 @@ def main() -> None:
         suite._git_linked_worktree()
         suite._custom_xdg_state()
         suite._relative_mount_source()
-        suite._agents_default_pickup()
-        suite._agents_absent_is_silent()
-        suite._agents_disabled()
-        suite._agents_explicit_true_uses_the_default()
-        suite._agents_custom_directory()
-        suite._agents_missing_override_directory()
-        suite._agents_bad_setting()
-        suite._agents_rejects_runtime_id()
-        suite._agents_accepts_aid_definition()
-        suite._agents_rejects_unusable_entries()
-        suite._agents_skips_hidden_files()
-        suite._agents_gate_contributions_are_reported()
-        suite._agents_rejects_unknown_gate()
-        suite._agents_rejects_scalar_gate()
-        suite._agents_empty_gates_is_explicitly_advisory()
-        suite._agents_undeclared_gates_warns()
-        suite._agents_outside_convention_is_silent()
-        suite._agents_rejects_unfenced_frontmatter()
-        suite._agents_source_is_protected_state()
-        suite._agents_reserved_ids_are_runtime_ids()
         default_home, default_workspace = suite._no_config_defaults()
         suite._gitconfig_mounts(default_home, default_workspace)
         global_aid_real, global_aid_link = suite._global_aid_config(
@@ -2449,12 +2075,10 @@ def main() -> None:
         suite._global_aid_overlap(global_aid_real, global_aid_link,
                                   default_home, default_workspace)
         suite._global_aid_git_metadata_overlap()
-        suite._global_aid_and_sandbox_mounted(global_aid_real, global_aid_link,
-                                              default_home, default_workspace)
+        suite._global_aid_config_with_workspace_config(
+            global_aid_real, global_aid_link, default_home, default_workspace)
         aid = global_aid_real / "opencode2" / "aid.json"
         suite._malformed_global_aid(default_home, default_workspace, global_aid_link, aid)
-        suite._model_router_block_refused(default_home, default_workspace)
-        suite._leftover_global_router_warns(default_home, default_workspace)
         suite._partial_config(default_home, default_workspace)
         suite._podman_secrets(default_home, default_workspace)
         suite._secrets_subcommand(default_home, default_workspace)

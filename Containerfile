@@ -10,7 +10,7 @@
 #   /opt/mcp/bin/<code-graph-mcp|debug-mcp|search-mcp|aid>  MCP + aid binaries (on PATH)
 #   /opt/opencode/plugins/<code-graph|debug|search>         OpenCode skills/plugin assets
 #   /opt/opencode/plugins/ai-devtools                       aid plugin (agents, skills, TUI)
-#   /opt/opencode/plugins/sandbox/skills                    sandbox + verify skills
+#   /opt/opencode/plugins/sandbox/skills                    sandbox skills
 #   /opt/opencode/sandbox/                         launcher + config templates
 #   /opt/opencode/config/opencode/opencode.json    optional runtime-mounted local providers
 #   /opt/opencode/config/opencode/agent/          root-owned agent dir (plugin registers agents)
@@ -286,23 +286,11 @@ COPY plugins/sandbox/skills /opt/opencode/plugins/sandbox/skills
 # copied into a mounted workspace for the user to run after leaving the image.
 RUN mkdir -p /opt/opencode/sandbox
 COPY bin/opencode-container /opt/opencode/sandbox/opencode-container
-# The verification broker. A read-only role that is granted a command runner is
-# granted exactly this path, so its location is part of the permission contract:
-# moving it means updating whatever grants that runner. It owns every
-# container-engine decision a worker can make, which is why it is baked
-# read-only-executable here rather than supplied by a workspace that a reviewed
-# change could edit.
-COPY bin/oc2-verify /opt/opencode/sandbox/oc2-verify
 COPY examples/opencode-sandbox.json.example /opt/opencode/sandbox/.opencode-sandbox.json.example
 COPY examples/local-providers.json.example /opt/opencode/sandbox/local-providers.json.example
-RUN chmod 0755 /opt/opencode/sandbox/opencode-container /opt/opencode/sandbox/oc2-verify \
+RUN chmod 0755 /opt/opencode/sandbox/opencode-container \
     && chmod 0644 /opt/opencode/sandbox/.opencode-sandbox.json.example \
         /opt/opencode/sandbox/local-providers.json.example
-# Sentinel: marks this image, so tools can tell they run inside the sandbox and
-# must read the launcher's read-only config mount, never the writable workspace
-# copy. Root-owned in a root-owned directory, so the agent can neither remove nor
-# forge it; the verify worker image does not carry it.
-RUN touch /.opencode-sandbox && chmod 0444 /.opencode-sandbox
 
 # --- Baked agents + commands under XDG_CONFIG_HOME ---------------------------
 # The ai-devtools plugin registers its own agents at load time, so no agent

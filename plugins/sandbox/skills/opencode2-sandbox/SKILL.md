@@ -1,6 +1,6 @@
 ---
 name: opencode2-sandbox
-description: Set up or configure this repository's Podman OpenCode2 sandbox using .opencode-sandbox.json and opencode-container. Use ONLY for this image's launcher, mounts, environment forwarding, model routing via aid.json, or container build settings.
+description: Set up or configure this repository's Podman OpenCode2 sandbox using .opencode-sandbox.json and opencode-container. Use ONLY for this image's launcher, mounts, environment forwarding, credentials, or container build settings.
 ---
 
 # OpenCode2 sandbox setup
@@ -23,7 +23,7 @@ the launcher from the host workspace root.
    install once on `PATH`; all project behavior is derived from the invocation
    directory. Create
    `.opencode-sandbox.json` from the baked template only when the user needs
-   build settings, mounts, environment forwarding, or model routing. If the
+   build settings, mounts, or environment forwarding. If the
    launcher itself is absent, copy it into the workspace with file tools; a
    convenient name is `opencode-container`.
 3. Customize only fields the user needs. Keep `schema_version: 1`, use the
@@ -71,9 +71,8 @@ the launcher from the host workspace root.
   `SYS_ADMIN` in the bounding set, `systempaths=unconfined`, `/dev/net/tun`, and
   a root start whose prelude delegates the cgroup and drops to the image user.
   Inner `--memory` and `--cpus` are enforced. The base image ships the engine, so
-  no derived image is needed, and the engine's `podman` uses the local store. The
-  verify worker image must be loaded into that store by hand before `oc2-verify`
-  can run. See `docs/SANDBOX.md`, "Container access".
+  no derived image is needed, and the engine's `podman` uses the local store.
+  See `docs/SANDBOX.md`, "Container access".
   - `"host"` mounts the host container engine instead: the launcher prefers a
     filesystem-accessible rootless Podman socket over a rootless or system Docker
     socket, mounts only the selected socket at
@@ -96,28 +95,6 @@ the launcher from the host workspace root.
   mode a target may also not be `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`,
   `/etc`, or `/usr/local/libexec`: those hold the interpreter, the startup
   script, and the runtime the sandbox starts with.
-- `agents` names a workspace directory of OpenCode agent Markdown files that the
-  launcher mounts read-only at `/opt/opencode/config/opencode/agents`, the agent
-  directory it scans in addition to the one the image bakes. It defaults to
-  `.agents`; `false` skips the pickup and a path replaces the directory. These
-  entries are additions and may not reuse an OpenCode agent id (`build`, `plan`,
-  `general`, `explore`, `compaction`, `title`, `summary`): a same-id file
-  substitutes its own prompt and concatenates permission rules, silently widening
-  the agent it shadowed, so the launch is refused. The image's ai-devtools agents
-  are ai-devtools' responsibility: at the current pin a project `.agents/aid-*.md`
-  overrides the baked agent. Entries must be regular files
-  named `<agent-id>.md` with no subdirectories. Each file must open with a closed
-  `---` frontmatter fence, since the runtime otherwise registers it as an unnamed
-  primary agent whose prompt is its own frontmatter. A `review-*` id is treated as
-  a review lane. A reviewer declares the gates it feeds with `review-gates`, a list
-  drawn from `review_plan_drift`, `review_quality`, `review_spec_compliance`, and
-  `review_blind_spots`; the vocabulary is closed, so any other name is refused at
-  launch, `[]` means advisory only, and a `review-*` agent omitting the key warns.
-  The launcher records the declaration and prints the contribution map at launch.
-  Project agents run on the session model unless `aid.json` maps their id;
-  `agents` accepts any agent id, project agents included. This is the workspace's
-  own directory and is unrelated to the host `$HOME/.agents` state the mount rule
-  above protects.
 - On every launch, a present `$HOME/.gitconfig` must resolve to a readable
   regular file. The launcher mounts only its canonical exact file read-only at
   `/run/opencode/gitconfig` and sets `GIT_CONFIG_GLOBAL` to that path; it mounts
@@ -151,15 +128,8 @@ the launcher from the host workspace root.
   `.opencode/aid.json`, else the user-global
   `${XDG_CONFIG_HOME:-$HOME/.config}/opencode2/aid.json`. The launcher mounts
   that exact file read-only at `/opt/opencode/config/opencode/aid.json` and
-  leaves it unmounted when absent. The file defines named `profiles`
-  (`provider/model`, with an optional `#variant` or `reasoning_effort`) and maps
-  any agent id (a baked `aid-*` or a project agent) to them; an unmapped agent
-  uses the session model.
-  `aid` validates the file and reports an invalid one loudly. The launcher
-  refuses a leftover top-level `model_router` block in `.opencode-sandbox.json`
-  with a pointer to `aid.json`, and warns about a leftover
-  `opencode2/model-router.json`, which is no longer read. A routing edit needs
-  only a launcher/container restart.
+  leaves it unmounted when absent. Routing itself belongs to ai-devtools; a
+  routing edit needs only a launcher/container restart.
 - On `build`, `run`, and `shell`, the launcher validates the host's shared
   `opencode2/local-providers.json` and mounts its exact canonical file
   read-only at `/opt/opencode/config/opencode/opencode.json`; it never exposes
@@ -178,9 +148,7 @@ the launcher from the host workspace root.
   booleans), empty or whitespace-only strings, missing paths, and directories
   are rejected. Do not put security options in `runtime_args`; its whitelist is
   unchanged. Older launchers may silently ignore this unknown top-level field,
-  so update the launcher before relying on it. The setting never applies to
-  `oc2-verify` workers, whose broker retains its own fixed container security
-  policy.
+  so update the launcher before relying on it.
 - `network` and the restricted `runtime_args` list control the Podman sandbox.
   Allowed runtime arguments are `--add-host=`, `--pids-limit=`, and `--ulimit=`
   forms only. `capabilities` is a fixed allow-list — `NET_RAW`,

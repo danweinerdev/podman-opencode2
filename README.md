@@ -4,6 +4,12 @@ Run OpenCode2 in a Podman container with code navigation, debugging, planning,
 and model routing ready to use. Your project is mounted into the container;
 logins and sessions are saved in a separate volume for each project.
 
+## Scope
+
+This project sandboxes OpenCode in a rootless Podman container, prepares that
+environment (baked runtime, tools, MCP servers, ai-devtools) and presents it to
+the user (launcher, mounts, config).
+
 ## Capabilities
 
 - **Code navigation:** explore symbols, callers, and dependencies with code-graph.
@@ -46,18 +52,16 @@ from this repository's root.
    [model routing](docs/SETUP.md#model-routing) and
    [local providers](docs/LOCAL_PROVIDERS.md).
 
-3. Enable the host Podman socket and launch:
+3. Launch:
 
    ```sh
-   systemctl --user start podman.socket
    ./bin/opencode-container
    ```
 
-   This repository sets `containers` to `"host"` in `.opencode-sandbox.json` so
-   its verification broker can use the host's worker image. It lets the sandbox
-   control your host container engine. Leave the setting out for the default
-   `"nested"` mode, an engine inside the sandbox with no host access, or set it to
-   `false` for none, and skip the socket command.
+   The default `containers` setting is `"nested"`: an engine inside the sandbox
+   with no host access, so no host socket is needed. Set it to `"host"` in
+   `.opencode-sandbox.json` to use the host's container engine, or `false` for
+   none.
 
 Select your primary model in OpenCode. Agents mapped in `aid.json` use their
 profile; the rest follow the session model.
@@ -84,4 +88,3 @@ saved state. See [setup](docs/SETUP.md) to use it with another repository.
 | Manage API keys and saved logins | [Credentials](docs/CREDENTIALS.md) |
 | Change mounts, environment, persistence, or container access | [Sandbox configuration](docs/SANDBOX.md) |
 | Build custom images or run checks | [Development](docs/DEVELOPMENT.md) |
-| Understand a runtime limitation we work around | [Upstream issues](docs/UPSTREAM_ISSUES.md) |
