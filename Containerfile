@@ -146,7 +146,7 @@ ARG USER_UID=1000
 ARG USER_GID=1000
 ARG USERNAME=dev
 # renovate: datasource=npm depName=@opencode/cli
-ARG OPENCODE2_VERSION=2.2.6
+ARG OPENCODE2_VERSION=2.2.7
 # This opaque cache key records only the launcher-validated host catalog's
 # digest. The catalog bytes are never available to the image build.
 ARG LOCAL_PROVIDERS_SHA256=absent
