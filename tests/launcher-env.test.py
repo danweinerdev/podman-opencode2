@@ -1369,19 +1369,31 @@ class Suite:
             stderr_contains=("agents must be a directory path or false",),
         )
 
-    def _agents_rejects_container_id(self) -> None:
-        # A same-id definition replaces the container agent's prompt and unions
+    def _agents_rejects_runtime_id(self) -> None:
+        # A same-id definition replaces the OpenCode agent's prompt and unions
         # its permission rules, so it is refused rather than treated as an override.
-        for agent_id in ("aid-oracle", "build"):
+        for agent_id in ("build",):
             workspace = self._new_agents_workspace(f"agents-id-{agent_id}")
             agents = workspace / ".agents"
             agents.mkdir()
             (agents / f"{agent_id}.md").write_text("Body.\n", encoding="utf-8")
             self.run_fail(
                 workspace,
-                f"a redefined container agent {agent_id} must fail",
-                stderr_contains=("redefines a container agent",),
+                f"a redefined OpenCode agent {agent_id} must fail",
+                stderr_contains=("redefines an OpenCode agent",),
             )
+
+    def _agents_accepts_aid_definition(self) -> None:
+        # ai-devtools owns protecting its own agents from a project override; at
+        # the current pin the launcher does not reserve them, so a same-id file
+        # is mounted like any other project agent.
+        workspace = self._new_agents_workspace("agents-aid")
+        agents = workspace / ".agents"
+        agents.mkdir()
+        (agents / "aid-mechanic.md").write_text(AGENT_BODY, encoding="utf-8")
+        proc = self.run_ok(workspace)
+        self.has_line(self.argv(), f"{agents}:{AGENTS_TARGET}:ro")
+        self.has_substring([proc.stdout], "workspace agents: 1 definition(s)")
 
     def _agents_rejects_unusable_entries(self) -> None:
         # A definition must be a regular `<agent-id>.md` file directly under the
@@ -1549,30 +1561,19 @@ class Suite:
         )
         shutil.rmtree(host_agents, ignore_errors=True)
 
-    def _agents_reserved_ids_track_the_image(self) -> None:
-        # The refusal above only protects the agents the image actually ships.
-        # They come from the pinned ai-devtools plugin (dist/opencode/agents at
-        # AI_DEVTOOLS_REF), so this restates that pin; a launcher edit cannot
-        # silently stop reserving one of them.
-        expected = (
-            "aid-orchestrator",
-            "aid-explorer",
-            "aid-mechanic",
-            "aid-oracle",
-            "aid-designer",
-            "aid-creator",
-            "aid-craftsman",
-            "aid-sage",
-        )
+    def _agents_reserved_ids_are_runtime_ids(self) -> None:
+        # Only OpenCode's own ids are reserved now. The ai-devtools agents belong
+        # to ai-devtools, so the launcher must not keep reserving any of them.
         loader = importlib.machinery.SourceFileLoader("launcher", str(LAUNCHER))
         spec = importlib.util.spec_from_loader("launcher", loader)
         assert spec is not None and spec.loader is not None
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        if sorted(module.BAKED_AGENT_IDS) != sorted(expected):
+        if sorted(module.RESERVED_AGENT_IDS) != sorted(module.RUNTIME_AGENT_IDS):
             fail(
-                "launcher BAKED_AGENT_IDS drifted from the ai-devtools plugin's agents:\n"
-                f"  launcher: {sorted(module.BAKED_AGENT_IDS)}\n  plugin: {sorted(expected)}"
+                "launcher RESERVED_AGENT_IDS drifted from OpenCode's own ids:\n"
+                f"  reserved: {sorted(module.RESERVED_AGENT_IDS)}\n"
+                f"  runtime:  {sorted(module.RUNTIME_AGENT_IDS)}"
             )
         for agent_id in module.RESERVED_AGENT_IDS:
             if not module.AGENT_ID_RE.fullmatch(agent_id):
@@ -2428,7 +2429,8 @@ def main() -> None:
         suite._agents_custom_directory()
         suite._agents_missing_override_directory()
         suite._agents_bad_setting()
-        suite._agents_rejects_container_id()
+        suite._agents_rejects_runtime_id()
+        suite._agents_accepts_aid_definition()
         suite._agents_rejects_unusable_entries()
         suite._agents_skips_hidden_files()
         suite._agents_gate_contributions_are_reported()
@@ -2439,7 +2441,7 @@ def main() -> None:
         suite._agents_outside_convention_is_silent()
         suite._agents_rejects_unfenced_frontmatter()
         suite._agents_source_is_protected_state()
-        suite._agents_reserved_ids_track_the_image()
+        suite._agents_reserved_ids_are_runtime_ids()
         default_home, default_workspace = suite._no_config_defaults()
         suite._gitconfig_mounts(default_home, default_workspace)
         global_aid_real, global_aid_link = suite._global_aid_config(

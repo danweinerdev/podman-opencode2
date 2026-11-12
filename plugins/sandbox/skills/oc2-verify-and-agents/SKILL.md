@@ -129,12 +129,12 @@ Rules the launcher enforces at launch, by refusing to start:
 
 - Ids are letters, digits, `.`/`_`/`-`; entries are regular `.md` files with no
   subdirectories. A nested path is refused because each entry must be one file.
-- A reserved id is refused: the image's ai-devtools agents (`aid-orchestrator`,
-  `aid-explorer`, `aid-mechanic`, `aid-oracle`, `aid-designer`, `aid-creator`,
-  `aid-craftsman`, `aid-sage`) and OpenCode's own (`build`, `plan`, `general`, `explore`,
-  `compaction`, `title`, `summary`). A same-id file would replace the image agent's
-  prompt and append its own permission rules after the agent's own, silently
-  widening a read-only lane.
+- A reserved id is refused: OpenCode's own agents (`build`, `plan`, `general`,
+  `explore`, `compaction`, `title`, `summary`). A same-id file would replace the
+  runtime agent's prompt and append its own permission rules after the agent's
+  own, silently widening it. The image's ai-devtools agents are ai-devtools'
+  responsibility; at the current pin a project `.agents/aid-*.md` overrides the
+  baked agent.
 - At most 64 definitions. Hidden `.md` files are skipped with a warning.
 - Each file must open with a `---` fence that is later closed. Without a fence the
   runtime registers an unnamed *primary* agent whose prompt is its own frontmatter.
