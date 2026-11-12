@@ -5,9 +5,8 @@ Unlike tests/launcher-env.test.py, which asserts the launcher's argv against a
 mocked engine, this drives the real launcher against a real Podman and the
 image built from this repository. It therefore runs only where podman is on
 PATH and localhost/opencode2:latest exists (make build); otherwise it prints a
-skip line and exits 0. It is deliberately not part of the verify worker's
-checks: Containerfile.verify ships no engine, and a worker that cannot run a
-check must report it as unavailable rather than passed.
+skip line and exits 0. The mocked-engine launcher suite cannot cover this: it
+needs a real engine and image.
 
 Each case runs in a scratch git workspace under /tmp. The workspace, the
 images it builds, and the volumes its runs create are removed afterwards;

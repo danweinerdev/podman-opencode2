@@ -9,10 +9,9 @@ image first, then the development image selected by this repository's sandbox
 config. Image builds need network access to download dependencies.
 
 The launcher requires Python 3.10+, Podman, Git, and `id` on the host.
-The checked-in config sets `containers` to `"host"`, because its verification
-broker uses the host's worker image: start a user Podman socket before launching.
-Without that line a project gets the default `"nested"` mode, an engine inside the
-sandbox with no host access; `false` disables container access entirely.
+The checked-in config leaves `containers` out, so it uses the default `"nested"`
+mode: an engine inside the sandbox with no host access. Set it to `"host"` to
+use the host socket, or `false` to disable container access entirely.
 
 ## Use another project
 
@@ -83,14 +82,10 @@ routing needs no image rebuild.
 ```
 
 `model` is `provider/model` with an optional `#variant`; use `reasoning_effort`
-instead of a variant, not both. `agents` maps any agent id to a profile, project
-agents included; `"inherit"`, or omitting the agent, leaves it on the session
-model. `aid` validates the file and reports an invalid one loudly. Keep
+instead of a variant, not both. `agents` maps any agent id to a profile;
+`"inherit"`, or omitting the agent, leaves it on the session model. `aid`
+validates the file and reports an invalid one loudly. Keep
 credentials out of it; see [credentials](CREDENTIALS.md).
-
-A leftover top-level `model_router` block in `.opencode-sandbox.json` stops the
-launch: move its routes to `.opencode/aid.json`. A leftover
-`opencode2/model-router.json` is no longer read and only warns.
 
 ## Commands
 

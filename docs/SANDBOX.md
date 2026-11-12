@@ -31,7 +31,6 @@ adapt its secret selections and volume name before using it.
 | `workdir` | Starting directory inside the workspace. Relative paths are supported. |
 | `containers` | Container-engine access: `"nested"` (the default; a rootless engine inside the sandbox), `"host"` (mount the host's Podman/Docker socket), or `false` (no engine). `true` is an alias for `"nested"`. See [container access](#container-access). |
 | `mounts` | Extra mounts with `source` and optional `target`. A relative source resolves against the workspace; an omitted target mirrors the absolute source path. A target may not shadow a baked config/plugin path or a container system path; see [environment boundaries](#environment-boundaries). |
-| `agents` | Directory of Markdown agent definitions to add to the container's own agents. Defaults to `.agents`; `false` skips them. See [project agent definitions](#project-agent-definitions). |
 | `env.pass` | Host variable names to forward when set. |
 | `env.set` | Literal environment values. |
 | `provider_secrets` | Keys this project can use; see [credentials](CREDENTIALS.md). |
@@ -49,8 +48,7 @@ Model routing is not a sandbox setting. The ai-devtools plugin reads
 see [model routing](SETUP.md#model-routing). The global file's `guards` and
 `sensitive` rules are not a sandbox boundary: an in-container agent can write
 `.opencode/aid.json` in the workspace, which aid prefers over the read-only
-global file. A leftover `model_router` block is refused at launch with a pointer
-to `aid.json`.
+global file.
 
 ## Files and Git
 
@@ -68,78 +66,6 @@ through `GIT_CONFIG_GLOBAL`. Includes, credential files, and helper programs
 are not automatically mounted. Relative includes resolve from
 `/run/opencode`; included files and helpers must be separately available.
 Any secrets written directly in `.gitconfig` are readable inside the container.
-
-## Project agent definitions
-
-A project can add its own agents by placing OpenCode agent Markdown files in
-`.agents` at the workspace root:
-
-```md
----
-description: Checks changes against this project's architecture decisions
-mode: subagent
-review-gates: [review_quality, review_blind_spots]
-permissions:
-  - { action: "*", resource: "*", effect: deny }
-  - { action: read, resource: "*", effect: allow }
-  - { action: grep, resource: "*", effect: allow }
----
-
-Review the current changes against `docs/adr/`. Report findings with file and
-line references. Do not edit files.
-```
-
-Each file becomes an agent named after the file, mounted read-only into the
-agent directory the runtime scans beside the one the image bakes. Use `agents`
-to read them from another directory, or `"agents": false` to skip them. Entries
-must be regular files named `<agent-id>.md`, with no subdirectories, and must
-open with a closed `---` frontmatter fence: nothing else checks these documents,
-and the runtime registers one with unparseable frontmatter as an unnamed primary
-agent carrying its own frontmatter as its prompt. Hidden files are ignored, and a
-hidden `.md` warns instead of vanishing quietly.
-
-These definitions are additions, never replacements. An id OpenCode itself uses
-(`build`, `plan`, `general`, `explore`, and the hidden agents) stops the launch
-with a message: a same-id definition does not cleanly override, it substitutes its
-own prompt and concatenates permission rules, which silently widens the agent it
-shadowed.
-
-The image's ai-devtools agents are not reserved here. Protecting them from a
-project override is ai-devtools' job, and it is not yet enforced at the pin this
-image uses, so a project `.agents/aid-*.md` currently overrides the baked agent.
-
-Two things to know about a new agent:
-
-- It runs on whatever its own `permissions` say. The image's read-only agent,
-  `aid-explorer`, carries an edit deny; a project agent should open with a
-  deny-all too, and the container cannot make it so for you.
-- A `review-*` id is the review-lane convention. The launcher warns when one omits
-  `review-gates`; any other name still registers as an ordinary project agent.
-
-### Contributing to a review gate
-
-A reviewer declares which review gates it feeds with `review-gates`, a list of
-`review_plan_drift`, `review_quality`, `review_spec_compliance`, or
-`review_blind_spots`. Anything else stops the launch: the launcher closes on
-exactly those four, so a fifth name is a typo, not an extension. `[]` is a
-deliberate "advisory only"; omitting the key on a `review-*` agent warns because
-its findings would contribute to no gate. The launcher prints the resulting
-contribution map at launch.
-
-Nothing in this image acts on the gates by itself, so treat the declaration as
-project metadata until a consumer is installed. It does not make a project
-reviewer a verification lane.
-
-Project agents run on the session model unless [`aid.json`](SETUP.md#model-routing)
-maps their id to a profile; `agents` accepts any agent id, project agents
-included.
-
-This directory is the project's own `.agents`, not your home directory's: host
-`$HOME/.agents` remains unreachable from the container.
-
-The `oc2-verify-and-agents` skill carries the lane template, the `oc2-verify`
-broker's interface and exit codes, and the launch-refusal messages, so a project
-reviewer can be written and checked without reading the launcher or broker source.
 
 ## Saved state
 
@@ -271,7 +197,6 @@ network access, and the host's image store is not visible.
 
 `--memory` and `--cpus` on inner containers are enforced: the prelude hands the
 cpu, memory, and pids controllers to the image user before dropping privileges.
-That includes `oc2-verify` workers.
 
 Project environment values take a separate route in this mode. The prelude
 starts as root before the drop, so `env.pass` and `env.set` values are not passed
@@ -294,12 +219,6 @@ fix:
 ```text
 opencode-entrypoint: the OpenCode data mount /var/lib/opencode-data is not writable by uid <uid> (volume <name>): run 'podman volume rm <name>' to start fresh, or set its ownership to <uid>:<gid> once
 ```
-
-The verification worker image must be loaded into the inner store once per project
-volume: the broker never pulls, and the host image store is not visible from
-inside. This repository keeps `"containers": "host"` for that reason until the
-seeding is automatic; see the
-[seeding recipe](DEVELOPMENT.md#verify-checks-in-a-disposable-worker).
 
 ### Host mode
 
@@ -344,9 +263,7 @@ wrong types, missing paths, and directories are rejected.
 This field requires a launcher version that supports it. Older launchers do not
 reject unknown top-level fields and may silently ignore `seccomp`, leaving the
 engine default in effect. It is deliberately separate from `runtime_args`, whose
-security-option filtering remains unchanged. It also does not alter `oc2-verify`
-workers: the verification broker uses its own fixed container security policy and
-does not consume this main-sandbox setting.
+security-option filtering remains unchanged.
 
 The baked OpenCode config and plugin directories stay root-owned. Project
 `opencode.json` files and external Claude/agent skill scans are disabled.
@@ -426,18 +343,14 @@ What auto-approval changes, and what it does not:
 
 - An explicit `deny` still wins, so it grants nothing beyond what an agent
   already denies. `aid-explorer` keeps its `edit` deny — no edit tool, though its
-  shell can still write files — and a deny-first project agent keeps its denials.
+  shell can still write files.
 - Every baked `aid-*` agent opens with an allow rule covering every action and
   resource (`*`/`*`). The only exceptions are `ask` on reading `.env` files,
   `deny` on the browser, and `aid-explorer`'s `edit` deny; there are no `shell`,
   `grep`, or `git` ask rules. Shell commands, `grep`, and `git` therefore run
-  without a prompt, and `oc2-verify` runs as an ordinary shell command. Under
-  `--auto`, any `effect: ask` that a project agent adds also stops prompting: the
-  enforceable boundaries are `deny` rules and what the container mounts.
-- The verification broker (`/opt/opencode/sandbox/oc2-verify`) stays baked and
-  reads the sandbox config mounted at `/run/opencode/sandbox.json`, but no agent
-  is granted it by name; a baked agent's allow-all shell rule runs it without a
-  prompt. See [development](DEVELOPMENT.md).
+  without a prompt. Under `--auto`, any `effect: ask` an agent adds also stops
+  prompting: the enforceable boundaries are `deny` rules and what the container
+  mounts.
 
 The `Containerfile` command is pinned by a policy guard in
 `tests/image-config.test.py`, so changing that flag set is a deliberate edit

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Image policy checks that used to live in the model-router plugin tests.
+"""Image policy checks.
 
 These assert the built image's shape from the two inputs that define it: the
 Containerfile and the baked OpenCode config. They are text/JSON checks on
@@ -159,16 +159,6 @@ def check_ai_devtools_ref(source: str) -> None:
     ref = match.group(1)
     if not re.fullmatch(r"[0-9a-f]{40}", ref):
         fail(f"AI_DEVTOOLS_REF must be a 40-character git SHA, got {ref!r}")
-
-
-def check_permissions(config: object) -> None:
-    if not isinstance(config, dict):
-        fail("container-config.json must be a JSON object")
-    permissions = config.get("permissions", [])
-    if not isinstance(permissions, list):
-        fail("container-config.json permissions must be an array")
-    if "oc2-verify" in json.dumps(permissions):
-        fail("container-config.json grants oc2-verify, which was dropped")
 
 
 def check_singular_plugin(config: object) -> None:
@@ -446,7 +436,6 @@ def main() -> None:
     check_skill_copy_destinations(config, source)
     check_opencode2_version(source, example)
     check_ai_devtools_ref(source)
-    check_permissions(config)
     check_singular_plugin(config)
     check_mcp_servers(config)
     check_policy_asset_permissions(source)
