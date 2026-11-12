@@ -52,7 +52,7 @@ RUN set -eux; \
 # ---------------------------------------------------------------------------
 # Stage 2: builder-only Rust toolchains for the Rust MCP servers
 # ---------------------------------------------------------------------------
-FROM docker.io/library/fedora:44 AS mcp-builder
+FROM docker.io/library/fedora:46 AS mcp-builder
 
 RUN dnf install -y --setopt=install_weak_deps=False \
         ca-certificates curl git \
@@ -128,7 +128,7 @@ RUN set -eux; \
 # ---------------------------------------------------------------------------
 # Stage 3: final runtime image
 # ---------------------------------------------------------------------------
-FROM docker.io/library/fedora:44
+FROM docker.io/library/fedora:46
 
 ARG USER_UID=1000
 ARG USER_GID=1000
