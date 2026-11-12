@@ -3,10 +3,15 @@
 # Built on top of the base runtime image (Containerfile). Adds the tooling
 # needed to develop and test the base:
 #
-#   - podman-remote  : container-engine client so `containers: true` in
-#                      .opencode-sandbox.json works (talks to the host's
-#                      rootless Podman socket mounted at
-#                      /run/opencode-container-engine.sock).
+#   - podman-remote  : container-engine client for `containers: "host"` in
+#                      .opencode-sandbox.json (talks to the host's rootless
+#                      Podman socket mounted at
+#                      /run/opencode-container-engine.sock). When the base
+#                      ships the nested engine (NESTED_PODMAN=1, the default),
+#                      `podman` is that full engine, which also follows
+#                      CONTAINER_HOST in host mode; only an engine-free base
+#                      gets a `podman` symlink to podman-remote. Note that
+#                      `containers: true` selects nested, not host.
 #   - Python tooling : a venv at /opt/dev/venv with ruff and mypy pinned to
 #                      the versions used in this repository (Fedora 44 ships
 #                      the venv module in python3-libs, already in the base).
@@ -54,6 +59,7 @@ RUN set -ex; \
     \
     command -v podman >/dev/null 2>&1 \
         || ln -s "$(command -v podman-remote)" /usr/local/bin/podman; \
+    command -v getcap >/dev/null; \
     python3 -m pip install --no-cache-dir --root-user-action ignore \
         podman-compose==1.6.0; \
     \
@@ -63,12 +69,12 @@ RUN set -ex; \
     \
     chown -R "${USER_UID}:${USER_GID}" /opt/dev
 
-# containers=true support: the launcher mounts the host's Podman socket at
-# /run/opencode-container-engine.sock and sets CONTAINER_HOST / DOCKER_HOST.
-# Baking the same defaults here means `podman` also works in manually
-# started containers that mount the socket, without extra -e flags.
-ENV CONTAINER_HOST=unix:///run/opencode-container-engine.sock \
-    DOCKER_HOST=unix:///run/opencode-container-engine.sock
+# Packages installed here must not widen the base's setuid policy.
+RUN /usr/local/libexec/opencode-setuid-policy "$(cat /etc/opencode-nested-podman)"
+
+# No CONTAINER_HOST / DOCKER_HOST is baked: the launcher sets both in host
+# mode, and a baked value would point the nested engine's `podman` at a socket
+# that does not exist in nested mode.
 
 # Preserve the launcher's digest as image metadata so a forced rebuild has a
 # distinct cache key without copying the provider catalog into the image.

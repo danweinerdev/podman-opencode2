@@ -8,13 +8,17 @@ logins and sessions are saved in a separate volume for each project.
 
 - **Code navigation:** explore symbols, callers, and dependencies with code-graph.
 - **Debugging:** use the debug MCP server and LLDB.
-- **Planning:** write specs, plan work, and review implementation with the SDD planner.
-- **Model routing:** assign different models to implementation, research, and review agents.
+- **Planning:** work through specs, build, and review with living PRDs and
+  specialist agents from ai-devtools.
+- **Model routing:** assign models to the ai-devtools agents with `aid.json`.
 - **Local models:** connect to OpenAI-compatible servers, including llama.cpp, Ollama, and LM Studio.
 - **Consistent environment:** use a Fedora-based runtime with bundled tools and skills.
-  The development image adds Python tooling and a container client.
+  The development image adds Python tooling and `make`.
+- **Containers:** by default the sandbox runs its own rootless Podman engine with
+  no host access; set `containers` to `"host"` to use the host socket instead; see
+  [container access](docs/SANDBOX.md#container-access).
 
-This project uses a pinned **OpenCode2** release. Version pins live in the
+This project pins **OpenCode2 2.2.6**. Version pins live in the
 [Containerfile](Containerfile).
 
 ## Quick start
@@ -28,8 +32,9 @@ from this repository's root.
    make build
    ```
 
-2. Add credentials for the default OpenAI and DeepSeek routes. Each command
-   prompts for a key without echoing it:
+2. Add credentials for the models you use. These examples add OpenAI and
+   DeepSeek keys (the image's title agent uses OpenAI); each command prompts for
+   a key without echoing it:
 
    ```sh
    ./bin/opencode-container secrets add openai-api-key
@@ -37,8 +42,9 @@ from this repository's root.
    ```
 
    Already exporting `OPENAI_API_KEY` and `DEEPSEEK_API_KEY`? The launcher
-   forwards them automatically. For other models, see [model routing](docs/MODEL_ROUTER.md)
-   and [local providers](docs/LOCAL_PROVIDERS.md).
+   forwards them automatically. For other models, see
+   [model routing](docs/SETUP.md#model-routing) and
+   [local providers](docs/LOCAL_PROVIDERS.md).
 
 3. Enable the host Podman socket and launch:
 
@@ -47,11 +53,14 @@ from this repository's root.
    ./bin/opencode-container
    ```
 
-   This repository enables host container access in `.opencode-sandbox.json`.
-   It lets the sandbox control your host container engine. If you don't need
-   that capability, set `containers` to `false` and skip the socket command.
+   This repository sets `containers` to `"host"` in `.opencode-sandbox.json` so
+   its verification broker can use the host's worker image. It lets the sandbox
+   control your host container engine. Leave the setting out for the default
+   `"nested"` mode, an engine inside the sandbox with no host access, or set it to
+   `false` for none, and skip the socket command.
 
-Select your primary model in OpenCode. Worker agents use their configured routes.
+Select your primary model in OpenCode. Agents mapped in `aid.json` use their
+profile; the rest follow the session model.
 
 ## Everyday commands
 
@@ -71,7 +80,7 @@ saved state. See [setup](docs/SETUP.md) to use it with another repository.
 | --- | --- |
 | Set up another project or fix a launch problem | [Setup](docs/SETUP.md) |
 | Connect a local model server | [Local providers](docs/LOCAL_PROVIDERS.md) |
-| Choose models for agents | [Model router](docs/MODEL_ROUTER.md) |
+| Choose models for agents | [Model routing](docs/SETUP.md#model-routing) |
 | Manage API keys and saved logins | [Credentials](docs/CREDENTIALS.md) |
 | Change mounts, environment, persistence, or container access | [Sandbox configuration](docs/SANDBOX.md) |
 | Build custom images or run checks | [Development](docs/DEVELOPMENT.md) |

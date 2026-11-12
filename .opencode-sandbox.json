@@ -9,7 +9,7 @@
     }
   },
   "workspace": ".",
-  "containers": true,
+  "containers": "host",
   "verify": {
     "image": "localhost/opencode2-verify:latest",
     "network": "none",
@@ -23,7 +23,7 @@
       "config": "jq empty container-config.json container-config.schema.json examples/*.example",
       "launcher": "./tests/launcher-env.test.py",
       "broker": "./tests/verify-broker.test.py",
-      "plugin": "cd plugins/model-router && node --test"
+      "image-config": "./tests/image-config.test.py"
     }
   },
   "mounts": [],

@@ -1,0 +1,238 @@
+#!/bin/sh
+# opencode-entrypoint — the sandbox image's ENTRYPOINT.
+#
+# Started as the image user (the launcher's host-socket and engine-free modes),
+# it only execs the command: those sessions behave exactly as they did before
+# the image had an entrypoint.
+#
+# Started as uid 0 (the launcher's default "nested" mode, `--user 0`), it
+# prepares the container for a rootless Podman engine and then drops to the
+# image user for good:
+#
+#   1. Verifies the image policy (opencode-setuid-policy): the only setuid files
+#      are the nested engine's newuidmap/newgidmap, and no file carries
+#      capabilities. A derived image that installs packages after the build-time
+#      policy ran is refused here rather than started with a path to uid 0.
+#   2. Delegates the container's cgroup to the image user. Without this, an
+#      inner `podman run --memory/--cpus` is accepted and silently not
+#      enforced (memory.max reads `max`). cgroup v2 only lets a cgroup enable
+#      controllers for its children while it holds no processes, and migrating
+#      a process needs write access to the common ancestor, so this must run
+#      as root before the drop: every process (the --init reaper included)
+#      moves to the leaf /init, the root enables the controllers, and this
+#      shell moves itself to /agent/self, a subtree owned by the image user.
+#   3. Points HOME/USER/LOGNAME at the image user (Podman set root's) and hands
+#      the terminal, if any, to that user.
+#   4. Checks the data volume, which nested mode mounts without :U, is writable
+#      by the image user.
+#   5. Drops to the image user with setpriv: real/effective/saved ids, its
+#      supplementary groups, and only the capabilities the launcher configured
+#      on the inheritable and ambient sets. Changing uid away from 0 clears the
+#      permitted and effective sets. The bounding set is left as the launcher
+#      gave it: setuid newuidmap/newgidmap need CAP_SYS_ADMIN in it to write an
+#      inner user namespace's id map, and no-new-privileges cannot be set
+#      because it would disable that setuid bit. Every other setuid/setgid bit
+#      was stripped from the image for this reason (opencode-setuid-policy).
+#   6. Runs the image's loader, which applies the launcher's agent environment
+#      file after the drop and execs the command. The file is mounted only in
+#      nested mode; the prelude itself never reads project-supplied values.
+#
+# Any failure in the root path stops the container: a nested engine whose
+# resource limits are silently ignored is worse than none.
+#
+# Commands are called by absolute path so a workspace-supplied PATH cannot
+# redirect them. The incoming PATH is saved and restored only for the user's
+# own command.
+#
+# The image build substitutes the @...@ values.
+set -eu
+
+IMAGE_UID=@USER_UID@
+IMAGE_GID=@USER_GID@
+NESTED_PODMAN=@NESTED_PODMAN@
+
+# The launcher's read-only agent environment file and its loader. Both are
+# launcher- and image-owned fixed paths, never supplied by the workspace.
+AGENT_ENV=/run/opencode/agent-env
+AGENT_ENV_LOADER=/usr/local/libexec/opencode-agent-env
+
+# The capabilities this prelude will put on the agent. The launcher only ever
+# names these, and passes the variable even when the list is empty to override
+# any image ENV, but an image or a hand-written `podman run -e` can name
+# anything at all; setpriv would then apply it. Kept in step with the
+# launcher's ALLOWED_CAPABILITIES by tests/image-config.test.py.
+ALLOWED_CAPABILITIES="NET_RAW NET_BIND_SERVICE NET_ADMIN NET_BROADCAST SYS_NICE IPC_LOCK SYS_RESOURCE"
+
+saved_path=${PATH:-}
+PATH=/usr/sbin:/usr/bin
+export PATH
+
+if [ "$(/usr/bin/id -u)" != 0 ]; then
+    PATH=$saved_path
+    export PATH
+    exec "$@"
+fi
+
+die() {
+    printf 'opencode-entrypoint: %s\n' "$*" >&2
+    exit 1
+}
+
+[ "$#" -gt 0 ] || die "no command to run"
+
+# The image's setuid/setgid policy, re-checked before this container is handed
+# its root. opencode-setuid-policy enforces it at build time, but a derived
+# image can install packages afterwards, and every extra setuid file or file
+# capability is a path to container root. `find / -xdev` skips the workspace,
+# data and engine volumes. Measured in the image this Containerfile builds:
+# about 0.04 s for the setuid find and 0.05 s for the getcap sweep below.
+setuid_files=$(/usr/bin/find / -xdev -type f -perm /6000 | /usr/bin/sort)
+if [ "$NESTED_PODMAN" = 1 ]; then
+    expected_setuid=$(printf '%s\n' /usr/bin/newgidmap /usr/bin/newuidmap)
+else
+    expected_setuid=""
+fi
+if [ "$setuid_files" != "$expected_setuid" ]; then
+    die "the image has unexpected setuid/setgid files (expected ${expected_setuid:-none}):
+$setuid_files
+run /usr/local/libexec/opencode-setuid-policy $NESTED_PODMAN after installing packages in a derived image"
+fi
+
+# File capabilities are the other way a derived image can hand out privileges
+# this policy did not grant. Every executable on the image's own filesystem is
+# asked, from / down: a capability set on a file outside /usr, /opt or /etc is
+# caught too. `find / -xdev` skips the workspace, data and engine volumes.
+# getcap is required: an image without it cannot be verified, so its absence
+# refuses the start rather than silently skipping the sweep.
+if [ ! -x /usr/sbin/getcap ]; then
+    die "the image has no /usr/sbin/getcap (libcap), so its file capabilities cannot be verified; rebuild the image with libcap installed"
+fi
+file_capabilities=$(/usr/bin/find / -xdev -type f -perm /111 -exec /usr/sbin/getcap {} + 2>/dev/null || :)
+if [ -n "$file_capabilities" ]; then
+    die "the image has file capabilities, which this sandbox does not grant:
+$file_capabilities"
+fi
+
+if [ "$NESTED_PODMAN" = 1 ]; then
+    cg=/sys/fs/cgroup
+    [ -f "$cg/cgroup.controllers" ] \
+        || die "cgroup v2 is not mounted at $cg; the nested engine needs a private cgroup v2 namespace"
+    [ -w "$cg/cgroup.procs" ] \
+        || die "$cg is not writable; a root start is for the launcher's nested mode (--cap-add SYS_ADMIN --security-opt systempaths=unconfined); start as the image user otherwise"
+
+    /usr/bin/mkdir -p "$cg/init" "$cg/agent"
+    # Re-read until empty: a process forked mid-move lands in the old cgroup.
+    attempts=0
+    while :; do
+        pids=$(/usr/bin/cat "$cg/cgroup.procs")
+        [ -n "$pids" ] || break
+        attempts=$((attempts + 1))
+        [ "$attempts" -le 10 ] || die "unable to empty the container's root cgroup"
+        for pid in $pids; do
+            echo "$pid" > "$cg/init/cgroup.procs" 2>/dev/null || :
+        done
+    done
+
+    # Enable whichever of the controllers the host delegated. A controller the
+    # host withheld makes the matching inner limit fail loudly in crun rather
+    # than be ignored, so its absence is reported, not fatal.
+    wanted="cpu memory pids"
+    enable=""
+    for controller in $wanted; do
+        if /usr/bin/grep -qw "$controller" "$cg/cgroup.controllers"; then
+            enable="$enable +$controller"
+        else
+            printf 'opencode-entrypoint: warning: the host did not delegate the %s cgroup controller; inner containers cannot be limited by it\n' \
+                "$controller" >&2
+        fi
+    done
+    if [ -n "$enable" ]; then
+        echo "$enable" > "$cg/cgroup.subtree_control" \
+            || die "unable to enable cgroup controllers ($enable) at $cg"
+    fi
+    /usr/bin/mkdir -p "$cg/agent/self"
+    echo "$$" > "$cg/agent/self/cgroup.procs" \
+        || die "unable to move into the delegated cgroup $cg/agent/self"
+    if [ -n "$enable" ]; then
+        echo "$enable" > "$cg/agent/cgroup.subtree_control" \
+            || die "unable to enable cgroup controllers ($enable) at $cg/agent"
+    fi
+    # Delegate only the directory and its three control files, per the kernel's
+    # cgroup v2 delegation guidance; a recursive chown would hand the image
+    # user every process's cgroup, including ones it must not manage.
+    for delegated in "$cg/agent" "$cg/agent/self"; do
+        /usr/bin/chown "$IMAGE_UID:$IMAGE_GID" \
+            "$delegated" \
+            "$delegated/cgroup.procs" \
+            "$delegated/cgroup.threads" \
+            "$delegated/cgroup.subtree_control" \
+            || die "unable to delegate $delegated to uid $IMAGE_UID"
+    done
+fi
+
+entry=$(/usr/bin/getent passwd "$IMAGE_UID") || die "image user uid $IMAGE_UID has no passwd entry"
+name=${entry%%:*}
+home=$(printf '%s\n' "$entry" | /usr/bin/cut -d: -f6)
+HOME=$home
+USER=$name
+LOGNAME=$name
+export HOME USER LOGNAME
+
+# Podman creates the console owned by the container's starting user; hand it
+# over so tools that reopen the terminal by name keep working after the drop.
+if [ -t 0 ]; then
+    tty_path=$(/usr/bin/tty) && /usr/bin/chown "$IMAGE_UID" "$tty_path" 2>/dev/null || :
+fi
+
+# Nested mode mounts the data volume without :U, because its root start would
+# chown the user's data to root. A volume first created by another user is
+# therefore unwritable here; name it and how to fix it rather than fail later
+# inside the runtime. Test as the image user, not as root.
+if [ -n "${OPENCODE_DATA_MOUNT:-}" ]; then
+    if ! /usr/bin/setpriv --reuid "$IMAGE_UID" --regid "$IMAGE_GID" --init-groups \
+        /usr/bin/test -w "$OPENCODE_DATA_MOUNT"; then
+        volume=${OPENCODE_DATA_VOLUME:-}
+        if [ -n "$volume" ]; then
+            hint="run 'podman volume rm $volume' to start fresh, or set its ownership to $IMAGE_UID:$IMAGE_GID once"
+        else
+            hint="set ownership of $OPENCODE_DATA_MOUNT to $IMAGE_UID:$IMAGE_GID once"
+        fi
+        die "the OpenCode data mount $OPENCODE_DATA_MOUNT is not writable by uid $IMAGE_UID (volume ${volume:-unknown}): $hint"
+    fi
+fi
+
+PATH=$saved_path
+export PATH
+
+# The capabilities the launcher configured, on the inheritable set so they
+# survive the uid change and on the ambient set so they survive the exec into
+# the agent. `-all` first: exactly the configured set, never a remainder of the
+# pre-drop process's own. Every name is checked against the sandbox's allow-list
+# first: the launcher writes this list, but an image ENV or a hand-written
+# `podman run -e` can supply anything, and setpriv would apply it.
+capability_ops=-all
+configured_capabilities=${OPENCODE_AGENT_CAPABILITIES:-}
+if [ -n "$configured_capabilities" ]; then
+    spaced=$(printf '%s' "$configured_capabilities" | /usr/bin/tr ',' ' ')
+    # shellcheck disable=SC2086  # the launcher writes comma-separated names
+    for capability in $spaced; do
+        case " $ALLOWED_CAPABILITIES " in
+            *" $capability "*) ;;
+            *)
+                die "the image asked for capability $capability, which this sandbox does not grant (allowed: $ALLOWED_CAPABILITIES)"
+                ;;
+        esac
+        lowered=$(printf '%s' "$capability" | /usr/bin/tr '[:upper:]' '[:lower:]')
+        capability_ops="$capability_ops,+$lowered"
+    done
+fi
+
+# Apply the launcher's agent environment file after the drop. The loader is
+# image-owned; a nested run with no agent variables has no file, and the
+# command runs unchanged.
+if [ -f "$AGENT_ENV" ]; then
+    set -- "$AGENT_ENV_LOADER" "$@"
+fi
+
+exec /usr/bin/setpriv --reuid "$IMAGE_UID" --regid "$IMAGE_GID" --init-groups \
+    --inh-caps="$capability_ops" --ambient-caps="$capability_ops" -- "$@"

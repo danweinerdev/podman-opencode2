@@ -1,18 +1,19 @@
 # Containerfile — OpenCode2 container: a Fedora 44 runtime for the OpenCode2 CLI
-# with the code-graph / debug / search MCP servers, the SDD planning CLI, and a native
-# v2 model-router plugin baked in.
+# with the code-graph / debug / search MCP servers and the ai-devtools `aid`
+# CLI + plugin baked in.
 #
 # Multi-stage build. Only compiled binaries and plugin/skill assets are carried
 # into the final image; every Go/Rust/Cargo toolchain lives in throwaway
 # builder stages, so the runtime image ships no dev toolchain.
 #
 # Final-image layout:
-#   /opt/mcp/bin/<code-graph-mcp|debug-mcp|search-mcp|sdd>  MCP + SDD binaries (on PATH)
-#   /opt/opencode/plugins/<code-graph|debug|search|sdd>    OpenCode skills/plugin assets
-#   /opt/opencode/plugins/model-router            native v2 model-router plugin
+#   /opt/mcp/bin/<code-graph-mcp|debug-mcp|search-mcp|aid>  MCP + aid binaries (on PATH)
+#   /opt/opencode/plugins/<code-graph|debug|search>         OpenCode skills/plugin assets
+#   /opt/opencode/plugins/ai-devtools                       aid plugin (agents, skills, TUI)
+#   /opt/opencode/plugins/sandbox/skills                    sandbox + verify skills
 #   /opt/opencode/sandbox/                         launcher + config templates
 #   /opt/opencode/config/opencode/opencode.json    optional runtime-mounted local providers
-#   /opt/opencode/config/opencode/agent/*.md      baked agent definitions
+#   /opt/opencode/config/opencode/agent/          root-owned agent dir (plugin registers agents)
 #   /opt/opencode/config/opencode/command/*.md    baked slash commands
 #   /etc/opencode/container-config.json           baked OPENCODE_CONFIG
 #   /etc/opencode/container-config.schema.json    pinned config schema
@@ -21,27 +22,43 @@
 # (~/.local/share|state, ~/.cache); no host state is assumed.
 
 # ---------------------------------------------------------------------------
-# Stage 1: exact Go toolchain (1.26.5) for the sdd CLI
+# Stage 1: exact Go toolchain (1.26.10) for the aid CLI
 # ---------------------------------------------------------------------------
-FROM docker.io/library/golang:1.26.5-bookworm AS sdd-builder
+FROM docker.io/library/golang:1.26.10-bookworm AS aid-builder
 
 ENV GOFLAGS=-buildvcs=false
 
-# Clone the pinned sdd-planner, build the single `sdd` binary, and stage the
-# portable .opencode-plugin tree (plugin.json + skills/ + shared/) alongside it.
-# Its collaboration prompts are rendered by the skills into the restricted
-# native workers, so the separate Claude-oriented agent catalog is not copied.
-ARG SDD_PLANNER_REF=7a741799aa757ea8e602bff2b2dd7746f1dd5b4e
+# Clone the pinned ai-devtools, build the single `aid` binary, and stage the
+# plugin's runtime files: package.json plus everything its `files` list ships.
+# The build passes -X main.version=<package.json version>, the same ldflag its
+# Makefile release target uses, so `aid version` reports the plugin version.
+ARG AI_DEVTOOLS_REF=abba5934875176cdc895d9d2ec520b7e276f18f3
+# The agent roster the pinned ai-devtools ref must define. AI_DEVTOOLS_REF
+# bumps fail here when they add or remove an agent; keep this list in step with
+# BAKED_AGENT_IDS in bin/opencode-container, which tests/image-config.test.py
+# enforces.
+ARG AI_DEVTOOLS_AGENTS="aid-craftsman aid-creator aid-designer aid-explorer aid-mechanic aid-oracle aid-orchestrator aid-sage"
 RUN set -eux; \
     git clone --filter=blob:none --no-tags \
-        https://github.com/danweinerdev/claude-sdd-planner.git /tmp/claude-sdd-planner; \
-    cd /tmp/claude-sdd-planner; \
-    git fetch --depth 1 origin "${SDD_PLANNER_REF}"; \
+        https://github.com/danweinerdev/ai-devtools.git /tmp/ai-devtools; \
+    cd /tmp/ai-devtools; \
+    git fetch --depth 1 origin "${AI_DEVTOOLS_REF}"; \
     git checkout FETCH_HEAD; \
-    mkdir -p /opt/build/bin; \
-    go build -o /opt/build/bin/sdd ./cmd/sdd; \
-    mkdir -p /opt/build/sdd-plugin; \
-    cp -a .opencode-plugin /opt/build/sdd-plugin/
+    actual_agents="$(cd dist/opencode/agents && for f in *.md; do printf '%s\n' "${f%.md}"; done | sort)"; \
+    expected_agents="$(printf '%s\n' ${AI_DEVTOOLS_AGENTS} | sort)"; \
+    if [ "${actual_agents}" != "${expected_agents}" ]; then \
+        printf 'ai-devtools agent roster changed at AI_DEVTOOLS_REF=%s\nexpected: %s\nactual: %s\n' \
+            "${AI_DEVTOOLS_REF}" "${expected_agents}" "${actual_agents}" >&2; \
+        exit 1; \
+    fi; \
+    version="$(sed -n 's/^ *"version": *"\([^"]*\)".*/\1/p' package.json | head -n 1)"; \
+    mkdir -p /opt/build/bin /opt/build/ai-devtools-plugin/.opencode-plugin; \
+    CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${version}" \
+        -o /opt/build/bin/aid ./cmd/aid; \
+    cp -a package.json index.js tui.tsx skills agents dist \
+        skills-manifest.json agents-manifest.json /opt/build/ai-devtools-plugin/; \
+    cp -a .opencode-plugin/src .opencode-plugin/tui.tsx \
+        /opt/build/ai-devtools-plugin/.opencode-plugin/
 
 # ---------------------------------------------------------------------------
 # Stage 2: builder-only Rust toolchains for the Rust MCP servers
@@ -124,14 +141,14 @@ FROM docker.io/library/fedora:44
 ARG USER_UID=1000
 ARG USER_GID=1000
 ARG USERNAME=dev
-ARG OPENCODE2_VERSION=2.0.22
+ARG OPENCODE2_VERSION=2.2.6
 # This opaque cache key records only the launcher-validated host catalog's
 # digest. The catalog bytes are never available to the image build.
 ARG LOCAL_PROVIDERS_SHA256=absent
 
-# Runtime + debug utilities. Node 24 powers the OpenCode2 CLI npm package and the
-# model-router plugin; lldb ships the lldb-dap provider the debug MCP server
-# spawns. No Go/Rust/Cargo toolchain is installed here.
+# Runtime + debug utilities. Node 24 powers the OpenCode2 CLI npm package; lldb
+# ships the lldb-dap provider the debug MCP server spawns. No Go/Rust/Cargo
+# toolchain is installed here.
 RUN dnf install -y --setopt=install_weak_deps=False \
         ca-certificates curl wget git gnupg2 \
         nodejs24 nodejs24-npm \
@@ -141,8 +158,11 @@ RUN dnf install -y --setopt=install_weak_deps=False \
         python3 python3-pip \
         shadow-utils \
         openssl-libs zlib \
+        libcap \
     && command -v git >/dev/null \
     && command -v shellcheck >/dev/null \
+    && command -v getcap >/dev/null \
+    && command -v setcap >/dev/null \
     && git --version \
     && shellcheck --version \
     && dnf clean all; \
@@ -170,9 +190,87 @@ RUN set -eux; \
     useradd --uid "${USER_UID}" --gid "${USER_GID}" \
         --create-home --shell /bin/bash "${USERNAME}"
 
+# Mount point of the launcher's per-project data volume, owned by the image
+# user: a fresh named volume copies this ownership up. Nested mode relies on
+# that, because it starts the container as root, where the volume's :U option
+# would chown the volume to root rather than to the image user.
+RUN install -d -m 0755 -o "${USER_UID}" -g "${USER_GID}" /var/lib/opencode-data
+
+# --- Nested rootless Podman engine (default on) ------------------------------
+# NESTED_PODMAN=1 ships a rootless Podman engine the launcher's default
+# `"containers": "nested"` mode starts: the agent gets its own image store,
+# network namespace and cgroup subtree, with no host engine socket. 0 builds
+# the engine-free image. A host that cannot grant the nested mode its
+# CAP_SYS_ADMIN in the bounding set, or its subordinate ids, is refused with a
+# pointer to `"containers": false` or "host": without CAP_SYS_ADMIN, newuidmap
+# cannot map an inner user namespace.
+#
+# The engine is rootless inside the agent container, so inner root is the
+# agent's own uid and never the outer root that owns the baked policy. Its
+# subordinate ids are every id of the outer 65,536-id user namespace except 0
+# and the user's own (the podman/stable split: 1:(UID-1) and
+# (UID+1):(65535-UID)); a USER_UID above 65535 takes the whole 1:65535. The
+# useradd above allocates a 524288-based range that cannot exist inside a
+# 65,536-id namespace, so these files are replaced, not appended to. The inner
+# graph root lives on the launcher's per-project volume at
+# /var/lib/opencode-containers (native overlay; no /dev/fuse needed).
+ARG NESTED_PODMAN=1
+RUN set -eux; \
+    case "${NESTED_PODMAN}" in 0|1) ;; *) echo "NESTED_PODMAN must be 0 or 1" >&2; exit 1 ;; esac; \
+    if [ "${NESTED_PODMAN}" = 1 ]; then \
+        dnf install -y --setopt=install_weak_deps=False \
+            podman crun conmon netavark aardvark-dns passt util-linux; \
+        dnf clean all; \
+        command -v setpriv >/dev/null; \
+        subid_ranges() { \
+            id="$1"; \
+            if [ "${id}" -le 0 ]; then \
+                echo "nested Podman needs a non-root image user (got id ${id})" >&2; exit 1; \
+            elif [ "${id}" -gt 65535 ]; then \
+                printf '%s:1:65535\n' "${USERNAME}"; \
+            else \
+                if [ "${id}" -gt 1 ]; then printf '%s:1:%s\n' "${USERNAME}" "$((id - 1))"; fi; \
+                if [ "${id}" -lt 65535 ]; then printf '%s:%s:%s\n' "${USERNAME}" "$((id + 1))" "$((65535 - id))"; fi; \
+            fi; \
+        }; \
+        subid_ranges "${USER_UID}" > /etc/subuid; \
+        subid_ranges "${USER_GID}" > /etc/subgid; \
+        chmod 0644 /etc/subuid /etc/subgid; \
+        printf '%s\n' \
+            '# Rootless engine store for the image user: the launcher mounts a' \
+            '# per-project volume at /var/lib/opencode-containers in nested mode.' \
+            '[storage]' \
+            'driver = "overlay"' \
+            'rootless_storage_path = "/var/lib/opencode-containers/storage"' \
+            > /etc/containers/storage.conf; \
+        install -d -m 0700 -o "${USER_UID}" -g "${USER_GID}" /var/lib/opencode-containers; \
+    fi
+
+# The ENTRYPOINT prelude: execs the command unchanged for a non-root start;
+# for a root start (nested mode only) delegates the cgroup, re-checks the
+# image's setuid/setgid policy, and drops to the image user. opencode-agent-env
+# is the image-owned loader that applies the launcher's read-only agent
+# environment file after that drop. The setuid policy strips every
+# setuid/setgid bit except the nested engine's newuidmap/newgidmap (none at all
+# with NESTED_PODMAN=0).
+COPY image/opencode-entrypoint image/opencode-setuid-policy image/opencode-agent-env /usr/local/libexec/
+RUN set -eux; \
+    sed -i \
+        -e "s/@USER_UID@/${USER_UID}/" \
+        -e "s/@USER_GID@/${USER_GID}/" \
+        -e "s/@NESTED_PODMAN@/${NESTED_PODMAN}/" \
+        /usr/local/libexec/opencode-entrypoint; \
+    if grep -q '@[A-Z_]*@' /usr/local/libexec/opencode-entrypoint; then exit 1; fi; \
+    chmod 0755 /usr/local/libexec/opencode-entrypoint \
+        /usr/local/libexec/opencode-setuid-policy \
+        /usr/local/libexec/opencode-agent-env; \
+    printf '%s\n' "${NESTED_PODMAN}" > /etc/opencode-nested-podman; \
+    chmod 0444 /etc/opencode-nested-podman; \
+    /usr/local/libexec/opencode-setuid-policy "${NESTED_PODMAN}"
+
 # --- Baked binaries (on PATH via /opt/mcp/bin) -------------------------------
 RUN mkdir -p /opt/mcp/bin
-COPY --from=sdd-builder  /opt/build/bin/sdd            /opt/mcp/bin/sdd
+COPY --from=aid-builder  /opt/build/bin/aid             /opt/mcp/bin/aid
 COPY --from=mcp-builder  /opt/build/bin/code-graph-mcp /opt/mcp/bin/code-graph-mcp
 COPY --from=mcp-builder  /opt/build/bin/debug-mcp      /opt/mcp/bin/debug-mcp
 COPY --from=mcp-builder  /opt/build/bin/search-mcp     /opt/mcp/bin/search-mcp
@@ -183,14 +281,13 @@ RUN mkdir -p /opt/opencode/plugins
 COPY --from=mcp-builder /opt/build/code-graph-plugin/opencode-plugin /opt/opencode/plugins/code-graph
 COPY --from=mcp-builder /opt/build/debug-plugin/.opencode-plugin        /opt/opencode/plugins/debug
 COPY --from=mcp-builder /opt/build/search-plugin/.opencode-plugin       /opt/opencode/plugins/search
-COPY --from=sdd-builder /opt/build/sdd-plugin/.opencode-plugin          /opt/opencode/plugins/sdd
-
-# The native v2 model-router plugin, built from this repository. Its runtime
-# dependency (@opencode/plugin@2.0.22, pinned in package.json) is installed
-# here so `import "@opencode/plugin"` resolves in-container.
-COPY plugins/model-router /opt/opencode/plugins/model-router
-RUN cd /opt/opencode/plugins/model-router \
-    && npm install --omit=dev --ignore-scripts --no-audit --no-fund
+# The ai-devtools plugin registers its own agents and skills; the host 2.2.6
+# runtime supplies @opencode/plugin and solid-js to plugins, so it needs no
+# installed dependencies.
+COPY --from=aid-builder /opt/build/ai-devtools-plugin /opt/opencode/plugins/ai-devtools
+# Sandbox how-to skills stay baked as plain skill directories and are listed in
+# container-config.json's `skills`.
+COPY plugins/sandbox/skills /opt/opencode/plugins/sandbox/skills
 
 # Host-side sandbox templates are readable by the baked setup skill. They are
 # copied into a mounted workspace for the user to run after leaving the image.
@@ -198,9 +295,10 @@ RUN mkdir -p /opt/opencode/sandbox
 COPY bin/opencode-container /opt/opencode/sandbox/opencode-container
 # The verification broker. A read-only role that is granted a command runner is
 # granted exactly this path, so its location is part of the permission contract:
-# moving it means updating agents/*.md. It owns every container-engine decision a
-# worker can make, which is why it is baked read-only-executable here rather than
-# supplied by a workspace that a reviewed change could edit.
+# moving it means updating whatever grants that runner. It owns every
+# container-engine decision a worker can make, which is why it is baked
+# read-only-executable here rather than supplied by a workspace that a reviewed
+# change could edit.
 COPY bin/oc2-verify /opt/opencode/sandbox/oc2-verify
 COPY examples/opencode-sandbox.json.example /opt/opencode/sandbox/.opencode-sandbox.json.example
 COPY examples/local-providers.json.example /opt/opencode/sandbox/local-providers.json.example
@@ -214,15 +312,13 @@ RUN chmod 0755 /opt/opencode/sandbox/opencode-container /opt/opencode/sandbox/oc
 RUN touch /.opencode-sandbox && chmod 0444 /.opencode-sandbox
 
 # --- Baked agents + commands under XDG_CONFIG_HOME ---------------------------
-# Agent markdown definitions carry their own prompts and permissions; the
-# model-router plugin assigns each a model. The SDD skills render their bundled
-# collaboration prompts into these native workers instead of installing a
-# second, less-restricted agent catalog.
+# The ai-devtools plugin registers its own agents at load time, so no agent
+# markdown is baked here; the directory stays because it is part of the
+# root-owned XDG config tree.
 RUN mkdir -p /opt/opencode/config/opencode/agent /opt/opencode/config/opencode/command
-COPY plugins/model-router/agents/*.md /opt/opencode/config/opencode/agent/
-# Keep the runtime bind-mount destination a file even when no local catalog is
-# present. This contains no provider configuration.
-RUN touch /opt/opencode/config/opencode/opencode.json \
+# The runtime bind-mount destination stays a file of valid JSON even when no
+# local catalog is present, so the 2.2.6 runtime does not log it as malformed.
+RUN printf '{}\n' > /opt/opencode/config/opencode/opencode.json \
     && chmod 0644 /opt/opencode/config/opencode/opencode.json
 
 # code-graph and search slash commands become OpenCode commands.
@@ -258,7 +354,14 @@ ENV OPENCODE_CONFIG=/etc/opencode/container-config.json \
 # Changing the host catalog changes this metadata layer when a sandbox image is
 # rebuilt, without copying the catalog's contents into the image.
 LABEL io.opencode.local-providers-sha256="${LOCAL_PROVIDERS_SHA256}"
+# The launcher refuses `"containers": "nested"` unless the image says "1".
+LABEL io.opencode.nested-podman="${NESTED_PODMAN}"
+# The launcher refuses `"containers": "nested"` unless the image says "1": an
+# image built before project-env delivery would run the agent without its
+# configured variables.
+LABEL io.opencode.agent-env="1"
 
 USER ${USERNAME}
 WORKDIR /home/${USERNAME}
+ENTRYPOINT ["/usr/local/libexec/opencode-entrypoint"]
 CMD ["opencode2", "--standalone", "--auto"]

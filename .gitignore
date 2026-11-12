@@ -12,7 +12,12 @@ __pycache__/
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
-*.sdd-lock
 
 # Logs
 *.log
+
+# Legacy sdd lock files; stays ignored until the .plans/ tree is cleaned up.
+*.sdd-lock
+
+# aid task graph and state record (local working state for agent-driven work)
+.aid/

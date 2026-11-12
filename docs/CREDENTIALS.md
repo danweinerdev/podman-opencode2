@@ -3,7 +3,7 @@
 [Back to README](../README.md)
 
 Use Podman secrets, exported provider variables, or an interactive provider
-login inside OpenCode. Keep credentials out of router and local-provider JSON.
+login inside OpenCode. Keep credentials out of `aid.json` and local-provider JSON.
 
 ## Add an API key
 
@@ -76,6 +76,15 @@ the host. A selected Podman secret takes priority over a host variable or an
 `env.set` value. Forwarded values are not included in launcher process arguments.
 Podman secrets also avoid storing key values in the container's saved environment
 configuration. Processes inside the container can still use the supplied keys.
+
+In the default nested mode those forwarded values also stay out of the
+container's own start-up environment. The launcher writes them, with `env.pass`
+and `env.set` values, to a launcher-owned 0600 file in a private directory under
+`$XDG_RUNTIME_DIR` (the system temporary directory when that is unusable), mounts
+it read-only, and the image applies it to the agent process after the privilege
+drop. The launcher waits for the container and removes the file when the run
+ends. A `SIGKILL` to the launcher skips that cleanup, so a killed launch can
+leave the file behind until you remove the directory yourself.
 
 ## Saved logins
 

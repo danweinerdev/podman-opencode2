@@ -1,0 +1,43 @@
+#!/bin/sh
+# opencode-setuid-policy — enforce the image's setuid/setgid policy.
+#
+# Usage: opencode-setuid-policy 1|0
+#
+# Clears the setuid and setgid bits from every regular file on the root
+# filesystem. With 1 (the image ships the nested Podman engine), it then sets
+# setuid on exactly newuidmap and newgidmap, which a rootless engine needs to
+# write its user namespace's id maps; Fedora ships them with file capabilities,
+# which do not survive into the image layer.
+#
+# Why strip everything else, always: nothing in the sandbox uses sudo, su,
+# passwd, mount, and the rest (the image user has no password, and the launcher
+# never relies on them). Each one is a path to container root, which can
+# rewrite the root-owned baked policy (/opt/opencode, /etc/opencode). In nested
+# mode the bounding set also holds CAP_SYS_ADMIN, which every setuid-root binary
+# would inherit. Derived images re-run this after installing packages.
+set -eu
+
+case "${1:-}" in
+    0|1) nested=$1 ;;
+    *) printf 'usage: %s 1|0\n' "$0" >&2; exit 2 ;;
+esac
+
+find / -xdev -type f -perm /6000 -exec chmod ug-s {} +
+
+if [ "$nested" = 1 ]; then
+    for helper in /usr/bin/newuidmap /usr/bin/newgidmap; do
+        [ -x "$helper" ] || { printf '%s: missing %s\n' "$0" "$helper" >&2; exit 1; }
+        chmod 4755 "$helper"
+    done
+fi
+
+remaining=$(find / -xdev -type f -perm /6000 | sort)
+if [ "$nested" = 1 ]; then
+    expected=$(printf '%s\n' /usr/bin/newgidmap /usr/bin/newuidmap)
+else
+    expected=""
+fi
+if [ "$remaining" != "$expected" ]; then
+    printf '%s: unexpected setuid/setgid files:\n%s\n' "$0" "$remaining" >&2
+    exit 1
+fi

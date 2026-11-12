@@ -48,8 +48,8 @@ reachable from Podman.
 ## Select the model
 
 Restart the launcher. The example model appears as `local/my-model` in the model
-picker. To assign it to workers, use that same ID as a `model` in the
-[model router](MODEL_ROUTER.md).
+picker. To run an agent on it, use that same ID in a profile in
+[`aid.json`](SETUP.md#model-routing).
 
 ## What happens when the file changes
 

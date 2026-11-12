@@ -25,13 +25,12 @@
 #   tests/launcher-env.test.py                     python3, git, jq (mocked podman)
 #   jq empty container-config.json ...             jq
 #   npx --yes ajv-cli@5 validate ...               nodejs24 + npm (network at run time)
-#   cd plugins/model-router && npm test            nodejs24 (node --test) + node_modules
-#                                                  supplied by the copied workspace
+#   tests/image-config.test.py                     python3
 #   ruff check . / mypy                            pinned in requirements.txt
 #
-# tests/model-router-dispatch.test.py is NOT runnable here by design: it drives a
-# real container engine, which this image does not have. The broker must report a
-# check it cannot run as unavailable, never as passed.
+# A check that drives a real container engine is not runnable in this image by
+# design: it has none. The broker must report a check it cannot run as
+# unavailable, never as passed.
 #
 # Build (context is the repository root; .containerignore already excludes
 # .git, caches, node_modules, and test trees):
@@ -43,9 +42,9 @@
 FROM docker.io/library/fedora:44
 
 # --- Toolchain ---------------------------------------------------------------
-# nodejs24 matches the plugin's engines.node (>=22) and the runtime image's own
-# Node major version, so plugin tests see the same parser they see in the agent
-# container. Weak deps are off to keep this image small and predictable.
+# nodejs24 matches the runtime image's own Node major version; node + npm are
+# here for the npx ajv check. Weak deps are off to keep this image small and
+# predictable.
 RUN dnf install -y --setopt=install_weak_deps=False \
         ca-certificates \
         git jq tar gzip xz findutils which diffutils \

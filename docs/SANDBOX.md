@@ -10,7 +10,7 @@ Start small and add only the settings you need:
   "schema_version": 1,
   "image": "opencode2:latest",
   "workspace": ".",
-  "containers": false,
+  "containers": "nested",
   "seccomp": null,
   "env": { "set": { "TZ": "UTC" } }
 }
@@ -18,7 +18,7 @@ Start small and add only the settings you need:
 
 Restart the launcher after changing settings. The
 [full example](../examples/opencode-sandbox.json.example) shows more options;
-adapt its model routes, secret selections, and volume name before using it.
+adapt its secret selections and volume name before using it.
 
 ## Settings reference
 
@@ -29,27 +29,36 @@ adapt its model routes, secret selections, and volume name before using it.
 | `build` | Optional local build: `containerfile`, `context`, and string-valued `args`. The Containerfile defaults to `Containerfile`; context defaults to its directory. |
 | `workspace` | Directory to mount; defaults to the launch directory. |
 | `workdir` | Starting directory inside the workspace. Relative paths are supported. |
-| `containers` | Share a host container-engine socket; defaults to `false`. |
-| `mounts` | Extra mounts with `source` and optional `target`. A relative source resolves against the workspace; an omitted target mirrors the absolute source path. |
+| `containers` | Container-engine access: `"nested"` (the default; a rootless engine inside the sandbox), `"host"` (mount the host's Podman/Docker socket), or `false` (no engine). `true` is an alias for `"nested"`. See [container access](#container-access). |
+| `mounts` | Extra mounts with `source` and optional `target`. A relative source resolves against the workspace; an omitted target mirrors the absolute source path. A target may not shadow a baked config/plugin path or a container system path; see [environment boundaries](#environment-boundaries). |
 | `agents` | Directory of Markdown agent definitions to add to the container's own agents. Defaults to `.agents`; `false` skips them. See [project agent definitions](#project-agent-definitions). |
 | `env.pass` | Host variable names to forward when set. |
 | `env.set` | Literal environment values. |
 | `provider_secrets` | Keys this project can use; see [credentials](CREDENTIALS.md). |
 | `persistence.data_volume` | Override the project's saved-state volume. An empty string disables persistence. |
-| `model_router` | Project model overrides; see [model router](MODEL_ROUTER.md). |
 | `network` | Optional Podman network mode, such as `slirp4netns`. |
-| `capabilities` | Extra capabilities, such as `SYS_PTRACE` for debugging. |
+| `capabilities` | Extra capabilities, drawn from a fixed allow-list. See [capabilities](#capabilities). |
 | `seccomp` | Main-sandbox syscall policy. Missing or `null` keeps the container engine default; `"unconfined"` disables seccomp filtering; any other nonempty string is a profile path resolved from this config's directory. |
 | `runtime_args` | Only `--add-host=`, `--pids-limit=`, and `--ulimit=` entries are allowed. |
 | `command` | Defaults to `["opencode2", "--standalone"]`. The image built
   from this repository ships its own `CMD` with `--auto`; see
   [permission posture](#permission-posture). |
 
+Model routing is not a sandbox setting. The ai-devtools plugin reads
+`.opencode/aid.json` from the workspace, or the global file the launcher mounts;
+see [model routing](SETUP.md#model-routing). The global file's `guards` and
+`sensitive` rules are not a sandbox boundary: an in-container agent can write
+`.opencode/aid.json` in the workspace, which aid prefers over the read-only
+global file. A leftover `model_router` block is refused at launch with a pointer
+to `aid.json`.
+
 ## Files and Git
 
 The workspace is mounted at `/src` and at a stable project path under
 `/workspace/`. The stable path is the default working directory. Relative and
-`/src`-based workdirs are resolved beneath it.
+`/src`-based workdirs are resolved beneath it. In [host mode](#host-mode) it is
+mirrored at its canonical host path instead, because the host engine resolves
+bind paths there.
 
 Linked Git worktrees are supported: the launcher validates the `.git` pointer
 and mounts external Git metadata at its original host path.
@@ -90,48 +99,36 @@ agent carrying its own frontmatter as its prompt. Hidden files are ignored, and 
 hidden `.md` warns instead of vanishing quietly.
 
 These definitions are additions, never replacements. An id that already belongs
-to a container agent or to OpenCode itself (`review-quality`, `orchestrator`,
+to a container agent or to OpenCode itself (`aid-orchestrator`, `aid-mechanic`,
 `build`, `plan`, and the rest) stops the launch with a message: a same-id
 definition does not cleanly override, it substitutes its own prompt and
 concatenates permission rules, which silently widens the agent it shadowed.
 
 Two things to know about a new agent:
 
-- It runs on whatever its own `permissions` say. Container agents are deny-first
-  by convention; a project agent should be too, and the container cannot make it
-  so for you.
-- Only `review-*` ids are granted worker dispatch. `orchestrator` and `engineer`
-  allow `review-*` after denying everything else, so a reviewer named to that
-  convention is launchable and anything else (`migration-planner`) is not — it
-  stays selectable as a primary agent, and the launcher says so at launch.
+- It runs on whatever its own `permissions` say. The image's read-only agent,
+  `aid-explorer`, carries an edit deny; a project agent should open with a
+  deny-all too, and the container cannot make it so for you.
+- A `review-*` id is the review-lane convention. The launcher warns when one omits
+  `review-gates`; any other name still registers as an ordinary project agent.
 
 ### Contributing to a review gate
 
 A reviewer declares which review gates it feeds with `review-gates`, a list of
 `review_plan_drift`, `review_quality`, `review_spec_compliance`, or
-`review_blind_spots`. Anything else stops the launch: the review tooling closes
-on exactly those four, so a fifth name is a typo, not an extension. `[]` is a
-deliberate "advisory only"; omitting the key on a `review-*` agent warns, because
-its findings would otherwise be dropped at synthesis. The launcher prints the
-resulting contribution map at launch.
+`review_blind_spots`. Anything else stops the launch: the launcher closes on
+exactly those four, so a fifth name is a typo, not an extension. `[]` is a
+deliberate "advisory only"; omitting the key on a `review-*` agent warns because
+its findings would contribute to no gate. The launcher prints the resulting
+contribution map at launch.
 
-The primary agent merges contributions into the gate named, and two limits hold
-in both `orchestrator` and `engineer`:
+Nothing in this image acts on the gates by itself, so treat the declaration as
+project metadata until a consumer is installed. It does not make a project
+reviewer a verification lane.
 
-- **A gate never closes on project reviewers alone.** The standard lane for that
-  gate still runs, and its recorded evidence names each contributing reviewer with
-  the concrete observation it made. A project cannot substitute its own reviewer
-  for a required lane or lower what that lane requires.
-- **An advisory reviewer is not verification.** Its findings are reported, not
-  attached to a gate.
-
-A contribution never becomes a gate of its own: a phase gate records exactly four
-lane results, so project reviewers widen what a gate checks rather than adding
-lanes.
-
-To route a new agent to a model, give it an entry under `model_router.agents`:
-either its own `{"model": "provider/model-id", "variant": "..."}` or the name of a
-shared `models` entry. See [model router](MODEL_ROUTER.md).
+Project agents run on the session model unless [`aid.json`](SETUP.md#model-routing)
+maps their id to a profile; `agents` accepts any agent id, project agents
+included.
 
 This directory is the project's own `.agents`, not your home directory's: host
 `$HOME/.agents` remains unreachable from the container.
@@ -152,13 +149,158 @@ project normally gets separate state even when using a launcher installed on `PA
   This shares logins and sessions as well as preferences.
 - To discard state when the container exits, set `persistence.data_volume` to `""`.
 
-## Run containers from the sandbox
+## Container access
 
-Set `containers` to `true` and use an image with a container client.
-The development image provides one; the base image does not.
+`containers` selects how the sandbox reaches a container engine:
 
-The launcher prefers a rootless Podman socket, then a rootless or system Docker
-socket. For user Podman:
+| Value | What the sandbox gets |
+| --- | --- |
+| `"nested"` (default) | A rootless Podman engine inside the sandbox, with its own image store and no host socket. |
+| `"host"` | The host's Podman or Docker socket, mounted into the sandbox. |
+| `false` | No engine. |
+
+Nested is the default because it gives the agent containers without handing it
+the host's engine: the default exposes as little of the host as the feature
+allows. `true` is an alias for `"nested"`. The base image ships an engine, so
+every mode works without a derived image; in host mode its `podman` follows the
+socket the launcher mounts, and in nested mode it uses the engine's local store.
+
+### Nested mode
+
+This is the default. Leave `containers` out, or set it to `"nested"` (or
+`true`). The sandbox runs its own rootless Podman engine: the agent gets an image
+store, network namespace, and cgroup subtree inside the container, and the
+launcher mounts no host socket. Inner containers can mount only what the sandbox
+already has — the workspace and your `mounts` — so host paths outside the sandbox
+stay unreachable.
+
+The price is a looser outer profile than `false`:
+
+- `CAP_SYS_ADMIN` in the container's bounding set, which setuid `newuidmap`
+  needs to write an inner user namespace's id map.
+- `--security-opt systempaths=unconfined`, so `/proc/sys` is not masked
+  (crun writes `ping_group_range`).
+- `/dev/net/tun`, for pasta networking.
+- The container starts as `--user 0`; the image's entrypoint prelude delegates
+  the cgroup and then drops to the image user for good.
+
+Nested mode exposes strictly less of the host than host mode, and strictly more
+kernel surface than `false`.
+
+Every root start also verifies the image's privilege policy before the container
+gets its root: the only setuid files may be the engine's `newuidmap` and
+`newgidmap`, and no file may carry file capabilities. A derived image that
+installs packages after its build is refused, with the offending files named,
+because each extra setuid file or file capability is a path to container root.
+The check costs about 0.1 s per start: the setuid listing about 0.04 s and the
+capability sweep about 0.05 s. Both walk the whole image filesystem from `/`
+on its own device; a capability set on a file outside `/usr`, `/opt` or `/etc`
+is caught too. The image ships `getcap`, and an image without it refuses the
+start rather than skip the sweep. The launcher also pins the entrypoint at
+`/usr/local/libexec/opencode-entrypoint` by absolute path, so a derived image's
+own `ENTRYPOINT` cannot skip the prelude.
+
+`systempaths=unconfined` is the masking change with a residual surface: it
+unmasks `/proc/kcore`, `/proc/keys`, `/proc/timer_list`, and `/sys/firmware`.
+In testing the agent uid still cannot read `/proc/kcore` or `/proc/timer_list`
+(root-only, mode 0400), and the DMI and ACPI table files stay root-only;
+`/proc/keys` lists only the caller's own keyrings, and the readable
+`/sys/firmware` files are firmware and memory-map metadata. That residual
+exposure is accepted rather than worked around.
+
+Every launch checks what nested mode needs, whether the setting is explicit or
+not, and refuses to start when something is missing:
+
+- At least 65,536 subordinate uids **and** 65,536 subordinate gids for your host
+  user (`/etc/subuid` and `/etc/subgid`, or NSS). The image's id ranges are sized
+  to the sandbox's own 65,536-id user namespace. Otherwise:
+
+  ```text
+  opencode-container: containers "nested" (the default) needs at least 65536 subordinate uids for host user <user>, found <n> (see /etc/subuid); the inner engine's id ranges would not fit in the sandbox's user namespace. To launch anyway, set "containers": false in .opencode-sandbox.json for no engine, or "containers": "host" to mount the host engine socket (which exposes the host engine to the sandbox)
+  ```
+
+  The gid check reports the same with `subordinate gids` and `/etc/subgid`.
+- An image carrying `io.opencode.nested-podman="1"`, which is what
+  `NESTED_PODMAN=1` (the `Containerfile` default) labels. Derived images inherit
+  the label; an engine-free image built with `NESTED_PODMAN=0` carries `0`.
+  Otherwise:
+
+  ```text
+  opencode-container: containers "nested" (the default) needs an image built with the nested Podman engine, but image <image> does not carry io.opencode.nested-podman="1"; rebuild it with NESTED_PODMAN=1 (the Containerfile default). To launch anyway, set "containers": false in .opencode-sandbox.json for no engine, or "containers": "host" to mount the host engine socket (which exposes the host engine to the sandbox)
+  ```
+- An image carrying `io.opencode.agent-env="1"`, which every image built from
+  this `Containerfile` labels and derived images inherit. An image that predates
+  project-environment delivery would run the agent without its configured
+  variables, so it is refused:
+
+  ```text
+  opencode-container: containers "nested" (the default) needs an image that delivers the project environment after its root start, but image <image> does not carry io.opencode.agent-env="1": the image predates project-env delivery; rebuild it. To launch anyway, set "containers": false in .opencode-sandbox.json for no engine, or "containers": "host" to mount the host engine socket (which exposes the host engine to the sandbox)
+  ```
+- cgroup v2 with controllers delegated to the sandbox. The container refuses to
+  start when it is missing:
+
+  ```text
+  opencode-entrypoint: cgroup v2 is not mounted at /sys/fs/cgroup; the nested engine needs a private cgroup v2 namespace
+  opencode-entrypoint: /sys/fs/cgroup is not writable; a root start is for the launcher's nested mode (--cap-add SYS_ADMIN --security-opt systempaths=unconfined); start as the image user otherwise
+  ```
+
+  A controller the host withholds is reported at start
+  (`opencode-entrypoint: warning: the host did not delegate the memory cgroup
+  controller; inner containers cannot be limited by it`) and the matching limit
+  fails in the inner runtime rather than being silently ignored.
+
+Root starts are reserved for nested mode. An image whose `USER` is root — for
+example a derived image that ends with `USER root` — therefore refuses to start
+in `false` and `"host"` mode too, with the
+`/sys/fs/cgroup is not writable` line above: those modes grant no writable
+cgroup. End a derived image as its unprivileged user.
+
+So a host that cannot do nested refuses every launch, explicit or not, until the
+setting says `false` or `"host"`.
+
+The inner engine's graph root is a per-project named volume,
+`opencode2-containers-<cwd-hash>`, mounted at `/var/lib/opencode-containers`.
+Inner images and containers persist there across sessions. Removing that volume
+on the host starts the inner engine empty; an extra mount may not target the
+path. Inner `podman` can pull or build its own images when the sandbox has
+network access, and the host's image store is not visible.
+
+`--memory` and `--cpus` on inner containers are enforced: the prelude hands the
+cpu, memory, and pids controllers to the image user before dropping privileges.
+That includes `oc2-verify` workers.
+
+Project environment values take a separate route in this mode. The prelude
+starts as root before the drop, so `env.pass` and `env.set` values are not passed
+with `-e`: the launcher writes them to a launcher-owned 0600 file and mounts it
+read-only at `/run/opencode/agent-env`, and the image's loader applies them to the
+agent process after the drop, one NUL-separated `KEY=VALUE` entry at a time. The
+launcher runs Podman as a child and waits for it instead of replacing itself, so
+that file is removed when the run ends; `SIGINT` reaches Podman through the
+terminal's foreground process group, and `SIGTERM`/`SIGHUP` aimed at the launcher
+alone are forwarded to it. Provider secrets selected in `provider_secrets` keep
+their fixed launcher-owned names and stay ordinary process environment, injected
+by the engine.
+
+The saved-state volume is mounted without `:U` in nested mode. The container
+starts as root, so `:U` would chown the volume to root; the image's user-owned
+mount point is copied up instead. A volume that already exists but is not
+writable by the image user stops the launch, naming the uid, the volume, and the
+fix:
+
+```text
+opencode-entrypoint: the OpenCode data mount /var/lib/opencode-data is not writable by uid <uid> (volume <name>): run 'podman volume rm <name>' to start fresh, or set its ownership to <uid>:<gid> once
+```
+
+The verification worker image must be loaded into the inner store once per project
+volume: the broker never pulls, and the host image store is not visible from
+inside. This repository keeps `"containers": "host"` for that reason until the
+seeding is automatic; see the
+[seeding recipe](DEVELOPMENT.md#verify-checks-in-a-disposable-worker).
+
+### Host mode
+
+Set `containers` to `"host"`. The launcher prefers a rootless Podman
+socket, then a rootless or system Docker socket. For user Podman:
 
 ```sh
 systemctl --user start podman.socket
@@ -168,11 +310,12 @@ The socket is mounted at `/run/opencode-container-engine.sock`.
 The launcher sets `CONTAINER_HOST` and `DOCKER_HOST` automatically and uses the
 workspace's canonical host path as the workdir, so nested bind mounts using
 `$PWD` resolve correctly. `/src` remains available. Extra mounts cannot overlap
-this workspace mirror.
+this workspace mirror, and the workdir must stay inside it.
 
-**Socket access lets the sandbox control the host container engine**, including
-starting containers and mounting host paths. Enable it only for trusted projects
-and images.
+**In host mode, socket access lets the sandbox control the host container
+engine**, including starting containers and bind-mounting any host path the host
+user can reach. Choose it only for trusted projects and images; the default
+nested mode needs no socket.
 
 If connections fail, check for a stale socket or stopped service. Discovery
 checks file access, not the engine API. Sockets requiring a supplementary host
@@ -182,6 +325,8 @@ group need a Podman OCI runtime that supports `--group-add keep-groups`.
 
 The launcher runs with `--rm`, `--init`, `--userns=keep-id`, `--pull=never`,
 and `--security-opt label=disable`. It adds an interactive TTY only when needed.
+The default [nested mode](#nested-mode) adds `--user 0`, `--cap-add SYS_ADMIN`,
+`systempaths=unconfined`, and `/dev/net/tun`; host mode adds the socket mount.
 
 `seccomp` changes syscall filtering for the main sandbox only. Omit it or set it
 to `null` to preserve the container engine's default profile. Set it to
@@ -205,12 +350,58 @@ The standalone server exits with the foreground CLI.
 
 Host OpenCode application state and `.agents`, `.claude`, and `.mcp` directories
 cannot be mounted, including through parent directories. Mounts cannot overlap
-baked config or plugin paths. Explicit environment settings cannot override
-`HOME`, `PATH`, `XDG_*`, or `OPENCODE_*`.
+baked config or plugin paths, and in every mode a mount target may not be
+`/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, `/etc`, or `/usr/local/libexec`:
+shadowing one of them would replace the interpreter, the startup script, or the
+runtime beneath it before the sandbox's command runs. `/sys`, `/proc`, `/dev`,
+`/var/run`, `/var/lock`, and `/var/lib/rpm` are reserved too: the first three
+are the kernel's own filesystems, and the last three are paths the image
+resolves into `/run` or `/usr`. Explicit environment settings cannot override
+`HOME`, `PATH`, `XDG_*`, or `OPENCODE_*`, nor bash's readonly variables
+(`SHELLOPTS`, `BASHOPTS`, `BASH_VERSINFO`, `UID`, `EUID`, `PPID`), which the
+image's loader could not export.
 
-The supported user-config mounts are individual files: model routing,
-local providers, and Git config. Treat sandbox configuration as trusted
-repository code because it controls additional mounts and runtime settings.
+The supported user-config mounts are individual files: the model-routing
+`aid.json`, local providers, and Git config. Treat sandbox configuration as
+trusted repository code because it controls additional mounts and runtime
+settings.
+
+### Capabilities
+
+`capabilities` is an allow-list, not a passthrough. A capability is accepted only
+if it cannot bypass file permission checks, change a uid or gid, or act on
+processes or kernel state outside the agent's own. The allow-list is:
+
+`NET_RAW`, `NET_BIND_SERVICE`, `NET_ADMIN`, `NET_BROADCAST`, `SYS_NICE`,
+`IPC_LOCK`, `SYS_RESOURCE`.
+
+`NET_ADMIN` and `NET_RAW` reach only the sandbox's own network namespace. Every
+other name stops the launch, reporting the rule it would break:
+
+```text
+opencode-container: capabilities: SYS_PTRACE is not allowed: it can inspect and control other processes
+```
+
+An unrecognised name is refused with the allow-list. Entries are normalised
+before matching: case does not matter and an optional `CAP_` prefix is dropped,
+so `net_raw` and `CAP_NET_RAW` both mean `NET_RAW`. The policy applies in every
+mode; a refused capability stops the launch instead of being granted.
+
+In nested mode the container starts as root, and the entrypoint carries exactly
+the configured set across the drop: `setpriv` starts from `-all` and adds each
+configured capability to the inheritable and ambient sets, so the agent keeps the
+configured set and never the pre-drop process's own. The launcher always passes
+the list to the prelude, empty when nothing is configured, so an image `ENV`
+cannot supply one; the prelude checks every name against its own copy of this
+allow-list and refuses the start otherwise.
+
+Debugging needs no capability here. ptrace of the agent's own processes works
+without `SYS_PTRACE`: in the image this repository builds, `strace` traces a
+command it starts and `lldb -p <pid>` attaches, with no capabilities in the
+effective set. If `lldb` cannot launch a debuggee at all, the error is
+`personality set failed`: the engine's default seccomp profile blocks
+`personality(2)` (which LLDB uses to disable ASLR), and the `seccomp` setting
+above — or LLDB's own ASLR setting — is what changes it, not a capability.
 
 ### Permission posture
 
@@ -229,17 +420,21 @@ it:
 
 What auto-approval changes, and what it does not:
 
-- An explicit `deny` still wins, so it grants nothing to the baked agents or the
-  review lanes. Each of them opens with
-  `{ action: "*", resource: "*", effect: deny }`.
-- Every `effect: ask` rule stops prompting. Reads of `.env` files, `grep`, the
-  review lanes' `git status`/`diff`/`show`/`log`, and `external_directory` on the
-  baked config are approved without a prompt. Under `--auto`, read `ask` as a
-  statement of intent rather than a gate: the enforceable boundaries are `deny`
-  rules and what the container mounts.
-- Checks that read-only workers run go through the `oc2-verify` broker, whose
-  boundary does not depend on a prompt being answered. See
-  [development](DEVELOPMENT.md).
+- An explicit `deny` still wins, so it grants nothing beyond what an agent
+  already denies. `aid-explorer` keeps its `edit` deny — no edit tool, though its
+  shell can still write files — and a deny-first project agent keeps its denials.
+- Every baked `aid-*` agent opens with an allow rule covering every action and
+  resource (`*`/`*`). The only exceptions are `ask` on reading `.env` files,
+  `deny` on the browser, and `aid-explorer`'s `edit` deny; there are no `shell`,
+  `grep`, or `git` ask rules. Shell commands, `grep`, and `git` therefore run
+  without a prompt, and `oc2-verify` runs as an ordinary shell command. Under
+  `--auto`, any `effect: ask` that a project agent adds also stops prompting: the
+  enforceable boundaries are `deny` rules and what the container mounts.
+- The verification broker (`/opt/opencode/sandbox/oc2-verify`) stays baked and
+  reads the sandbox config mounted at `/run/opencode/sandbox.json`, but no agent
+  is granted it by name; a baked agent's allow-all shell rule runs it without a
+  prompt. See [development](DEVELOPMENT.md).
 
-The `Containerfile` command is pinned by a policy guard in the model-router test
-suite, so changing that flag set is a deliberate edit rather than drift.
+The `Containerfile` command is pinned by a policy guard in
+`tests/image-config.test.py`, so changing that flag set is a deliberate edit
+rather than drift.
