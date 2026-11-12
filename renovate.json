@@ -1,6 +1,40 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": [
-    "config:recommended"
+  "extends": ["config:recommended"],
+  "customManagers": [
+    {
+      "description": "Upstream repos pinned by commit in Containerfile ARGs, tracking each repo's branch",
+      "customType": "regex",
+      "managerFilePatterns": ["/^Containerfile$/"],
+      "matchStrings": [
+        "# renovate: repo=(?<depName>\\S+) branch=(?<currentValue>\\S+)\\nARG \\w+_REF=(?<currentDigest>[0-9a-f]{40})"
+      ],
+      "datasourceTemplate": "git-refs",
+      "packageNameTemplate": "https://github.com/{{{depName}}}"
+    },
+    {
+      "description": "The OpenCode2 CLI version, in the Containerfile ARG and the example sandbox config (kept in step by tests/image-config.test.py)",
+      "customType": "regex",
+      "managerFilePatterns": ["/^Containerfile$/", "/^examples/opencode-sandbox\\.json\\.example$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\nARG OPENCODE2_VERSION=(?<currentValue>\\S+)",
+        "\"OPENCODE2_VERSION\": \"(?<currentValue>[^\"]+)\""
+      ],
+      "datasourceTemplate": "npm",
+      "depNameTemplate": "@opencode/cli"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "One weekly PR for the four upstream commit pins",
+      "matchDatasources": ["git-refs"],
+      "groupName": "sandbox upstream pins",
+      "schedule": ["before 6am on monday"]
+    },
+    {
+      "description": "Only stable OpenCode releases, never beta/dev tags",
+      "matchDepNames": ["@opencode/cli"],
+      "ignoreUnstable": true
+    }
   ]
 }
