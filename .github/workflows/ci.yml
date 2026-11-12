@@ -1,0 +1,69 @@
+# CI: the repository's own checks on every PR, then the image build and a live
+# nested-Podman smoke test, so dependency bumps (Renovate) show green or red.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install pinned lint and type tools
+        run: python -m pip install -r requirements.txt
+      # The same commands as .opencode-sandbox.json verify.checks.
+      - name: Lint
+        run: ruff check .
+      - name: Types
+        run: mypy .
+      - name: Compile
+        run: python3 -m py_compile bin/opencode-container bin/oc2-verify
+      - name: Config
+        run: jq empty container-config.json container-config.schema.json examples/*.example
+      - name: Shell scripts
+        run: shellcheck image/*
+      - name: Launcher
+        run: ./tests/launcher-env.test.py
+      - name: Verify broker
+        run: ./tests/verify-broker.test.py
+      - name: Image config
+        run: ./tests/image-config.test.py
+
+  image:
+    name: Image build and nested smoke
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Host facts for nested mode
+        run: |
+          podman version
+          echo "subuid: $(grep "^$(id -un):" /etc/subuid || echo none)"
+          echo "subgid: $(grep "^$(id -un):" /etc/subgid || echo none)"
+          stat -fc %T /sys/fs/cgroup
+          cat "/sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/cgroup.controllers" 2>/dev/null || echo "no user cgroup delegation info"
+      - name: Build base and dev images
+        run: make build
+      # The smoke test skips (exit 0) when podman or the image is missing; here
+      # both must exist, so a skip is a failure.
+      - name: Nested smoke
+        run: |
+          ./tests/nested-smoke.test.py | tee smoke.log
+          grep -q '^nested-smoke: PASS' smoke.log
