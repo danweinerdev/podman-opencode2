@@ -388,8 +388,10 @@ class Suite:
         self.has_line(argv, f"opencode2-data-{key}:/var/lib/opencode-data:U")
         self.has_line(argv, "XDG_DATA_HOME=/var/lib/opencode-data")
         self.has_line(argv, "XDG_STATE_HOME=/var/lib/opencode-data/state")
-        self.has_line(argv, f"{self.workspace}:/workspace/{key}")
-        self.has_line(argv, f"/workspace/{key}")
+        self.has_line(argv, f"{self.workspace}:{self.workspace}")
+        self.has_line(argv, f"{self.workspace}")
+        self.no_substring(argv, "/workspace/")
+        self.no_substring(argv, ":/src")
         self.no_substring(argv, "/run/opencode-container-engine.sock")
         if self.count(argv, "OPENAI_API_KEY") != 1:
             fail("OPENAI_API_KEY was forwarded more than once")
@@ -497,9 +499,9 @@ class Suite:
 
     def _containers_socket_selection(self) -> None:
         # Opting into host container-engine access prefers the user Podman
-        # socket over Docker, manages both client variables, and mirrors the
-        # workspace at its host path so nested bind mounts do not reference
-        # the generated /workspace path.
+        # socket over Docker and manages both client variables. The workspace
+        # is mounted at its host path in every mode, so nested bind mounts do
+        # not reference a generated path.
         workspace = self.tmp / "containers-workspace"
         (workspace / "subdir").mkdir(parents=True)
         runtime = self.tmp / "containers-runtime"
@@ -522,28 +524,28 @@ class Suite:
         argv = self.argv()
         self.has_line(argv, f"{runtime}/podman/podman.sock:/run/opencode-container-engine.sock")
         self.no_substring(argv, f"{runtime}/docker.sock:/run/opencode-container-engine.sock")
-        self.has_line(argv, f"{workspace}:/src")
         self.has_line(argv, f"{workspace}:{workspace}")
         self.has_line(argv, f"{workspace}/subdir")
         self.has_line(argv, "CONTAINER_HOST=unix:///run/opencode-container-engine.sock")
         self.has_line(argv, "DOCKER_HOST=unix:///run/opencode-container-engine.sock")
         self.no_substring(argv, "must-not-win.invalid")
         self.no_substring(argv, "/workspace/")
+        self.no_substring(argv, ":/src")
 
-        # Host-path workdirs and additional mounts may not escape or shadow
-        # the mirror whose identity nested container bind mounts rely on.
+        # Workdirs and additional mounts may not escape or shadow the
+        # workspace whose host path nested container bind mounts rely on.
         cfg = workspace / ".opencode-sandbox.json"
         self.set_config(cfg, workdir="../outside")
         self.run_fail(workspace,
-                      'containers "host" accepted a workdir outside the mirrored workspace',
+                      'containers "host" accepted a workdir outside the workspace',
                       extra_env={"XDG_RUNTIME_DIR": str(runtime)},
                       stderr_contains="must stay within workspace")
         self.set_config(cfg, workdir=".",
                         mounts=[{"source": ".", "target": f"{workspace}/subdir"}])
         self.run_fail(workspace,
-                      'containers "host" accepted a mount overlapping the workspace mirror',
+                      'containers "host" accepted a mount overlapping the workspace',
                       extra_env={"XDG_RUNTIME_DIR": str(runtime)},
-                      stderr_contains="overlaps the containers workspace mirror")
+                      stderr_contains="overlaps the workspace")
 
     def _containers_rootless_docker(self) -> None:
         # With no user Podman socket, a rootless Docker socket is selected next.
@@ -645,13 +647,14 @@ class Suite:
         # Starting as root, :U would chown the user's data volume to root.
         self.has_line(argv, f"opencode2-data-{key}:/var/lib/opencode-data")
         self.no_substring(argv, "opencode-data:U")
-        self.has_line(argv, f"{workspace}:/workspace/{key}")
-        self.has_line(argv, f"/workspace/{key}/subdir")
-        # No host engine: no socket, no client variables, no host-path mirror.
+        self.has_line(argv, f"{workspace}:{workspace}")
+        self.has_line(argv, f"{workspace}/subdir")
+        # No host engine: no socket and no client variables.
         self.no_substring(argv, "/run/opencode-container-engine.sock")
         self.no_substring(argv, "CONTAINER_HOST")
         self.no_substring(argv, "DOCKER_HOST")
-        self.no_line(argv, f"{workspace}:{workspace}")
+        self.no_substring(argv, "/workspace/")
+        self.no_substring(argv, ":/src")
 
     def _containers_false_has_no_engine(self) -> None:
         # false keeps the engine-free profile byte for byte: no socket, no
@@ -671,7 +674,9 @@ class Suite:
         self.no_substring(argv, "CONTAINER_HOST")
         self.no_substring(argv, "/var/lib/opencode-containers")
         self.has_line(argv, f"opencode2-data-{key}:/var/lib/opencode-data:U")
-        self.has_line(argv, f"{workspace}:/workspace/{key}")
+        self.has_line(argv, f"{workspace}:{workspace}")
+        self.no_substring(argv, "/workspace/")
+        self.no_substring(argv, ":/src")
 
     def _containers_nested(self) -> None:
         # The nested engine: the image's own rootless Podman, with the outer
@@ -719,14 +724,13 @@ class Suite:
         # The entrypoint checks that volume as the image user after the drop.
         self.has_line(argv, "OPENCODE_DATA_MOUNT=/var/lib/opencode-data")
         self.has_line(argv, f"OPENCODE_DATA_VOLUME=opencode2-data-{key}")
-        # No host engine: no socket, no client variables, no host-path mirror.
+        # No host engine: no socket and no client variables.
         self.no_substring(argv, "/run/opencode-container-engine.sock")
         self.no_substring(argv, "CONTAINER_HOST")
         self.no_substring(argv, "DOCKER_HOST")
         self.no_line(argv, "keep-groups")
-        self.no_line(argv, f"{workspace}:{workspace}")
-        self.has_line(argv, f"{workspace}:/workspace/{key}")
-        self.has_line(argv, f"/workspace/{key}/subdir")
+        self.has_line(argv, f"{workspace}:{workspace}")
+        self.has_line(argv, f"{workspace}/subdir")
         if argv[-2:] != ["opencode2:test", "/bin/true"]:
             fail(f"nested argv must end with the image and command: {argv[-2:]}")
 
@@ -740,8 +744,8 @@ class Suite:
                       extra_env=nested_env,
                       stderr_contains="shadows the nested engine's storage volume")
         # The baked-path guards still hold.
-        self.set_config(cfg, mounts=[{"source": ".", "target": "/workspace/elsewhere"}])
-        self.run_fail(workspace, "nested mode accepted a mount shadowing /workspace",
+        self.set_config(cfg, mounts=[{"source": ".", "target": "/opt/opencode/elsewhere"}])
+        self.run_fail(workspace, "nested mode accepted a mount shadowing /opt/opencode",
                       extra_env=nested_env,
                       stderr_contains="shadows a baked config/plugin path")
         self.set_config(cfg, mounts=[])
@@ -1047,7 +1051,7 @@ class Suite:
     def _mount_target_traversal(self) -> None:
         # Lexical traversal in a mount target must not bypass the baked-path guard.
         cfg = self.workspace / ".opencode-sandbox.json"
-        self.set_config(cfg, mounts=[{"source": ".", "target": "/src/../opt/opencode"}])
+        self.set_config(cfg, mounts=[{"source": ".", "target": "/mnt/../opt/opencode"}])
         self.run_fail(self.workspace,
                       "launcher accepted a mount target that traverses into a baked path",
                       stderr_contains="shadows a baked config/plugin path")
@@ -1117,6 +1121,55 @@ class Suite:
         self.set_config(off / ".opencode-sandbox.json",
                         mounts=[{"source": ".", "target": "/mnt/data"}])
         self.run_ok(off)
+
+    def _workspace_reserved_targets(self) -> None:
+        # The workspace is mounted at its host path in every mode, so a
+        # workspace at or containing a baked config/plugin path or a container
+        # system path would replace it before the sandbox's command runs.
+        workspace = self.tmp / "reserved-workspace-targets"
+        workspace.mkdir()
+        cfg = workspace / ".opencode-sandbox.json"
+        cases = (
+            ("baked", "/opt", "shadows a baked config/plugin path"),
+            ("usr", "/usr", "shadows a container system path"),
+            ("etc", "/etc", "shadows a"),
+            ("proc", "/proc", "shadows a container system path"),
+        )
+        for name, target, needle in cases:
+            if not os.path.exists(target):
+                continue
+            link = self.tmp / f"reserved-{name}-link"
+            link.symlink_to(target)
+            write_json(cfg, {
+                "image": "opencode2:test",
+                "workspace": str(link),
+                "containers": False,
+                "command": ["/bin/true"],
+            })
+            self.run_fail(workspace, f"launcher accepted a workspace at {target}",
+                          stderr_contains=("workspace", needle))
+
+    def _mount_target_workspace(self) -> None:
+        # A user mount may not overlap the workspace whose host path the nested
+        # engine resolves, in every mode.
+        workspace = self.tmp / "mount-over-workspace"
+        (workspace / "subdir").mkdir(parents=True)
+        cfg = workspace / ".opencode-sandbox.json"
+        runtime = self.tmp / "mount-over-workspace-runtime"
+        runtime.mkdir()
+        make_unix_socket(runtime / "podman" / "podman.sock")
+        for mode, env in ((False, {}),
+                          ("nested", {"PODMAN_IMAGE_NESTED_PODMAN": "1"}),
+                          ("host", {"XDG_RUNTIME_DIR": str(runtime)})):
+            write_json(cfg, {
+                "image": "opencode2:test",
+                "containers": mode,
+                "mounts": [{"source": ".", "target": f"{workspace}/subdir"}],
+                "command": ["/bin/true"],
+            })
+            self.run_fail(workspace, f"mode {mode!r} accepted a mount over the workspace",
+                          extra_env=env,
+                          stderr_contains="overlaps the workspace")
 
     def _workspace_contains_protected_state(self) -> None:
         # A workspace that contains protected host state must be rejected, not
@@ -1208,8 +1261,27 @@ class Suite:
                    {"image": "opencode2:test", "command": ["/bin/true"]})
         git_dir = git("-C", str(worktree), "rev-parse", "--git-dir")
         common_dir = git("-C", str(worktree), "rev-parse", "--git-common-dir")
+        config_path = worktree / ".opencode-sandbox.json"
         self.run_ok(worktree)
         self.has_line(self.argv(), f"{common_dir}:{common_dir}")
+
+        # The workspace and its external Git metadata are mounted at their host
+        # paths in every container-access mode, so the pointer resolves inside
+        # the sandbox regardless of the engine.
+        runtime = self.tmp / "git-linked-worktree-runtime"
+        runtime.mkdir()
+        make_unix_socket(runtime / "podman" / "podman.sock")
+        for mode, env in ((False, {}),
+                          ("host", {"XDG_RUNTIME_DIR": str(runtime)})):
+            write_json(config_path, {
+                "image": "opencode2:test", "containers": mode,
+                "command": ["/bin/true"]})
+            self.run_ok(worktree, extra_env=env)
+            argv = self.argv()
+            self.has_line(argv, f"{common_dir}:{common_dir}")
+            self.has_line(argv, f"{worktree}:{worktree}")
+            self.has_line(argv, f"{worktree}")
+        write_json(config_path, {"image": "opencode2:test", "command": ["/bin/true"]})
 
         relative = os.path.relpath(git_dir, worktree)
         (worktree / ".git").write_text(f"gitdir: {relative}\n", encoding="utf-8")
@@ -1287,13 +1359,14 @@ class Suite:
         if "warning: no .opencode-sandbox.json found" not in proc.stderr:
             fail("launcher did not warn about the missing sandbox config")
         argv = self.argv()
-        self.has_line(argv, f"{workspace}:/src")
+        self.has_line(argv, f"{workspace}:{workspace}")
+        self.has_line(argv, f"{workspace}")
         self.has_line(argv, "opencode2:latest")
         self.has_line(argv, "opencode2")
         self.has_line(argv, "--standalone")
         key = sha256_16(str(workspace))
-        self.has_line(argv, f"{workspace}:/workspace/{key}")
-        self.has_line(argv, f"/workspace/{key}")
+        self.no_substring(argv, "/workspace/")
+        self.no_substring(argv, ":/src")
         # No config means the launcher's defaults, which now include the nested
         # engine: a no-config project is not an engine-free exception.
         self.has_line(argv, f"opencode2-containers-{key}:/var/lib/opencode-containers")
@@ -1881,8 +1954,7 @@ class Suite:
         tail = [line for line in argv[index + 1:] if line != "opencode2:test"]
         if tail != ["-dash-cmd"]:
             fail(f"run -- -dash-cmd was mangled: {tail}")
-        key = sha256_16(str(workspace))
-        self.has_line(self.argv(), f"{workspace}:/workspace/{key}")
+        self.has_line(self.argv(), f"{workspace}:{workspace}")
         return workspace
 
     def _dangling_image(self, workspace: Path) -> None:
@@ -2059,6 +2131,8 @@ def main() -> None:
         suite._containers_no_socket()
         suite._mount_target_traversal()
         suite._mount_target_system_paths()
+        suite._workspace_reserved_targets()
+        suite._mount_target_workspace()
         suite._workspace_contains_protected_state()
         suite._mount_source_contains_protected_state()
         suite._root_as_mount_source()
