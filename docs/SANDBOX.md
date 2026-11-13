@@ -44,7 +44,8 @@ adapt its secret selections and volume name before using it.
   [permission posture](#permission-posture). |
 
 Model routing is not a sandbox setting. The ai-devtools plugin reads
-`.opencode/aid.json` from the workspace, or the global file the launcher mounts;
+`.opencode/aid.json` from the workspace, or the global
+`${XDG_CONFIG_HOME:-$HOME/.config}/opencode/aid.json` the launcher mounts;
 see [model routing](SETUP.md#model-routing). The global file's `guards` and
 `sensitive` rules are not a sandbox boundary: an in-container agent can write
 `.opencode/aid.json` in the workspace, which aid prefers over the read-only

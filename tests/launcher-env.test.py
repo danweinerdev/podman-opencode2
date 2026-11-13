@@ -1426,38 +1426,78 @@ class Suite:
         # every launch, canonicalized, and mounted as one exact read-only file
         # without requiring a workspace sandbox config.
         real = self.tmp / "global-aid-real"
-        (real / "opencode2").mkdir(parents=True)
+        (real / "opencode").mkdir(parents=True)
         link = self.tmp / "global-aid-link"
         link.symlink_to(real)
-        write_json(real / "opencode2" / "aid.json",
+        write_json(real / "opencode" / "aid.json",
                    {"agents": {"aid-orchestrator": "orchestration"}})
         self.run_ok(default_workspace, via_path=True,
                     extra_env={"HOME": str(default_home), "XDG_CONFIG_HOME": str(link)})
         argv = self.argv()
         self.has_line(argv,
-                      f"{real}/opencode2/aid.json:/opt/opencode/config/opencode/aid.json:ro")
-        self.no_line(argv, f"{real}/opencode2:/opt/opencode/config/opencode")
+                      f"{real}/opencode/aid.json:/opt/opencode/config/opencode/aid.json:ro")
+        self.no_line(argv, f"{real}/opencode:/opt/opencode/config/opencode")
+
+        # The default XDG location, ~/.config/opencode/aid.json, is the same
+        # path OpenCode and ai-devtools read on the host. The launcher's own
+        # read-only single-file mount is allowed even though the surrounding
+        # directory is protected from user mounts and workspaces.
+        default_aid_home = self.tmp / "global-aid-default-home"
+        (default_aid_home / ".config" / "opencode").mkdir(parents=True)
+        write_json(default_aid_home / ".config" / "opencode" / "aid.json",
+                   {"agents": {"aid-orchestrator": "orchestration"}})
+        self.run_ok(default_workspace, via_path=True,
+                    extra_env={"HOME": str(default_aid_home)})
+        self.has_line(
+            self.argv(),
+            f"{default_aid_home}/.config/opencode/aid.json:"
+            "/opt/opencode/config/opencode/aid.json:ro",
+        )
         return real, link
 
     def _global_aid_overlap(self, real: Path, link: Path,
                             default_home: Path, default_workspace: Path) -> None:
         # The exact read-only control mount must not be bypassable through a
-        # workspace or additional mount that exposes the same host file.
+        # workspace or additional mount that exposes the same host file. The
+        # config directory is host OpenCode state too, so both guards cover it.
         workspace = self.tmp / "global-aid-overlap-workspace"
         workspace.mkdir()
         write_json(workspace / ".opencode-sandbox.json",
-                   {"mounts": [{"source": str(real / "opencode2"),
+                   {"mounts": [{"source": str(real / "opencode"),
                                 "target": "/mnt/global-aid"}]})
         self.run_fail(workspace, "launcher exposed the global aid config through an additional mount",
                       via_path=True,
                       extra_env={"HOME": str(default_home), "XDG_CONFIG_HOME": str(link)},
-                      stderr_contains="overlaps the user-global aid config")
+                      stderr_contains="overlaps host OpenCode/.agents/.claude/.mcp state")
 
         # A workspace that contains the config is refused too.
-        self.run_fail(real / "opencode2",
+        self.run_fail(real / "opencode",
                       "launcher accepted a workspace containing the global aid config",
                       via_path=True,
                       extra_env={"HOME": str(default_home), "XDG_CONFIG_HOME": str(link)},
+                      stderr_contains="overlaps host OpenCode/.agents/.claude/.mcp state")
+
+        # A config symlinked outside the protected config directory is still
+        # protected by the exact-file guard.
+        aid_real = self.tmp / "global-aid-real-file"
+        aid_real.mkdir()
+        write_json(aid_real / "aid.json", {"agents": {}})
+        symlink_config = self.tmp / "global-aid-symlink-config"
+        (symlink_config / "opencode").mkdir(parents=True)
+        (symlink_config / "opencode" / "aid.json").symlink_to(aid_real / "aid.json")
+        self.run_fail(aid_real,
+                      "launcher accepted a workspace containing a symlinked global aid config",
+                      via_path=True,
+                      extra_env={"HOME": str(default_home),
+                                 "XDG_CONFIG_HOME": str(symlink_config)},
+                      stderr_contains="overlaps the user-global aid config")
+        write_json(workspace / ".opencode-sandbox.json",
+                   {"mounts": [{"source": str(aid_real), "target": "/mnt/global-aid"}]})
+        self.run_fail(workspace,
+                      "launcher exposed a symlinked global aid config through an additional mount",
+                      via_path=True,
+                      extra_env={"HOME": str(default_home),
+                                 "XDG_CONFIG_HOME": str(symlink_config)},
                       stderr_contains="overlaps the user-global aid config")
 
     def _global_aid_config_with_workspace_config(self, real: Path, link: Path,
@@ -1469,19 +1509,22 @@ class Suite:
                     extra_env={"HOME": str(default_home), "XDG_CONFIG_HOME": str(link)})
         argv = self.argv()
         self.has_line(argv,
-                      f"{real}/opencode2/aid.json:/opt/opencode/config/opencode/aid.json:ro")
+                      f"{real}/opencode/aid.json:/opt/opencode/config/opencode/aid.json:ro")
 
     def _global_aid_git_metadata_overlap(self) -> None:
         # Linked-worktree metadata is mounted writable at its host path, so a
         # metadata root that contains the global aid config must be refused.
+        # The config is symlinked outside the protected config directory so the
+        # exact-file guard, not host OpenCode state, is the one that fires.
         workspace = self.tmp / "aid-git-workspace"
         config_home = self.tmp / "aid-git-config"
-        git_home = config_home / "opencode2"
+        git_home = self.tmp / "aid-git-metadata"
         workspace.mkdir()
-        config_home.mkdir()
+        (config_home / "opencode").mkdir(parents=True)
         git("init", "-q", "--initial-branch=main", "--separate-git-dir",
             str(git_home), str(workspace))
         write_json(git_home / "aid.json", {"agents": {}})
+        (config_home / "opencode" / "aid.json").symlink_to(git_home / "aid.json")
         git("-C", str(workspace), "-c", "user.name=Test",
             "-c", "user.email=test@example.invalid",
             "commit", "-qm", "initial", "--allow-empty")
@@ -1492,6 +1535,26 @@ class Suite:
                                  "XDG_CONFIG_HOME": str(config_home)},
                       stderr_contains=("git metadata directory",
                                        "overlaps the user-global aid config"))
+
+    def _global_aid_legacy_path(self, default_workspace: Path) -> None:
+        # The old opencode2/aid.json is no longer read. When it is the only
+        # file present, warn once and point at the new opencode/aid.json path.
+        legacy_home = self.tmp / "global-aid-legacy-home"
+        legacy_dir = legacy_home / ".config" / "opencode2"
+        legacy_dir.mkdir(parents=True)
+        legacy = legacy_dir / "aid.json"
+        write_json(legacy, {"agents": {"aid-orchestrator": "orchestration"}})
+        proc = self.run_ok(default_workspace, via_path=True,
+                           extra_env={"HOME": str(legacy_home)})
+        self.no_substring(self.argv(), "aid.json")
+        if proc.stderr.count("ignoring legacy global aid config") != 1:
+            fail(f"legacy aid config warning was not emitted once:\n{proc.stderr}")
+        expected = (
+            f"ignoring legacy global aid config {legacy}; move it to "
+            f"{legacy_home}/.config/opencode/aid.json"
+        )
+        if expected not in proc.stderr:
+            fail(f"legacy aid config warning lacks the new path:\n{proc.stderr}")
 
     def _malformed_global_aid(self, default_home: Path, default_workspace: Path,
                               link: Path, aid: Path) -> None:
@@ -2146,12 +2209,13 @@ def main() -> None:
         suite._gitconfig_mounts(default_home, default_workspace)
         global_aid_real, global_aid_link = suite._global_aid_config(
             default_home, default_workspace)
+        suite._global_aid_legacy_path(default_workspace)
         suite._global_aid_overlap(global_aid_real, global_aid_link,
                                   default_home, default_workspace)
         suite._global_aid_git_metadata_overlap()
         suite._global_aid_config_with_workspace_config(
             global_aid_real, global_aid_link, default_home, default_workspace)
-        aid = global_aid_real / "opencode2" / "aid.json"
+        aid = global_aid_real / "opencode" / "aid.json"
         suite._malformed_global_aid(default_home, default_workspace, global_aid_link, aid)
         suite._partial_config(default_home, default_workspace)
         suite._podman_secrets(default_home, default_workspace)
