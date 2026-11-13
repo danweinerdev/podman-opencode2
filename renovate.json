@@ -17,15 +17,13 @@
       "packageNameTemplate": "https://github.com/{{{depName}}}"
     },
     {
-      "description": "The OpenCode2 CLI version, in the Containerfile ARG and the example sandbox config (kept in step by tests/image-config.test.py)",
+      "description": "The OpenCode2 CLI version: ARG OPENCODE2_VERSION in the Containerfile, its only pin",
       "customType": "regex",
       "managerFilePatterns": [
-        "/^Containerfile$/",
-        "/^examples/opencode-sandbox\\.json\\.example$/"
+        "/^Containerfile$/"
       ],
       "matchStrings": [
-        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\nARG OPENCODE2_VERSION=(?<currentValue>\\S+)",
-        "\"OPENCODE2_VERSION\": \"(?<currentValue>[^\"]+)\""
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\nARG OPENCODE2_VERSION=(?<currentValue>\\S+)"
       ],
       "datasourceTemplate": "npm",
       "depNameTemplate": "@opencode/cli"

@@ -22,6 +22,7 @@ ENTRYPOINT_SCRIPT = ROOT / "image" / "opencode-entrypoint"
 LOADER_SCRIPT = ROOT / "image" / "opencode-agent-env"
 CONTAINER_CONFIG = ROOT / "container-config.json"
 EXAMPLE = ROOT / "examples" / "opencode-sandbox.json.example"
+SANDBOX_CONFIG_PATH = ROOT / ".opencode-sandbox.json"
 LAUNCHER = ROOT / "bin" / "opencode-container"
 
 AI_DEVTOOLS_PLUGIN = "file:///opt/opencode/plugins/ai-devtools"
@@ -121,7 +122,7 @@ def check_skill_copy_destinations(config: object, source: str) -> None:
             fail(f"skills path {skill} has no matching Containerfile COPY destination")
 
 
-def check_opencode2_version(source: str, example: object) -> None:
+def check_opencode2_version(source: str, example: object, sandbox_config: object) -> None:
     match = re.search(r"^ARG\s+OPENCODE2_VERSION=(\S+)\s*$", source, re.MULTILINE)
     if match is None:
         fail("Containerfile does not declare ARG OPENCODE2_VERSION")
@@ -140,16 +141,19 @@ def check_opencode2_version(source: str, example: object) -> None:
             f"OPENCODE2_VERSION {version!r}"
         )
 
-    if not isinstance(example, dict):
-        fail("examples/opencode-sandbox.json.example must be a JSON object")
-    build = example.get("build")
-    args = build.get("args") if isinstance(build, dict) else None
-    expected = args.get("OPENCODE2_VERSION") if isinstance(args, dict) else None
-    if expected != version:
-        fail(
-            f"example OPENCODE2_VERSION {expected!r} does not match "
-            f"Containerfile ARG {version!r}"
-        )
+    # The ARG is the only pin (Renovate updates it). A sandbox config that
+    # passes OPENCODE2_VERSION as a build arg would override it and drift.
+    for name, config in (("examples/opencode-sandbox.json.example", example),
+                         (".opencode-sandbox.json", sandbox_config)):
+        if not isinstance(config, dict):
+            fail(f"{name} must be a JSON object")
+        build = config.get("build")
+        args = build.get("args") if isinstance(build, dict) else None
+        if isinstance(args, dict) and "OPENCODE2_VERSION" in args:
+            fail(
+                f"{name} overrides OPENCODE2_VERSION; the Containerfile ARG "
+                f"is the single pin"
+            )
 
 
 def check_ai_devtools_ref(source: str) -> None:
@@ -434,7 +438,7 @@ def main() -> None:
     check_default_agent(config)
     check_plugins(config)
     check_skill_copy_destinations(config, source)
-    check_opencode2_version(source, example)
+    check_opencode2_version(source, example, load_json(SANDBOX_CONFIG_PATH))
     check_ai_devtools_ref(source)
     check_singular_plugin(config)
     check_mcp_servers(config)

@@ -27,8 +27,8 @@ the launcher from the host workspace root.
    launcher itself is absent, copy it into the workspace with file tools; a
    convenient name is `opencode-container`.
 3. Customize only fields the user needs. Keep `schema_version: 1`, use the
-   `opencode2 --standalone` command, and retain the exact pinned
-   `OPENCODE2_VERSION` unless the image source has been deliberately upgraded.
+   `opencode2 --standalone` command, and don't pass `OPENCODE2_VERSION` as a
+   build arg: the image's Containerfile ARG is the single version pin.
 4. Validate JSON with `jq empty .opencode-sandbox.json` and Python syntax with
    `python3 -m py_compile opencode-container`. Build or run the image only when requested.
 5. For machine-wide local models, copy
