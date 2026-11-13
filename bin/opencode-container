@@ -590,12 +590,19 @@ def write_agent_env_file(env_map: dict[str, str]) -> str:
 def find_global_aid_config(config_home: str) -> str | None:
     """Validate and return the global ai-devtools routing config's canonical path.
 
-    The host path is `<config_home>/opencode2/aid.json`, mounted into the
-    container where ai-devtools reads it. Only the single-JSON-object shape is
-    checked here; aid validates its own schema.
+    The host path is `<config_home>/opencode/aid.json`, where OpenCode and
+    ai-devtools keep it, mounted into the container where ai-devtools reads it.
+    Only the single-JSON-object shape is checked here; aid validates its own
+    schema. The older `<config_home>/opencode2/aid.json` is no longer read; when
+    it is the only file present, name it and the path to move it to.
     """
-    path = config_home + "/opencode2/aid.json"
+    path = config_home + "/opencode/aid.json"
     if not os.path.lexists(path):
+        legacy = config_home + "/opencode2/aid.json"
+        if os.path.lexists(legacy):
+            warn(
+                f"ignoring legacy global aid config {legacy}; move it to {path}"
+            )
         return None
     if not os.path.isfile(path):
         die(f"global aid config is not a regular file: {path}")

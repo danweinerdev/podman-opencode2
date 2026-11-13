@@ -37,12 +37,14 @@ the launcher from the host workspace root.
    host and customize it. Never add credentials to this runtime-mounted
    catalog.
 6. For machine-wide model routing preferences, create
-   `${XDG_CONFIG_HOME:-$HOME/.config}/opencode2/aid.json` on the host. The
-   launcher mounts it read-only at `/opt/opencode/config/opencode/aid.json`,
-   where the ai-devtools plugin reads it. A workspace's `.opencode/aid.json`
-   takes precedence over this global file. It is deliberately not baked into
-   the image. Restart the launcher/container after an edit; do not rebuild the
-   image. Never put credentials in either file.
+   `${XDG_CONFIG_HOME:-$HOME/.config}/opencode/aid.json` on the host (where
+   OpenCode and ai-devtools keep it). The launcher mounts it read-only at
+   `/opt/opencode/config/opencode/aid.json`, where the ai-devtools plugin
+   reads it. The older `opencode2/aid.json` is ignored; the launcher warns and
+   names the new path when only the old file exists. A workspace's
+   `.opencode/aid.json` takes precedence over this global file. It is
+   deliberately not baked into the image. Restart the launcher/container after
+   an edit; do not rebuild the image. Never put credentials in either file.
 7. The launcher automatically exposes the host's exact user-global
    `$HOME/.gitconfig` read-only across workspaces. Do not add a per-workspace
    mount for it.
@@ -127,9 +129,10 @@ the launcher from the host workspace root.
   launcher itself lives elsewhere on `PATH`.
 - Model routing is read by the ai-devtools plugin from the workspace's
   `.opencode/aid.json`, else the user-global
-  `${XDG_CONFIG_HOME:-$HOME/.config}/opencode2/aid.json`. The launcher mounts
+  `${XDG_CONFIG_HOME:-$HOME/.config}/opencode/aid.json`. The launcher mounts
   that exact file read-only at `/opt/opencode/config/opencode/aid.json` and
-  leaves it unmounted when absent. Routing itself belongs to ai-devtools; a
+  leaves it unmounted when absent; the older `opencode2/aid.json` is ignored
+  with a warning. Routing itself belongs to ai-devtools; a
   routing edit needs only a launcher/container restart.
 - On `build`, `run`, and `shell`, the launcher validates the host's shared
   `opencode2/local-providers.json` and mounts its exact canonical file
