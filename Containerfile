@@ -24,7 +24,7 @@
 # ---------------------------------------------------------------------------
 # Stage 1: exact Go toolchain (1.26.10) for the aid CLI
 # ---------------------------------------------------------------------------
-FROM docker.io/library/golang:1.26.10-bookworm AS aid-builder
+FROM docker.io/library/golang:1.27.4-bookworm AS aid-builder
 
 ENV GOFLAGS=-buildvcs=false
 
