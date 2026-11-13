@@ -75,8 +75,6 @@ BAKED_ROOTS: Final[tuple[str, ...]] = (
     "/opt/opencode",
     "/opt/mcp",
     "/run/opencode",
-    "/src",
-    "/workspace",
 )
 # System directories a user mount may never shadow in any mode: replacing the
 # interpreter, the startup script, or the runtime beneath them would break the
@@ -106,15 +104,14 @@ MOUNT_TARGET_RESERVED_ROOTS: Final[tuple[str, ...]] = (
     "/var/lock",
     "/var/lib/rpm",
 )
-# Host-engine mode does not create the generated /workspace/<hash> mount, so a
-# host workspace that genuinely lives below /workspace can be mirrored safely.
-CONTAINERS_WORKSPACE_RESERVED_ROOTS: Final[tuple[str, ...]] = (
+# The workspace is mounted at its canonical host path in every mode, so its
+# target may not shadow a baked config/plugin path or the managed socket.
+WORKSPACE_RESERVED_ROOTS: Final[tuple[str, ...]] = (
     "/etc/opencode",
     "/opt/opencode",
     "/opt/mcp",
     "/run/opencode",
     "/run/opencode-container-engine.sock",
-    "/src",
 )
 
 GLOBAL_GIT_CONFIG_TARGET: Final[str] = "/run/opencode/gitconfig"
@@ -1295,10 +1292,10 @@ def main(argv: Sequence[str] | None = None) -> NoReturn:
     if not context.startswith("/"):
         context = invocation_root + "/" + context
 
-    # Workspace is mounted at /src for compatibility and normally at a stable,
-    # CWD-derived path for OpenCode2's project/session identity. Host-engine
-    # mode uses the canonical host path instead so bind mounts sent through the
-    # host socket remain meaningful.
+    # The workspace is mounted at its canonical host path in every mode. That
+    # path is also the working directory, so bind mounts the nested or host
+    # engine resolves name the same host directory, and a linked worktree's
+    # relative submodule pointers resolve inside the sandbox.
     workspace = jq_or(config.get("workspace"), "")
     if not isinstance(workspace, str):
         die("workspace must be a string")
@@ -1322,31 +1319,30 @@ def main(argv: Sequence[str] | None = None) -> NoReturn:
     # The CWD-derived project identity stays stable even when the launcher
     # itself lives elsewhere on PATH.
     project_key = hashlib.sha256(invocation_root.encode("utf-8")).hexdigest()[:16]
-    if host_engine:
-        # Bind paths sent through a mounted host container-engine socket are
-        # resolved by the host daemon. Mirror the workspace's canonical host
-        # path so $PWD-based nested mounts name a path that exists on that host.
-        if paths_overlap(workspace, *CONTAINERS_WORKSPACE_RESERVED_ROOTS):
-            die(f"containers workspace target {workspace} shadows a baked config/plugin path")
-        container_workspace = workspace
-    else:
-        container_workspace = "/workspace/" + project_key
+    # Mounting the workspace at its host path may not replace a baked
+    # config/plugin path, a container system path, or a managed mount target.
+    if paths_overlap(workspace, *WORKSPACE_RESERVED_ROOTS):
+        die(f"workspace {workspace} shadows a baked config/plugin path")
+    if paths_overlap(workspace, *SYSTEM_ROOTS):
+        die(f"workspace {workspace} shadows a container system path")
+    if paths_overlap(workspace, *MOUNT_TARGET_RESERVED_ROOTS):
+        die(f"workspace {workspace} shadows a container system path")
+    if nested_engine and paths_overlap(workspace, NESTED_STORAGE_MOUNT):
+        die(f"workspace {workspace} overlaps the nested engine's storage volume")
+    container_workspace = workspace
 
     workdir = jq_or(config.get("workdir"), "")
     if not isinstance(workdir, str):
         die("workdir must be a string")
-    if workdir == "" or workdir == "/src":
+    if workdir == "":
         workdir = container_workspace
-    elif workdir.startswith("/src/"):
-        workdir = container_workspace + "/" + workdir.removeprefix("/src/")
     elif workdir.startswith("/"):
-        pass  # other absolute workdirs are used as-is
+        pass  # absolute workdirs are checked against the workspace below
     else:
         workdir = container_workspace + "/" + workdir
-    if host_engine:
-        workdir = os.path.realpath(workdir)
-        if workdir != container_workspace and not workdir.startswith(container_workspace + "/"):
-            die(f"containers workdir {workdir} must stay within workspace {container_workspace}")
+    workdir = os.path.realpath(workdir)
+    if workdir != container_workspace and not workdir.startswith(container_workspace + "/"):
+        die(f"workdir {workdir} must stay within workspace {container_workspace}")
 
     # --- Build ------------------------------------------------------------------
     # Runs before run-flag assembly so `build` never depends on container run
@@ -1540,8 +1536,8 @@ def main(argv: Sequence[str] | None = None) -> NoReturn:
     if data_volume:
         if not VOLUME_NAME_RE.fullmatch(data_volume):
             die(f"invalid persistence.data_volume: {data_volume}")
-        if host_engine and paths_overlap(container_workspace, OPENCODE_DATA_MOUNT):
-            die(f"containers workspace {container_workspace} overlaps the OpenCode data mount")
+        if paths_overlap(container_workspace, OPENCODE_DATA_MOUNT):
+            die(f"workspace {container_workspace} overlaps the OpenCode data mount")
         # :U chowns the volume to the container's starting user. Nested mode
         # starts as root, so there it would recursively hand the user's data to
         # root; the image's user-owned mount point is copied up instead, and a
@@ -1566,11 +1562,9 @@ def main(argv: Sequence[str] | None = None) -> NoReturn:
     if sys.stdin.isatty() and sys.stdout.isatty():
         run_flags.append("-it")
 
-    # Keep /src as a compatibility alias while running OpenCode2 from the
-    # selected generated or host-identical project path.
+    # The workspace is mounted at its canonical host path and is the working
+    # directory in every mode.
     run_flags += [
-        "-v",
-        f"{workspace}:/src",
         "-v",
         f"{workspace}:{container_workspace}",
         "-w",
@@ -1691,9 +1685,9 @@ def main(argv: Sequence[str] | None = None) -> NoReturn:
             die(f"mount target {target} shadows a baked config/plugin path")
         if paths_overlap(target, *SYSTEM_ROOTS):
             die(f"mount target {target} shadows a container system path")
-        if host_engine and paths_overlap(target, container_workspace):
+        if paths_overlap(target, container_workspace):
             die(
-                f"mount target {target} overlaps the containers workspace mirror "
+                f"mount target {target} overlaps the workspace "
                 f"{container_workspace}"
             )
         if host_engine and paths_overlap(target, CONTAINER_SOCKET_TARGET):
@@ -1873,8 +1867,8 @@ def main(argv: Sequence[str] | None = None) -> NoReturn:
             die(f"git metadata directory {git_common_dir} shadows a baked config/plugin path")
         if paths_overlap(git_common_dir, *SYSTEM_ROOTS):
             die(f"git metadata directory {git_common_dir} shadows a container system path")
-        if host_engine and paths_overlap(git_common_dir, container_workspace):
-            die(f"git metadata directory {git_common_dir} overlaps the containers workspace mirror")
+        if paths_overlap(git_common_dir, container_workspace):
+            die(f"git metadata directory {git_common_dir} overlaps the workspace")
         if data_volume and paths_overlap(git_common_dir, OPENCODE_DATA_MOUNT):
             die(f"git metadata directory {git_common_dir} overlaps the OpenCode data mount")
         if host_engine and paths_overlap(git_common_dir, CONTAINER_SOCKET_TARGET):

@@ -52,14 +52,16 @@ global file.
 
 ## Files and Git
 
-The workspace is mounted at `/src` and at a stable project path under
-`/workspace/`. The stable path is the default working directory. Relative and
-`/src`-based workdirs are resolved beneath it. In [host mode](#host-mode) it is
-mirrored at its canonical host path instead, because the host engine resolves
-bind paths there.
+The workspace is mounted at its canonical host path in every container-access
+mode, and that path is the container's working directory. Relative `workdir`
+values resolve beneath it, and an absolute `workdir` must stay inside it. Keeping
+the host path means bind mounts the nested or host engine resolves name the same
+host directory.
 
 Linked Git worktrees are supported: the launcher validates the `.git` pointer
-and mounts external Git metadata at its original host path.
+and mounts the external Git common directory at its original host path. Because
+the workspace and that metadata keep their host paths, a submodule's relative
+`.git` pointer into the worktree's metadata resolves inside the sandbox too.
 
 If `$HOME/.gitconfig` exists, only that file is mounted read-only and exposed
 through `GIT_CONFIG_GLOBAL`. Includes, credential files, and helper programs
@@ -230,10 +232,11 @@ systemctl --user start podman.socket
 ```
 
 The socket is mounted at `/run/opencode-container-engine.sock`.
-The launcher sets `CONTAINER_HOST` and `DOCKER_HOST` automatically and uses the
-workspace's canonical host path as the workdir, so nested bind mounts using
-`$PWD` resolve correctly. `/src` remains available. Extra mounts cannot overlap
-this workspace mirror, and the workdir must stay inside it.
+The launcher sets `CONTAINER_HOST` and `DOCKER_HOST` automatically. The
+workspace is already mounted at its canonical host path (see
+[Files and Git](#files-and-git)), so nested bind mounts using `$PWD` resolve
+correctly. Extra mounts cannot overlap the workspace, and the workdir must stay
+inside it.
 
 **In host mode, socket access lets the sandbox control the host container
 engine**, including starting containers and bind-mounting any host path the host
@@ -277,7 +280,10 @@ shadowing one of them would replace the interpreter, the startup script, or the
 runtime beneath it before the sandbox's command runs. `/sys`, `/proc`, `/dev`,
 `/var/run`, `/var/lock`, and `/var/lib/rpm` are reserved too: the first three
 are the kernel's own filesystems, and the last three are paths the image
-resolves into `/run` or `/usr`. Explicit environment settings cannot override
+resolves into `/run` or `/usr`. The workspace target follows the same rules: it
+may not be at or contain a baked config/plugin path, a container system path, the
+managed engine socket, the OpenCode data mount, or the nested engine's storage
+volume. Explicit environment settings cannot override
 `HOME`, `PATH`, `XDG_*`, or `OPENCODE_*`, nor bash's readonly variables
 (`SHELLOPTS`, `BASHOPTS`, `BASH_VERSINFO`, `UID`, `EUID`, `PPID`), which the
 image's loader could not export.

@@ -52,13 +52,14 @@ the launcher from the host workspace root.
 - `image` is optional and defaults to `opencode2:latest`.
 - `build` is optional. `containerfile` and `context` resolve from the host
   workspace; `args` are passed as Podman build arguments.
-- `workspace` defaults to the host workspace root and is mounted at `/src`.
+- `workspace` defaults to the host workspace root. In every mode it is mounted
+  at its canonical host path, which is also the working directory.
 - When the workspace's `.git` is a file, the launcher validates its `gitdir`
   and mounts the external common metadata root at its matching absolute host
-  path. A stale or malformed worktree pointer is rejected.
-- Relative and `/src`-based `workdir` values resolve below the stable
-  `/workspace/<cwd-hash>` project path unless `containers` is `"host"`, which
-  mirrors the workspace at its canonical host path instead.
+  path, in every mode. A stale or malformed worktree pointer is rejected.
+  Submodule `.git` files resolve relative to the mounted workspace and metadata.
+- `workdir` resolves below the workspace's host path in every mode; a relative
+  value is joined to it, and an absolute value must stay inside it.
 - `containers` is optional. The default, `"nested"` (also spelled `true`), runs a
   rootless Podman engine inside the sandbox: own image store in the per-project
   `opencode2-containers-<cwd-hash>` volume at `/var/lib/opencode-containers`, own
@@ -77,24 +78,24 @@ the launcher from the host workspace root.
     filesystem-accessible rootless Podman socket over a rootless or system Docker
     socket, mounts only the selected socket at
     `/run/opencode-container-engine.sock`, and manages `CONTAINER_HOST` and
-    `DOCKER_HOST`. It also mirrors the workspace at its canonical host path and
-    resolves default, relative, and `/src`-based workdirs there because nested
-    bind paths are interpreted by the host engine. The workdir must remain within
-    that mirror, and additional mounts may not overlap it. Discovery checks the
+    `DOCKER_HOST`. The workspace is mounted at its canonical host path exactly as
+    in the other modes, so nested bind paths resolve through the host engine. The
+    workdir must remain within that workspace, and additional mounts may not
+    overlap it. Discovery checks the
     socket node and permissions, not API liveness. **Host mode gives sandbox
     processes control equivalent to the host container-engine user**, including
     host-path mounts and privileged containers; choose it only for trusted
-    repositories and images. Do not add manual socket, workspace-mirror, or
+    repositories and images. Do not add manual socket, workspace, or
     host-variable entries when using it.
   - `false` gives the sandbox no engine at all.
 - `mounts` entries contain `source`, optional `target`, and optional
   `read_only`. Relative sources resolve from the configured workspace. Do not
   mount host OpenCode state from effective XDG directories, `.agents`,
   `.claude`, or `.mcp` state, and do not target `/etc/opencode`,
-  `/opt/opencode`, `/opt/mcp`, `/run/opencode`, `/src`, or `/workspace`. In any
-  mode a target may also not be `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`,
-  `/etc`, or `/usr/local/libexec`: those hold the interpreter, the startup
-  script, and the runtime the sandbox starts with.
+  `/opt/opencode`, `/opt/mcp`, or `/run/opencode`. In any mode a target may also
+  not be `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, `/etc`, or
+  `/usr/local/libexec`: those hold the interpreter, the startup script, and the
+  runtime the sandbox starts with.
 - On every launch, a present `$HOME/.gitconfig` must resolve to a readable
   regular file. The launcher mounts only its canonical exact file read-only at
   `/run/opencode/gitconfig` and sets `GIT_CONFIG_GLOBAL` to that path; it mounts
@@ -122,8 +123,8 @@ the launcher from the host workspace root.
   the launcher persists both trees in one isolated volume by default. A fixed
   explicit name intentionally shares all of that state across projects; an
   empty string disables
-  persistence. The CWD-derived container workdir and volume remain stable even
-  when the launcher itself lives elsewhere on `PATH`.
+  persistence. The CWD-derived data volume name remains stable even when the
+  launcher itself lives elsewhere on `PATH`.
 - Model routing is read by the ai-devtools plugin from the workspace's
   `.opencode/aid.json`, else the user-global
   `${XDG_CONFIG_HOME:-$HOME/.config}/opencode2/aid.json`. The launcher mounts
