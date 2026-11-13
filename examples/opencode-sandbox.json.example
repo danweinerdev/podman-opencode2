@@ -19,7 +19,8 @@
   },
   "provider_secrets": ["openai-api-key", "deepseek-api-key"],
   "persistence": {
-    "data_volume": "my-project-opencode2-data"
+    "data_volume": "my-project-opencode2-data",
+    "seed_credentials": false
   },
   "network": "slirp4netns",
   "capabilities": ["NET_RAW"],

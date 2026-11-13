@@ -127,6 +127,15 @@ the launcher from the host workspace root.
   empty string disables
   persistence. The CWD-derived data volume name remains stable even when the
   launcher itself lives elsewhere on `PATH`.
+- `persistence.seed_credentials` defaults to `false`. When `true`, the launcher
+  copies all of the host's OpenCode credentials into the project data volume
+  once, when that volume holds none yet, by piping `opencode2`/`opencode auth
+  export` into `opencode2 --standalone auth import`. The copy includes OAuth
+  refresh tokens; refreshes inside the sandbox do not flow back to the host, and
+  a provider that rotates refresh tokens may invalidate one side's copy, which a
+  re-login fixes. It is ignored with a notice when `persistence.data_volume` is
+  `""`, applies in every mode, and must be a boolean. Never put credential
+  values in the config; seeding reads them from the host CLI at launch.
 - Model routing is read by the ai-devtools plugin from the workspace's
   `.opencode/aid.json`, else the user-global
   `${XDG_CONFIG_HOME:-$HOME/.config}/opencode/aid.json`. The launcher mounts

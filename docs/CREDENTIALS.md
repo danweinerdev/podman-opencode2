@@ -89,5 +89,38 @@ leave the file behind until you remove the directory yourself.
 ## Saved logins
 
 Interactive provider logins and sessions persist in this project's named volume.
-The launcher does not import host OpenCode application state. See
+The launcher does not import host OpenCode application state by default. See
 [saved state](SANDBOX.md#saved-state) before moving a project or sharing a volume.
+
+### Seed credentials from the host
+
+Opt in per project with:
+
+```json
+{
+  "schema_version": 1,
+  "persistence": {
+    "seed_credentials": true
+  }
+}
+```
+
+When the project's data volume holds no credentials yet, the launcher copies
+**all** of the host's OpenCode credentials into it, then starts the container
+normally. It reads the host store with `<opencode2|opencode> auth export` and
+pipes the result into the project volume with `opencode2 --standalone auth
+import`. Existing credentials in the volume are never overwritten, so seeding
+happens once per new volume.
+
+The copy includes every saved login, including OAuth refresh tokens. Changes
+made inside the sandbox stay inside the volume: a refreshed credential is not
+written back to the host. Some OAuth providers rotate refresh tokens, so a
+refresh inside the sandbox can invalidate the host's copy, or a later host
+refresh can invalidate the sandbox's. Re-login on the side that stopped working
+to fix it.
+
+`persistence.seed_credentials` must be a boolean and defaults to `false`. It is
+ignored with one notice when persistence is disabled (`persistence.data_volume`
+is `""`), and it applies in every container-access mode. If the host CLI is
+absent, the volume is not empty, or the export/import fails, the launcher warns
+once and continues the launch without seeding. No credential value is printed.
