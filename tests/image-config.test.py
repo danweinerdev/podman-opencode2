@@ -12,6 +12,7 @@ import json
 import re
 import shlex
 import sys
+import types
 from pathlib import Path
 from typing import NoReturn
 
@@ -218,12 +219,16 @@ def check_runtime_tools(source: str) -> None:
 
 
 def load_launcher() -> object:
+    # The launcher has no .py suffix, so it is loaded with an explicit source
+    # loader. Building the module directly (rather than via spec_from_loader)
+    # keeps this valid against typeshed's LoaderProtocol on Python 3.15+.
     loader = importlib.machinery.SourceFileLoader("launcher", str(LAUNCHER))
-    spec = importlib.util.spec_from_loader("launcher", loader)
-    if spec is None or spec.loader is None:
-        fail(f"unable to load {LAUNCHER}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = types.ModuleType("launcher")
+    module.__file__ = str(LAUNCHER)
+    try:
+        loader.exec_module(module)
+    except (OSError, SyntaxError) as exc:
+        fail(f"unable to load {LAUNCHER}: {exc}")
     return module
 
 
