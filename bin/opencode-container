@@ -126,6 +126,9 @@ LOCAL_PROVIDERS_LABEL: Final[str] = "io.opencode.local-providers-sha256"
 # `make` does — means the builder never recorded catalog provenance.
 PROVIDER_DIGEST_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
 OPENCODE_DATA_MOUNT: Final[str] = "/var/lib/opencode-data"
+# How long each credential-seeding step may run before the launcher gives up
+# and continues the launch.
+SEED_CREDENTIALS_TIMEOUT: Final[int] = 30
 # The image's ENTRYPOINT: the cgroup/privilege prelude. Nested mode pins it
 # explicitly so a derived image's own ENTRYPOINT cannot skip the prelude.
 ENTRYPOINT_TARGET: Final[str] = "/usr/local/libexec/opencode-entrypoint"
@@ -332,6 +335,12 @@ def die(message: str) -> NoReturn:
 
 def warn(message: str) -> None:
     print(f"{PROG}: warning: {message}", file=sys.stderr)
+
+
+def notice(message: str) -> None:
+    # A one-off status or skip message, not a failure. Status belongs on stderr
+    # so a piped container command's stdout is unchanged.
+    print(f"{PROG}: {message}", file=sys.stderr)
 
 
 def cleanup_temp_files() -> None:
@@ -1209,6 +1218,169 @@ def handle_secrets(args: argparse.Namespace) -> NoReturn:
         secret_remove(name)
 
 
+# --- Credential seeding ----------------------------------------------------------
+def first_line(raw: bytes) -> str:
+    """The first non-empty line of process output, for a one-line report."""
+    text = raw.decode("utf-8", "replace")
+    for line in text.splitlines():
+        if line.strip():
+            return line.strip()
+    return ""
+
+
+def seed_credentials_from_host(
+    image: str, data_volume: str, nested_engine: bool
+) -> None:
+    """Copy every host OpenCode credential into a new project data volume.
+
+    The check and the import are one-shot containers running the same image,
+    data volume and XDG locations as the main run. The host CLI's export output
+    goes straight into the import container's stdin; neither stream is printed.
+    Any failure warns once and returns, leaving the launch to continue.
+    """
+    podman = podman_executable()
+    # Match the main run: nested mode may not use :U (it starts as root), and
+    # the data mount is the same either way.
+    mount = f"{data_volume}:{OPENCODE_DATA_MOUNT}" + ("" if nested_engine else ":U")
+    bootstrap = [
+        podman,
+        "run",
+        "--rm",
+        "--userns=keep-id",
+        "--network",
+        "none",
+        "--entrypoint",
+        "",
+        "-v",
+        mount,
+        "-e",
+        f"XDG_DATA_HOME={OPENCODE_DATA_MOUNT}",
+        "-e",
+        f"XDG_STATE_HOME={OPENCODE_DATA_MOUNT}/state",
+    ]
+
+    try:
+        listing = subprocess.run(
+            [*bootstrap, image, "opencode2", "--standalone", "auth", "list", "--format", "json"],
+            capture_output=True,
+            timeout=SEED_CREDENTIALS_TIMEOUT,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        warn(
+            f"credential seeding skipped: auth list timed out after "
+            f"{SEED_CREDENTIALS_TIMEOUT}s"
+        )
+        return
+    except OSError as exc:
+        warn(f"credential seeding skipped: unable to run auth list: {exc}")
+        return
+    if listing.returncode != 0:
+        detail = first_line(listing.stderr)
+        warn(
+            f"credential seeding skipped: auth list exited {listing.returncode}"
+            + (f": {detail}" if detail else "")
+        )
+        return
+    try:
+        stored = json.loads(listing.stdout)
+    except ValueError:
+        warn("credential seeding skipped: auth list returned unparseable JSON")
+        return
+    if not isinstance(stored, list):
+        warn("credential seeding skipped: auth list returned unparseable JSON")
+        return
+    if stored:
+        return
+
+    host_cli = shutil.which("opencode2") or shutil.which("opencode")
+    if host_cli is None:
+        notice(
+            "persistence.seed_credentials is enabled, but no host opencode2 or "
+            "opencode CLI was found; skipping"
+        )
+        return
+
+    try:
+        exporter = subprocess.Popen(
+            [host_cli, "auth", "export"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except OSError as exc:
+        warn(f"credential seeding skipped: unable to run {host_cli} auth export: {exc}")
+        return
+
+    assert exporter.stdout is not None
+    try:
+        importer = subprocess.Popen(
+            [*bootstrap, "-i", image, "opencode2", "--standalone", "auth", "import"],
+            stdin=exporter.stdout,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except OSError as exc:
+        exporter.stdout.close()
+        exporter.kill()
+        exporter.wait()
+        warn(f"credential seeding skipped: unable to run auth import: {exc}")
+        return
+    # The import container holds the only reader now; EOF reaches it when the
+    # exporter exits.
+    exporter.stdout.close()
+
+    try:
+        import_out, import_err = importer.communicate(timeout=SEED_CREDENTIALS_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        importer.kill()
+        importer.communicate()
+        exporter.kill()
+        exporter.wait()
+        warn(
+            f"credential seeding skipped: auth import timed out after "
+            f"{SEED_CREDENTIALS_TIMEOUT}s"
+        )
+        return
+
+    try:
+        export_rc = exporter.wait(timeout=SEED_CREDENTIALS_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        exporter.kill()
+        exporter.wait()
+        warn(
+            f"credential seeding skipped: auth export timed out after "
+            f"{SEED_CREDENTIALS_TIMEOUT}s"
+        )
+        return
+    export_err = exporter.stderr.read() if exporter.stderr is not None else b""
+
+    if export_rc != 0:
+        detail = first_line(export_err)
+        warn(
+            f"credential seeding skipped: auth export exited {export_rc}"
+            + (f": {detail}" if detail else "")
+        )
+        return
+    if importer.returncode != 0:
+        detail = first_line(import_err)
+        warn(
+            f"credential seeding skipped: auth import exited {importer.returncode}"
+            + (f": {detail}" if detail else "")
+        )
+        return
+    summary = first_line(import_out)
+    if not summary:
+        # The preview CLI writes its import summary to stderr.
+        for line in import_err.decode("utf-8", "replace").splitlines():
+            if line.strip().startswith("Imported"):
+                summary = line.strip()
+                break
+    if not summary:
+        warn("credential seeding skipped: auth import produced no summary line")
+        return
+    notice(f"seeded OpenCode credentials from the host: {summary}")
+
+
 # --- Main ------------------------------------------------------------------------
 def main(argv: Sequence[str] | None = None) -> NoReturn:
     args: argparse.Namespace = build_parser().parse_args(
@@ -1540,6 +1712,9 @@ def main(argv: Sequence[str] | None = None) -> NoReturn:
     data_volume = jq_or(persistence.get("data_volume"), f"opencode2-data-{project_key}")
     if not isinstance(data_volume, str):
         die("persistence.data_volume must be a string")
+    seed_credentials = persistence.get("seed_credentials", False)
+    if not isinstance(seed_credentials, bool):
+        die("persistence.seed_credentials must be a boolean")
     if data_volume:
         if not VOLUME_NAME_RE.fullmatch(data_volume):
             die(f"invalid persistence.data_volume: {data_volume}")
@@ -1564,6 +1739,15 @@ def main(argv: Sequence[str] | None = None) -> NoReturn:
             "-e",
             f"OPENCODE_DATA_VOLUME={data_volume}",
         ]
+
+    if seed_credentials:
+        if data_volume:
+            seed_credentials_from_host(image, data_volume, nested_engine)
+        else:
+            notice(
+                "persistence.seed_credentials is ignored because "
+                "persistence.data_volume is empty"
+            )
 
     # TTY only when interactive (stdin and stdout are both a terminal).
     if sys.stdin.isatty() and sys.stdout.isatty():

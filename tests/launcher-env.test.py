@@ -21,6 +21,7 @@ LAUNCHER = ROOT / "bin" / "opencode-container"
 
 MOCK_PODMAN = """\
 #!/usr/bin/env python3
+import json
 import os
 import sys
 
@@ -65,6 +66,25 @@ if argv[:2] == ["secret", "rm"]:
     sys.exit(0)
 
 if argv and argv[0] == "run":
+    # Every run is recorded, including the launcher's one-shot credential
+    # container, so a test can assert how many containers a launch starts.
+    if os.environ.get("RUN_LOG"):
+        with open(os.environ["RUN_LOG"], "a", encoding="utf-8") as stream:
+            stream.write(json.dumps(argv) + "\\n")
+    if argv[-6:] == [
+        "opencode2", "--standalone", "auth", "list", "--format", "json"
+    ]:
+        sys.stdout.write(os.environ.get("AUTH_LIST_STDOUT", "[]"))
+        sys.stderr.write(os.environ.get("AUTH_LIST_STDERR", ""))
+        sys.exit(int(os.environ.get("AUTH_LIST_RC", "0")))
+    if argv[-4:] == ["opencode2", "--standalone", "auth", "import"]:
+        payload = sys.stdin.buffer.read()
+        if os.environ.get("AUTH_IMPORT_STDIN_LOG"):
+            with open(os.environ["AUTH_IMPORT_STDIN_LOG"], "wb") as stream:
+                stream.write(payload)
+        sys.stdout.write(os.environ.get("AUTH_IMPORT_STDOUT", ""))
+        sys.stderr.write(os.environ.get("AUTH_IMPORT_STDERR", "Imported 0 credentials\\n"))
+        sys.exit(int(os.environ.get("AUTH_IMPORT_RC", "0")))
     with open(os.environ["ARGV_LOG"], "w", encoding="utf-8") as stream:
         for arg in argv:
             stream.write(arg + "\\n")
@@ -144,6 +164,23 @@ if common and "rev-parse" in argv and "--git-common-dir" in argv:
 sys.exit(subprocess.call(["/usr/bin/git", *argv]))
 """
 
+# Stands in for the host's OpenCode CLI: only `auth export` is supported, and
+# the fake credential bytes come from the test environment.
+MOCK_HOST_CLI = """\
+#!/usr/bin/env python3
+import os
+import sys
+
+argv = sys.argv[1:]
+with open(os.environ["HOST_CLI_LOG"], "a", encoding="utf-8") as stream:
+    stream.write(" ".join(argv) + "\\n")
+if argv == ["auth", "export"]:
+    sys.stdout.write(os.environ.get("HOST_EXPORT_STDOUT", "[]"))
+    sys.stderr.write(os.environ.get("HOST_EXPORT_STDERR", ""))
+    sys.exit(int(os.environ.get("HOST_EXPORT_RC", "0")))
+sys.exit(2)
+"""
+
 
 def fail(message: str) -> None:
     print(message, file=sys.stderr)
@@ -190,16 +227,20 @@ class Suite:
     def __init__(self, tmp: Path) -> None:
         self.tmp = tmp
         self.bin = tmp / "bin"
+        self.hostbin = tmp / "hostbin"
         self.workspace = tmp / "workspace"
         self.test_home = tmp / "test-home"
         self.argv_log = tmp / "argv.log"
+        self.run_log = tmp / "run.log"
         self.env_log = tmp / "env.log"
         self.agent_env_log = tmp / "agent-env.bin"
         self.agent_env_meta_log = tmp / "agent-env.meta"
         self.build_argv_log = tmp / "build-argv.log"
         self.secret_log = tmp / "secret.log"
         self.secret_value_log = tmp / "secret-value"
-        for path in (self.bin, self.workspace, self.test_home):
+        self.auth_import_stdin_log = tmp / "auth-import.stdin"
+        self.host_cli_log = tmp / "host-cli.log"
+        for path in (self.bin, self.hostbin, self.workspace, self.test_home):
             path.mkdir()
         self._write_mocks()
         self._write_workspace_config()
@@ -240,12 +281,15 @@ class Suite:
         env["HOME"] = str(self.test_home)
         env["PATH"] = f"{self.bin}:{env.get('PATH', '')}"
         env["ARGV_LOG"] = str(self.argv_log)
+        env["RUN_LOG"] = str(self.run_log)
         env["ENV_LOG"] = str(self.env_log)
         env["AGENT_ENV_LOG"] = str(self.agent_env_log)
         env["AGENT_ENV_META_LOG"] = str(self.agent_env_meta_log)
         env["BUILD_ARGV_LOG"] = str(self.build_argv_log)
         env["SECRET_LOG"] = str(self.secret_log)
         env["SECRET_VALUE_LOG"] = str(self.secret_value_log)
+        env["AUTH_IMPORT_STDIN_LOG"] = str(self.auth_import_stdin_log)
+        env["HOST_CLI_LOG"] = str(self.host_cli_log)
         if extra:
             env.update(extra)
         return env
@@ -362,6 +406,37 @@ class Suite:
     def forget_agent_env(self) -> None:
         self.agent_env_log.unlink(missing_ok=True)
         self.agent_env_meta_log.unlink(missing_ok=True)
+
+    def controlled_path(self) -> str:
+        # A PATH that can only find the mocks and the system tools, so a real
+        # host OpenCode CLI elsewhere on the developer's PATH cannot satisfy a
+        # test that expects it to be absent.
+        return f"{self.hostbin}:{self.bin}:/usr/bin:/bin"
+
+    def install_host_cli(self, name: str = "opencode2") -> None:
+        path = self.hostbin / name
+        path.write_text(MOCK_HOST_CLI, encoding="utf-8")
+        os.chmod(path, 0o755)
+
+    def forget_runs(self) -> None:
+        self.run_log.unlink(missing_ok=True)
+        self.host_cli_log.unlink(missing_ok=True)
+        self.auth_import_stdin_log.unlink(missing_ok=True)
+
+    def runs(self) -> list[list[str]]:
+        if not self.run_log.exists():
+            return []
+        return [json.loads(line) for line in self.run_log.read_text(encoding="utf-8").splitlines()]
+
+    def host_cli_lines(self) -> list[str]:
+        if not self.host_cli_log.exists():
+            return []
+        return self.host_cli_log.read_text(encoding="utf-8").splitlines()
+
+    def auth_import_stdin(self) -> bytes:
+        if not self.auth_import_stdin_log.exists():
+            fail("no credential import container received stdin")
+        return self.auth_import_stdin_log.read_bytes()
 
     def set_config(self, path: Path, **changes: object) -> None:
         write_json(path, load_json(path) | changes)
@@ -1802,6 +1877,266 @@ class Suite:
         self.has_line(argv, "project-opencode-data:/var/lib/opencode-data:U")
         self.has_line(argv, "XDG_STATE_HOME=/var/lib/opencode-data/state")
 
+    def _seed_credentials(self) -> None:
+        # The opt-in copies the host's whole credential set into a new data
+        # volume. Every case uses fake JSON; no real credential is handled.
+        creds = '[{"type":"api","key":"fake-provider","access":"FAKE_CREDENTIAL_SENTINEL"}]'
+
+        def workspace(name: str, persistence: object) -> Path:
+            root = self.tmp / f"seed-{name}"
+            root.mkdir()
+            write_json(root / ".opencode-sandbox.json", {
+                "image": "opencode2:test",
+                "workspace": ".",
+                "containers": False,
+                "command": ["/bin/true"],
+                "persistence": persistence,
+            })
+            return root
+
+        def seed_env(**extra: str) -> dict[str, str]:
+            return {"PATH": self.controlled_path(), **extra}
+
+        def pair(argv: list[str], flag: str, value: str, label: str) -> None:
+            if not has_pair(argv, flag, value):
+                fail(f"{label} argv lacks {flag} {value!r}: {argv}")
+
+        def assert_one_shot(argv: list[str], volume: str, label: str) -> None:
+            # The seeding container runs the same image against the same data
+            # volume and XDG locations, with the image entrypoint bypassed and
+            # no network.
+            if argv[0] != "run":
+                fail(f"{label} is not a podman run: {argv}")
+            if "--rm" not in argv:
+                fail(f"{label} is not transient: {argv}")
+            if "--userns=keep-id" not in argv:
+                fail(f"{label} does not keep the user namespace: {argv}")
+            pair(argv, "--entrypoint", "", label)
+            pair(argv, "--network", "none", label)
+            pair(argv, "-v", f"{volume}:/var/lib/opencode-data:U", label)
+            pair(argv, "-e", "XDG_DATA_HOME=/var/lib/opencode-data", label)
+            pair(argv, "-e", "XDG_STATE_HOME=/var/lib/opencode-data/state", label)
+            if "opencode2:test" not in argv:
+                fail(f"{label} used the wrong image: {argv}")
+
+        # Off by default: a launch starts exactly one container, the main run,
+        # and never asks the host CLI anything.
+        self.install_host_cli()
+        self.forget_runs()
+        self.run_ok(workspace("off", {"data_volume": "seed-off-volume"}),
+                    extra_env=seed_env(HOST_EXPORT_STDOUT=creds))
+        if len(self.runs()) != 1:
+            fail(f"credential seeding ran without being enabled: {self.runs()}")
+        if self.host_cli_lines():
+            fail("credential seeding exported host credentials without being enabled")
+
+        # Enabled against an empty store: export once, pipe those exact bytes
+        # into the import container, then run the main container.
+        self.forget_runs()
+        empty = workspace("empty", {
+            "data_volume": "seed-empty-volume",
+            "seed_credentials": True,
+        })
+        proc = self.run_ok(empty, extra_env=seed_env(
+            HOST_EXPORT_STDOUT=creds,
+            AUTH_LIST_STDOUT="[]",
+            AUTH_IMPORT_STDERR="Imported 1 credentials\n",
+        ))
+        runs = self.runs()
+        if len(runs) != 3:
+            fail(f"expected list, import and main runs; got {len(runs)}: {runs}")
+        listing, importing, main_run = runs
+        assert_one_shot(listing, "seed-empty-volume", "credential list")
+        if listing[-6:] != [
+            "opencode2", "--standalone", "auth", "list", "--format", "json"
+        ]:
+            fail(f"credential list ran the wrong command: {listing}")
+        if "-i" in listing:
+            fail(f"credential list must not attach stdin: {listing}")
+        assert_one_shot(importing, "seed-empty-volume", "credential import")
+        if importing[-4:] != ["opencode2", "--standalone", "auth", "import"]:
+            fail(f"credential import ran the wrong command: {importing}")
+        if "-i" not in importing:
+            fail(f"credential import must attach stdin: {importing}")
+        if self.auth_import_stdin() != creds.encode():
+            fail("the import container did not receive the export's exact bytes")
+        if self.host_cli_lines() != ["auth export"]:
+            fail(f"unexpected host CLI invocation: {self.host_cli_lines()}")
+        if main_run[-1] != "/bin/true":
+            fail(f"the main run did not finish the launch: {main_run}")
+        if ("seeded OpenCode credentials from the host: Imported 1 credentials"
+                not in proc.stderr):
+            fail("the launcher did not report the import summary")
+        # The credentials travel only through the pipe: never on a command
+        # line, and never in the environment of any container.
+        if "FAKE_CREDENTIAL_SENTINEL" in json.dumps(runs):
+            fail("a credential value appeared in a container argument list")
+        if "FAKE_CREDENTIAL_SENTINEL" in self.env_log.read_text(encoding="utf-8"):
+            fail("a credential value appeared in a container environment")
+
+        # `opencode` is the fallback CLI name when `opencode2` is absent.
+        self.forget_runs()
+        (self.hostbin / "opencode2").unlink()
+        self.install_host_cli("opencode")
+        self.run_ok(workspace("fallback", {
+            "data_volume": "seed-fallback-volume",
+            "seed_credentials": True,
+        }), extra_env=seed_env(
+            HOST_EXPORT_STDOUT=creds,
+            AUTH_LIST_STDOUT="[]",
+            AUTH_IMPORT_STDERR="Imported 1 credentials\n",
+        ))
+        if self.host_cli_lines() != ["auth export"]:
+            fail("the fallback host CLI was not used")
+        (self.hostbin / "opencode").unlink()
+
+        # A store that already holds credentials is left alone: no export and
+        # no import, and no message.
+        self.install_host_cli()
+        self.forget_runs()
+        proc = self.run_ok(workspace("nonempty", {
+            "data_volume": "seed-nonempty-volume",
+            "seed_credentials": True,
+        }), extra_env=seed_env(
+            HOST_EXPORT_STDOUT=creds,
+            AUTH_LIST_STDOUT='[{"type":"api","key":"fake-provider"}]',
+        ))
+        if len(self.runs()) != 2:
+            fail(f"a non-empty credential store still seeded: {self.runs()}")
+        if self.host_cli_lines():
+            fail("host credentials were exported for a non-empty store")
+        if self.auth_import_stdin_log.exists():
+            fail("a non-empty credential store still ran an import")
+        if "seeded OpenCode credentials" in proc.stderr:
+            fail("a non-empty credential store was reported as seeded")
+
+        # No host CLI: one notice, and the launch proceeds normally.
+        self.forget_runs()
+        (self.hostbin / "opencode2").unlink()
+        proc = self.run_ok(workspace("no-cli", {
+            "data_volume": "seed-no-cli-volume",
+            "seed_credentials": True,
+        }), extra_env=seed_env(AUTH_LIST_STDOUT="[]"))
+        if "no host opencode2 or opencode CLI was found" not in proc.stderr:
+            fail("the launcher did not notice the missing host CLI")
+        if len(self.runs()) != 2:
+            fail(f"a missing host CLI changed the launch: {self.runs()}")
+        if self.auth_import_stdin_log.exists():
+            fail("a missing host CLI still ran an import")
+
+        # An export failure warns once, naming the exit status and the first
+        # stderr line, and never echoes the export's stdout.
+        self.install_host_cli()
+        self.forget_runs()
+        proc = self.run_ok(workspace("export-fail", {
+            "data_volume": "seed-export-fail-volume",
+            "seed_credentials": True,
+        }), extra_env=seed_env(
+            HOST_EXPORT_STDOUT=creds,
+            HOST_EXPORT_STDERR="export service unavailable\nsecond line\n",
+            HOST_EXPORT_RC="1",
+            AUTH_LIST_STDOUT="[]",
+        ))
+        if "auth export exited 1" not in proc.stderr:
+            fail("an export failure did not report the exit status")
+        if "export service unavailable" not in proc.stderr:
+            fail("an export failure did not report its first stderr line")
+        if "second line" in proc.stderr:
+            fail("an export failure reported more than the first stderr line")
+        if "FAKE_CREDENTIAL_SENTINEL" in proc.stderr:
+            fail("an export failure echoed the export's stdout")
+        if "seeded OpenCode credentials" in proc.stderr:
+            fail("a failed export was reported as seeded")
+        if len(self.runs()) != 3:
+            fail(f"a failed export prevented the launch: {self.runs()}")
+
+        # An import failure warns once and the launch continues.
+        self.forget_runs()
+        proc = self.run_ok(workspace("import-fail", {
+            "data_volume": "seed-import-fail-volume",
+            "seed_credentials": True,
+        }), extra_env=seed_env(
+            HOST_EXPORT_STDOUT=creds,
+            AUTH_LIST_STDOUT="[]",
+            AUTH_IMPORT_STDERR="invalid credentials json\nsecond line\n",
+            AUTH_IMPORT_RC="1",
+        ))
+        if "auth import exited 1" not in proc.stderr:
+            fail("an import failure did not report the exit status")
+        if "invalid credentials json" not in proc.stderr:
+            fail("an import failure did not report its first stderr line")
+        if "second line" in proc.stderr:
+            fail("an import failure reported more than the first stderr line")
+        if "seeded OpenCode credentials" in proc.stderr:
+            fail("a failed import was reported as seeded")
+
+        # Unparseable list output warns once and skips the export.
+        self.forget_runs()
+        proc = self.run_ok(workspace("bad-list", {
+            "data_volume": "seed-bad-list-volume",
+            "seed_credentials": True,
+        }), extra_env=seed_env(
+            HOST_EXPORT_STDOUT=creds,
+            AUTH_LIST_STDOUT="not json",
+        ))
+        if "auth list returned unparseable JSON" not in proc.stderr:
+            fail("unparseable list output was not reported")
+        if self.host_cli_lines():
+            fail("host credentials were exported after unparseable list output")
+        if len(self.runs()) != 2:
+            fail(f"unparseable list output prevented the launch: {self.runs()}")
+
+        # A failing list warns with its status and first stderr line.
+        self.forget_runs()
+        proc = self.run_ok(workspace("list-fail", {
+            "data_volume": "seed-list-fail-volume",
+            "seed_credentials": True,
+        }), extra_env=seed_env(
+            AUTH_LIST_STDOUT="",
+            AUTH_LIST_STDERR="store error\nsecond line\n",
+            AUTH_LIST_RC="1",
+        ))
+        if "auth list exited 1" not in proc.stderr:
+            fail("a list failure did not report the exit status")
+        if "store error" not in proc.stderr:
+            fail("a list failure did not report its first stderr line")
+        if "second line" in proc.stderr:
+            fail("a list failure reported more than the first stderr line")
+        if len(self.runs()) != 2:
+            fail(f"a list failure prevented the launch: {self.runs()}")
+
+        # Persistence disabled: one notice, and no seeding container.
+        self.forget_runs()
+        proc = self.run_ok(workspace("disabled", {
+            "data_volume": "",
+            "seed_credentials": True,
+        }), extra_env=seed_env(AUTH_LIST_STDOUT="[]"))
+        if "persistence.seed_credentials is ignored" not in proc.stderr:
+            fail("seeding was not noticed as ignored without persistence")
+        if len(self.runs()) != 1:
+            fail(f"seeding ran without a data volume: {self.runs()}")
+
+        # Anything but a JSON boolean is refused before any container starts.
+        for name, value in (
+            ("string", "true"),
+            ("number", 1),
+            ("null", None),
+            ("array", []),
+            ("object", {}),
+        ):
+            self.forget_runs()
+            self.run_fail(
+                workspace(f"invalid-{name}", {
+                    "data_volume": "seed-invalid-volume",
+                    "seed_credentials": value,
+                }),
+                f"launcher accepted a {name} persistence.seed_credentials",
+                extra_env=seed_env(),
+                stderr_contains="persistence.seed_credentials must be a boolean",
+            )
+            if self.runs():
+                fail("a non-boolean seed_credentials still started a container")
+
     def _provider_catalog_runtime(self) -> None:
         # Validate and mount the user-wide catalog from its canonical host path
         # on every launch, including when the selected image already exists.
@@ -2220,6 +2555,7 @@ def main() -> None:
         suite._partial_config(default_home, default_workspace)
         suite._podman_secrets(default_home, default_workspace)
         suite._secrets_subcommand(default_home, default_workspace)
+        suite._seed_credentials()
         suite._data_volume_override(default_home, default_workspace)
         suite._provider_catalog_runtime()
         suite._provider_catalog_unstamped_image()

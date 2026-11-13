@@ -35,6 +35,7 @@ adapt its secret selections and volume name before using it.
 | `env.set` | Literal environment values. |
 | `provider_secrets` | Keys this project can use; see [credentials](CREDENTIALS.md). |
 | `persistence.data_volume` | Override the project's saved-state volume. An empty string disables persistence. |
+| `persistence.seed_credentials` | When `true`, copy all host OpenCode credentials into the project volume once, when that volume holds none yet. Defaults to `false`; a non-boolean value is rejected. Ignored with a notice when `persistence.data_volume` is empty. See [saved logins](CREDENTIALS.md#saved-logins). |
 | `network` | Optional Podman network mode, such as `slirp4netns`. |
 | `capabilities` | Extra capabilities, drawn from a fixed allow-list. See [capabilities](#capabilities). |
 | `seccomp` | Main-sandbox syscall policy. Missing or `null` keeps the container engine default; `"unconfined"` disables seccomp filtering; any other nonempty string is a profile path resolved from this config's directory. |
