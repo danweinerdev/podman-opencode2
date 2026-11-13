@@ -3,10 +3,7 @@
   "image": "opencode2:latest",
   "build": {
     "containerfile": "Containerfile",
-    "context": ".",
-    "args": {
-      "OPENCODE2_VERSION": "2.3.0"
-    }
+    "context": "."
   },
   "workspace": ".",
   "containers": "nested",
