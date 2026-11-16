@@ -84,7 +84,7 @@ RUN set -eux; \
 # pinned ref so a plain commit SHA works without server-side
 # uploadpack.allowReachableSHA1InWant.
 # renovate: repo=danweinerdev/code-graph-mcp branch=main
-ARG CODE_GRAPH_MCP_REF=9bb7b6bf47c12f48cdce57b2762881692b6c60b3
+ARG CODE_GRAPH_MCP_REF=3c0492d99618d65af81d12ef7acec1de83d720a2
 RUN set -eux; \
     git clone --filter=blob:none --no-tags \
         https://github.com/danweinerdev/code-graph-mcp.git /tmp/code-graph-mcp; \
@@ -113,7 +113,7 @@ RUN set -eux; \
 # search-mcp: pinned server binary + its .opencode-plugin tree
 # (search-mcp.js + skills/ + commands/).
 # renovate: repo=danweinerdev/search-mcp branch=main
-ARG SEARCH_MCP_REF=89891c8a8fdcaea6b8ab28e60441c01227f54306
+ARG SEARCH_MCP_REF=8fbec71db75159e4e31a9cb069b7c4ee9f669510
 RUN set -eux; \
     git clone --filter=blob:none --no-tags \
         https://github.com/danweinerdev/search-mcp.git /tmp/search-mcp; \
